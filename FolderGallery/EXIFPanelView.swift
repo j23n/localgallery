@@ -1,52 +1,66 @@
 import SwiftUI
 import MapKit
 
-struct EXIFPanelView: View {
+struct EXIFContentView: View {
     let photo: PhotoFile
-    @EnvironmentObject var manager: GalleryManager
-    @State private var exifData: EXIFData?
-    @State private var isLoading = true
+    let exifData: EXIFData?
+    let isLoading: Bool
 
     var body: some View {
-        NavigationStack {
-            Form {
-                Section("File") {
-                    infoRow("Filename", value: photo.filename)
-                    infoRow("Dimensions", value: dimensionsText)
-                    infoRow("File Size", value: formattedFileSize(photo.fileSize))
-                    infoRow("Date Taken", value: formattedDate)
-                }
+        VStack(spacing: 0) {
+            // Pull handle hint
+            Capsule()
+                .fill(Color(.systemGray3))
+                .frame(width: 36, height: 5)
+                .padding(.top, 12)
+                .padding(.bottom, 16)
 
-                Section("Camera") {
-                    infoRow("Camera", value: cameraText)
-                    infoRow("Lens", value: exifData?.lens)
-                    infoRow("Aperture", value: apertureText)
-                    infoRow("Shutter Speed", value: shutterSpeedText)
-                    infoRow("ISO", value: exifData?.iso.map { "\($0)" })
-                }
+            if isLoading {
+                ProgressView()
+                    .frame(maxWidth: .infinity, minHeight: 200)
+            } else {
+                VStack(alignment: .leading, spacing: 20) {
+                    section("File") {
+                        infoRow("Filename", value: photo.filename)
+                        infoRow("Dimensions", value: dimensionsText)
+                        infoRow("File Size", value: formattedFileSize(photo.fileSize))
+                        infoRow("Date Taken", value: formattedDate)
+                    }
 
-                Section("Location") {
-                    if let lat = exifData?.gpsLatitude, let lon = exifData?.gpsLongitude {
-                        infoRow("Coordinates", value: String(format: "%.5f, %.5f", lat, lon))
-                        mapView(latitude: lat, longitude: lon)
-                    } else {
-                        infoRow("Coordinates", value: nil)
+                    section("Camera") {
+                        infoRow("Camera", value: cameraText)
+                        infoRow("Lens", value: exifData?.lens)
+                        infoRow("Aperture", value: apertureText)
+                        infoRow("Shutter Speed", value: shutterSpeedText)
+                        infoRow("ISO", value: exifData?.iso.map { "\($0)" })
+                    }
+
+                    section("Location") {
+                        if let lat = exifData?.gpsLatitude, let lon = exifData?.gpsLongitude {
+                            infoRow("Coordinates", value: String(format: "%.5f, %.5f", lat, lon))
+                            mapView(latitude: lat, longitude: lon)
+                        } else {
+                            infoRow("Coordinates", value: nil)
+                        }
                     }
                 }
-            }
-            .navigationTitle("Info")
-            .navigationBarTitleDisplayMode(.inline)
-            .overlay {
-                if isLoading {
-                    ProgressView()
-                }
+                .padding(.horizontal, 16)
             }
         }
-        .presentationDetents([.medium, .large])
-        .presentationDragIndicator(.visible)
-        .task {
-            exifData = await manager.loadEXIF(for: photo)
-            isLoading = false
+        .padding(.bottom, 40)
+        .frame(maxWidth: .infinity)
+        .background(Color(.secondarySystemBackground))
+    }
+
+    // MARK: - Section
+
+    private func section(_ title: String, @ViewBuilder content: () -> some View) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.headline)
+            VStack(spacing: 6) {
+                content()
+            }
         }
     }
 
@@ -56,8 +70,10 @@ struct EXIFPanelView: View {
         HStack {
             Text(label)
                 .foregroundStyle(.secondary)
+                .font(.subheadline)
             Spacer()
             Text(value ?? "—")
+                .font(.subheadline)
                 .multilineTextAlignment(.trailing)
         }
     }
@@ -135,7 +151,6 @@ struct EXIFPanelView: View {
         }
         .frame(height: 180)
         .clipShape(RoundedRectangle(cornerRadius: 8))
-        .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
         .allowsHitTesting(false)
     }
 }

@@ -32,8 +32,8 @@ struct ContentView: View {
             }
         }
         .task {
-            if manager.rootFolder == nil, let url = manager.restoreBookmark() {
-                await manager.scanFolder(at: url)
+            if manager.rootFolder == nil {
+                await manager.restoreFolder()
             }
         }
     }

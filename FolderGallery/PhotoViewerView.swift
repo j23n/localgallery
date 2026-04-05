@@ -109,6 +109,7 @@ struct PhotoPageView: View {
     @State private var lastPanOffset: CGSize = .zero
     @State private var exifData: EXIFData?
     @State private var isLoadingEXIF = true
+    @State private var exifAppeared = false
     @State private var isDismissing = false
 
     var body: some View {
@@ -185,12 +186,20 @@ struct PhotoPageView: View {
                     }
                     .frame(width: geo.size.width, height: geo.size.height)
 
-                    // Inline EXIF below the image
+                    // Inline EXIF below the image — lazy: only loads when scrolled into view
                     EXIFContentView(
                         photo: photo,
                         exifData: exifData,
                         isLoading: isLoadingEXIF
                     )
+                    .onAppear {
+                        guard !exifAppeared else { return }
+                        exifAppeared = true
+                        Task {
+                            exifData = await manager.loadEXIF(for: photo)
+                            isLoadingEXIF = false
+                        }
+                    }
                 }
             }
             .coordinateSpace(name: "photoScroll")
@@ -211,12 +220,10 @@ struct PhotoPageView: View {
         .task(id: photo.id) {
             image = nil
             isDismissing = false
-            image = await manager.loadFullImage(for: photo.url)
-        }
-        .task(id: photo.id) {
+            exifData = nil
             isLoadingEXIF = true
-            exifData = await manager.loadEXIF(for: photo)
-            isLoadingEXIF = false
+            exifAppeared = false
+            image = await manager.loadFullImage(for: photo.url)
         }
     }
 }

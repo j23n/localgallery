@@ -32,9 +32,17 @@ struct FolderBrowserView: View {
             }
         }
         .sheet(isPresented: $showPicker) {
-            DocumentPicker { url in
-                manager.saveBookmark(for: url)
-                Task { await manager.scanFolder(at: url) }
+            DocumentPicker { pickerURL in
+                // Save bookmark from the picker URL, then immediately resolve it.
+                // The resolved-from-bookmark URL supports startAccessingSecurityScopedResource(),
+                // while the raw picker URL does not (it only has temporary implicit access).
+                manager.saveBookmark(for: pickerURL)
+                if let resolvedURL = manager.resolveBookmark() {
+                    Task {
+                        _ = resolvedURL.startAccessingSecurityScopedResource()
+                        await manager.scanFolder(at: resolvedURL)
+                    }
+                }
             }
         }
     }

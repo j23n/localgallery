@@ -102,7 +102,8 @@ struct PhotoPageView: View {
     @Binding var backgroundOpacity: Double
     var onDismiss: () -> Void
 
-    @State private var image: UIImage?
+    @State private var thumbnail: UIImage?
+    @State private var fullImage: UIImage?
     @State private var scale: CGFloat = 1.0
     @State private var lastScale: CGFloat = 1.0
     @State private var panOffset: CGSize = .zero
@@ -128,8 +129,8 @@ struct PhotoPageView: View {
 
                     // Full-screen image area
                     ZStack {
-                        if let image = image {
-                            Image(uiImage: image)
+                        if let displayImage = fullImage ?? thumbnail {
+                            Image(uiImage: displayImage)
                                 .resizable()
                                 .aspectRatio(contentMode: .fit)
                                 .scaleEffect(scale)
@@ -218,12 +219,14 @@ struct PhotoPageView: View {
             }
         }
         .task(id: photo.id) {
-            image = nil
+            fullImage = nil
             isDismissing = false
             exifData = nil
             isLoadingEXIF = true
             exifAppeared = false
-            image = await manager.loadFullImage(for: photo.url)
+            // Show cached thumbnail instantly, then load full res in background
+            thumbnail = await manager.thumbnail(for: photo.url, size: CGSize(width: 400, height: 400))
+            fullImage = await manager.loadFullImage(for: photo.url)
         }
     }
 }

@@ -12,31 +12,12 @@ final class GalleryManager: ObservableObject {
 
     private let thumbnailCache = NSCache<NSURL, UIImage>()
     private let bookmarkKey = "rootFolderBookmark"
-    private var activeSecurityScopedURL: URL?
 
     init() {
         thumbnailCache.totalCostLimit = 100 * 1024 * 1024
     }
 
-    deinit {
-        activeSecurityScopedURL?.stopAccessingSecurityScopedResource()
-    }
-
-    private func stopAccessingCurrentFolder() {
-        activeSecurityScopedURL?.stopAccessingSecurityScopedResource()
-        activeSecurityScopedURL = nil
-    }
-
-    /// Begin security-scoped access for a URL and keep it open
-    /// until a new folder is opened or the manager is deallocated.
-    private func startAccessingFolder(_ url: URL) {
-        stopAccessingCurrentFolder()
-        if url.startAccessingSecurityScopedResource() {
-            activeSecurityScopedURL = url
-        }
-    }
-
-    // MARK: - Bookmark Persistence
+    // MARK: - Bookmark Persistence (matches FolderPlayer pattern)
 
     func saveBookmark(for url: URL) {
         do {
@@ -51,23 +32,18 @@ final class GalleryManager: ObservableObject {
         }
     }
 
-    func restoreBookmark() -> URL? {
-        guard let data = UserDefaults.standard.data(forKey: bookmarkKey) else { return nil }
+    func restoreFolder() async {
+        guard let data = UserDefaults.standard.data(forKey: bookmarkKey) else { return }
         var isStale = false
         do {
-            let url = try URL(
-                resolvingBookmarkData: data,
-                options: [],
-                relativeTo: nil,
-                bookmarkDataIsStale: &isStale
-            )
+            let url = try URL(resolvingBookmarkData: data, bookmarkDataIsStale: &isStale)
+            _ = url.startAccessingSecurityScopedResource()
             if isStale {
                 saveBookmark(for: url)
             }
-            return url
+            await scanFolder(at: url)
         } catch {
-            print("Failed to restore bookmark: \(error)")
-            return nil
+            print("Failed to resolve bookmark: \(error)")
         }
     }
 
@@ -77,16 +53,8 @@ final class GalleryManager: ObservableObject {
         isScanning = true
         defer { isScanning = false }
 
-        // Keep security-scoped access open for the lifetime of this folder
-        // so thumbnails, full images, and EXIF reads can access the files.
-        startAccessingFolder(url)
-
         let fm = FileManager.default
         var flatPhotos: [PhotoFile] = []
-
-        // Build tree iteratively using a stack
-        // Each stack entry: (directoryURL, parentIndexPath)
-        // We'll build a flat list of folder nodes, then assemble the tree
 
         struct FolderNode {
             let url: URL
@@ -97,8 +65,6 @@ final class GalleryManager: ObservableObject {
         }
 
         var nodes: [FolderNode] = []
-
-        // Stack: (directoryURL, parentNodeIndex?)
         var stack: [(URL, Int?)] = [(url, nil)]
 
         while !stack.isEmpty {
@@ -158,14 +124,12 @@ final class GalleryManager: ObservableObject {
 
             flatPhotos.append(contentsOf: photos)
 
-            // Sort subdirs alphabetically and push them onto the stack
             let sortedSubdirs = subdirs.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedDescending }
             for subdir in sortedSubdirs {
                 stack.append((subdir, nodeIndex))
             }
         }
 
-        // Build PhotoFolder tree bottom-up
         func buildFolder(from nodeIndex: Int) -> PhotoFolder {
             let node = nodes[nodeIndex]
             let subfolders = node.childIndices.map { buildFolder(from: $0) }
@@ -284,28 +248,23 @@ final class GalleryManager: ObservableObject {
 
             var data = EXIFData()
 
-            // Dimensions
             data.pixelWidth = properties[kCGImagePropertyPixelWidth] as? Int
             data.pixelHeight = properties[kCGImagePropertyPixelHeight] as? Int
 
-            // TIFF
             data.cameraMake = tiffDict?[kCGImagePropertyTIFFMake] as? String
             data.cameraModel = tiffDict?[kCGImagePropertyTIFFModel] as? String
 
-            // EXIF
             data.lens = exifDict?[kCGImagePropertyExifLensModel] as? String
             data.aperture = exifDict?[kCGImagePropertyExifFNumber] as? Double
             data.shutterSpeed = exifDict?[kCGImagePropertyExifExposureTime] as? Double
             data.iso = (exifDict?[kCGImagePropertyExifISOSpeedRatings] as? [Int])?.first
 
-            // Date
             if let dateString = exifDict?[kCGImagePropertyExifDateTimeOriginal] as? String {
                 let formatter = DateFormatter()
                 formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
                 data.dateTimeOriginal = formatter.date(from: dateString)
             }
 
-            // GPS
             if let lat = gpsDict?[kCGImagePropertyGPSLatitude] as? Double,
                let lon = gpsDict?[kCGImagePropertyGPSLongitude] as? Double {
                 let latRef = gpsDict?[kCGImagePropertyGPSLatitudeRef] as? String

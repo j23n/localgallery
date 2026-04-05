@@ -34,9 +34,7 @@ struct FolderBrowserView: View {
         .sheet(isPresented: $showPicker) {
             DocumentPicker { url in
                 manager.saveBookmark(for: url)
-                Task {
-                    await manager.scanFolder(at: url)
-                }
+                Task { await manager.scanFolder(at: url) }
             }
         }
     }

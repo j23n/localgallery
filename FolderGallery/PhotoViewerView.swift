@@ -1,5 +1,12 @@
 import SwiftUI
 
+struct ScrollOffsetKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
 struct PhotoViewerView: View {
     let photos: [PhotoFile]
     let initialPhoto: PhotoFile
@@ -8,42 +15,33 @@ struct PhotoViewerView: View {
 
     @State private var currentIndex: Int = 0
     @State private var isChromeVisible: Bool = true
-    @State private var showEXIF: Bool = false
     @State private var showShareSheet: Bool = false
-    @State private var dragOffset: CGFloat = 0
-
-    private var dismissProgress: CGFloat {
-        min(abs(dragOffset) / 300, 1.0)
-    }
+    @State private var backgroundOpacity: Double = 1.0
 
     var body: some View {
         ZStack {
             Color.black
-                .opacity(1.0 - dismissProgress * 0.5)
+                .opacity(backgroundOpacity)
                 .ignoresSafeArea()
 
             TabView(selection: $currentIndex) {
                 ForEach(Array(photos.enumerated()), id: \.element.id) { index, photo in
-                    ZoomablePhotoView(
+                    PhotoPageView(
                         photo: photo,
                         isChromeVisible: $isChromeVisible,
-                        dragOffset: $dragOffset,
-                        onSwipeUp: { showEXIF = true },
+                        backgroundOpacity: $backgroundOpacity,
                         onDismiss: { dismiss() }
                     )
                     .tag(index)
                 }
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
-            .offset(y: dragOffset)
             .ignoresSafeArea()
 
-            if isChromeVisible && dragOffset == 0 {
+            if isChromeVisible {
                 VStack {
                     HStack {
-                        Button {
-                            dismiss()
-                        } label: {
+                        Button { dismiss() } label: {
                             Image(systemName: "xmark")
                                 .font(.title3)
                                 .fontWeight(.semibold)
@@ -57,32 +55,20 @@ struct PhotoViewerView: View {
                             .fontWeight(.medium)
                             .foregroundStyle(.white)
                         Spacer()
-                        Color.clear
-                            .frame(width: 40, height: 40)
+                        Color.clear.frame(width: 40, height: 40)
                     }
                     .padding(.horizontal)
                     .padding(.top, 8)
 
                     Spacer()
 
-                    HStack(spacing: 32) {
-                        Button {
-                            showShareSheet = true
-                        } label: {
+                    HStack {
+                        Button { showShareSheet = true } label: {
                             Image(systemName: "square.and.arrow.up")
                                 .font(.title3)
                                 .foregroundStyle(.white)
                         }
-
                         Spacer()
-
-                        Button {
-                            showEXIF = true
-                        } label: {
-                            Image(systemName: "info.circle")
-                                .font(.title3)
-                                .foregroundStyle(.white)
-                        }
                     }
                     .padding(.horizontal, 24)
                     .padding(.vertical, 12)
@@ -91,16 +77,12 @@ struct PhotoViewerView: View {
                 .transition(.opacity)
             }
         }
+        .preferredColorScheme(.dark)
         .animation(.easeInOut(duration: 0.2), value: isChromeVisible)
         .statusBarHidden(!isChromeVisible)
         .onAppear {
             if let idx = photos.firstIndex(where: { $0.id == initialPhoto.id }) {
                 currentIndex = idx
-            }
-        }
-        .sheet(isPresented: $showEXIF) {
-            if currentIndex < photos.count {
-                EXIFPanelView(photo: photos[currentIndex])
             }
         }
         .sheet(isPresented: $showShareSheet) {
@@ -111,133 +93,130 @@ struct PhotoViewerView: View {
     }
 }
 
-// MARK: - Zoomable Photo
+// MARK: - Photo Page (Image + scrollable EXIF)
 
-struct ZoomablePhotoView: View {
+struct PhotoPageView: View {
     let photo: PhotoFile
     @EnvironmentObject var manager: GalleryManager
     @Binding var isChromeVisible: Bool
-    @Binding var dragOffset: CGFloat
-    var onSwipeUp: () -> Void
+    @Binding var backgroundOpacity: Double
     var onDismiss: () -> Void
 
     @State private var image: UIImage?
     @State private var scale: CGFloat = 1.0
     @State private var lastScale: CGFloat = 1.0
-    @State private var offset: CGSize = .zero
-    @State private var lastOffset: CGSize = .zero
-    @State private var dragDirection: DragDirection = .none
-
-    private enum DragDirection {
-        case none, vertical, horizontal
-    }
+    @State private var panOffset: CGSize = .zero
+    @State private var lastPanOffset: CGSize = .zero
+    @State private var exifData: EXIFData?
+    @State private var isLoadingEXIF = true
+    @State private var isDismissing = false
 
     var body: some View {
         GeometryReader { geo in
-            ZStack {
-                if let image = image {
-                    Image(uiImage: image)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .scaleEffect(scale)
-                        .offset(scale > 1.0 ? offset : .zero)
-                        .gesture(magnificationGesture)
-                        .simultaneousGesture(dragGesture)
-                        .onTapGesture(count: 2) {
-                            withAnimation(.easeInOut(duration: 0.3)) {
-                                if scale > 1.0 {
-                                    scale = 1.0
-                                    lastScale = 1.0
-                                    offset = .zero
-                                    lastOffset = .zero
-                                } else {
-                                    scale = 3.0
-                                    lastScale = 3.0
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: 0) {
+                    // Scroll position tracker
+                    GeometryReader { inner in
+                        Color.clear
+                            .preference(
+                                key: ScrollOffsetKey.self,
+                                value: inner.frame(in: .named("photoScroll")).minY
+                            )
+                    }
+                    .frame(height: 0)
+
+                    // Full-screen image area
+                    ZStack {
+                        if let image = image {
+                            Image(uiImage: image)
+                                .resizable()
+                                .aspectRatio(contentMode: .fit)
+                                .scaleEffect(scale)
+                                .offset(scale > 1.0 ? panOffset : .zero)
+                                .gesture(
+                                    MagnificationGesture()
+                                        .onChanged { value in
+                                            scale = min(max(lastScale * value, 1.0), 5.0)
+                                        }
+                                        .onEnded { value in
+                                            scale = min(max(lastScale * value, 1.0), 5.0)
+                                            lastScale = scale
+                                            if scale <= 1.0 {
+                                                withAnimation {
+                                                    panOffset = .zero
+                                                    lastPanOffset = .zero
+                                                }
+                                            }
+                                        }
+                                )
+                                .gesture(
+                                    scale > 1.0 ?
+                                        DragGesture()
+                                            .onChanged { value in
+                                                panOffset = CGSize(
+                                                    width: lastPanOffset.width + value.translation.width,
+                                                    height: lastPanOffset.height + value.translation.height
+                                                )
+                                            }
+                                            .onEnded { _ in
+                                                lastPanOffset = panOffset
+                                            }
+                                        : nil
+                                )
+                                .onTapGesture(count: 2) {
+                                    withAnimation(.easeInOut(duration: 0.3)) {
+                                        if scale > 1.0 {
+                                            scale = 1.0
+                                            lastScale = 1.0
+                                            panOffset = .zero
+                                            lastPanOffset = .zero
+                                        } else {
+                                            scale = 3.0
+                                            lastScale = 3.0
+                                        }
+                                    }
                                 }
-                            }
+                                .onTapGesture(count: 1) {
+                                    withAnimation { isChromeVisible.toggle() }
+                                }
+                        } else {
+                            ProgressView().tint(.white)
                         }
-                        .onTapGesture(count: 1) {
-                            withAnimation {
-                                isChromeVisible.toggle()
-                            }
-                        }
-                } else {
-                    ProgressView()
-                        .tint(.white)
+                    }
+                    .frame(width: geo.size.width, height: geo.size.height)
+
+                    // Inline EXIF below the image
+                    EXIFContentView(
+                        photo: photo,
+                        exifData: exifData,
+                        isLoading: isLoadingEXIF
+                    )
                 }
             }
-            .frame(width: geo.size.width, height: geo.size.height)
+            .coordinateSpace(name: "photoScroll")
+            .scrollDisabled(scale > 1.0)
+            .onPreferenceChange(ScrollOffsetKey.self) { value in
+                // Pulling down past top → dim background and dismiss
+                if value > 0 {
+                    backgroundOpacity = max(0.3, 1.0 - Double(value) / 300.0)
+                } else {
+                    backgroundOpacity = 1.0
+                }
+                if value > 120 && !isDismissing {
+                    isDismissing = true
+                    onDismiss()
+                }
+            }
         }
         .task(id: photo.id) {
             image = nil
+            isDismissing = false
             image = await manager.loadFullImage(for: photo.url)
         }
-    }
-
-    // MARK: - Gestures
-
-    private var magnificationGesture: some Gesture {
-        MagnificationGesture()
-            .onChanged { value in
-                let newScale = lastScale * value
-                scale = min(max(newScale, 1.0), 5.0)
-            }
-            .onEnded { value in
-                let newScale = lastScale * value
-                scale = min(max(newScale, 1.0), 5.0)
-                lastScale = scale
-                if scale <= 1.0 {
-                    withAnimation {
-                        offset = .zero
-                        lastOffset = .zero
-                    }
-                }
-            }
-    }
-
-    private var dragGesture: some Gesture {
-        DragGesture(minimumDistance: 20)
-            .onChanged { value in
-                if scale > 1.0 {
-                    // Pan while zoomed
-                    offset = CGSize(
-                        width: lastOffset.width + value.translation.width,
-                        height: lastOffset.height + value.translation.height
-                    )
-                } else {
-                    // Determine drag direction on first significant movement
-                    if dragDirection == .none {
-                        if abs(value.translation.height) > abs(value.translation.width) {
-                            dragDirection = .vertical
-                        } else {
-                            dragDirection = .horizontal
-                        }
-                    }
-                    if dragDirection == .vertical {
-                        dragOffset = value.translation.height
-                    }
-                }
-            }
-            .onEnded { value in
-                if scale > 1.0 {
-                    lastOffset = offset
-                } else if dragDirection == .vertical {
-                    let threshold: CGFloat = 100
-                    let velocity = value.predictedEndTranslation.height - value.translation.height
-
-                    if value.translation.height > threshold || velocity > 500 {
-                        // Swipe down → dismiss
-                        onDismiss()
-                    } else if value.translation.height < -threshold || velocity < -500 {
-                        // Swipe up → show EXIF
-                        withAnimation(.easeOut(duration: 0.25)) { dragOffset = 0 }
-                        onSwipeUp()
-                    } else {
-                        // Snap back
-                        withAnimation(.easeOut(duration: 0.25)) { dragOffset = 0 }
-                    }
-                }
-                dragDirection = .none
-            }
+        .task(id: photo.id) {
+            isLoadingEXIF = true
+            exifData = await manager.loadEXIF(for: photo)
+            isLoadingEXIF = false
+        }
     }
 }

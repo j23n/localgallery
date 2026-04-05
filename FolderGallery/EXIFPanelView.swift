@@ -1,6 +1,28 @@
 import SwiftUI
 import MapKit
 
+struct EXIFSheetView: View {
+    let photo: PhotoFile
+    @EnvironmentObject var manager: GalleryManager
+    @State private var exifData: EXIFData?
+    @State private var isLoading = true
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                EXIFContentView(photo: photo, exifData: exifData, isLoading: isLoading)
+            }
+            .navigationTitle("Info")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+        .presentationDetents([.medium, .large])
+        .task {
+            exifData = await manager.loadEXIF(for: photo)
+            isLoading = false
+        }
+    }
+}
+
 struct EXIFContentView: View {
     let photo: PhotoFile
     let exifData: EXIFData?
@@ -8,13 +30,6 @@ struct EXIFContentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Pull handle hint
-            Capsule()
-                .fill(Color(.systemGray3))
-                .frame(width: 36, height: 5)
-                .padding(.top, 12)
-                .padding(.bottom, 16)
-
             if isLoading {
                 ProgressView()
                     .frame(maxWidth: .infinity, minHeight: 200)
@@ -47,9 +62,9 @@ struct EXIFContentView: View {
                 .padding(.horizontal, 16)
             }
         }
+        .padding(.top, 16)
         .padding(.bottom, 40)
         .frame(maxWidth: .infinity)
-        .background(Color(.secondarySystemBackground))
     }
 
     // MARK: - Section

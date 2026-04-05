@@ -30,16 +30,32 @@ struct FolderBrowserView: View {
                     }
                 }
             }
+            if displayFolder != nil && !(displayFolder?.subfolders.isEmpty ?? true) {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Picker("Sort Folders", selection: $manager.folderSortOrder) {
+                            ForEach(FolderSortOrder.allCases, id: \.self) { order in
+                                Text(order.label).tag(order)
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "arrow.up.arrow.down")
+                    }
+                }
+            }
         }
         .sheet(isPresented: $showPicker) {
             DocumentPicker { pickerURL in
-                // Save bookmark from the picker URL, then immediately resolve it.
-                // The resolved-from-bookmark URL supports startAccessingSecurityScopedResource(),
-                // while the raw picker URL does not (it only has temporary implicit access).
+                // Start security-scoped access BEFORE creating bookmark —
+                // the scope token must be active for it to be embedded in the bookmark data.
+                _ = pickerURL.startAccessingSecurityScopedResource()
                 manager.saveBookmark(for: pickerURL)
+                pickerURL.stopAccessingSecurityScopedResource()
+
+                // Now resolve the bookmark and use the resolved URL
                 if let resolvedURL = manager.resolveBookmark() {
                     Task {
-                        _ = resolvedURL.startAccessingSecurityScopedResource()
+                        manager.startAccessingFolder(resolvedURL)
                         await manager.scanFolder(at: resolvedURL)
                     }
                 }
@@ -67,6 +83,7 @@ struct FolderBrowserView: View {
 
     @ViewBuilder
     private func folderContent(_ folder: PhotoFolder) -> some View {
+        let sortedSubfolders = manager.sortFolders(folder.subfolders)
         List {
             if !folder.photos.isEmpty {
                 Section("Photos") {
@@ -81,9 +98,9 @@ struct FolderBrowserView: View {
                 }
             }
 
-            if !folder.subfolders.isEmpty {
+            if !sortedSubfolders.isEmpty {
                 Section("Subfolders") {
-                    ForEach(folder.subfolders) { subfolder in
+                    ForEach(sortedSubfolders) { subfolder in
                         NavigationLink {
                             if subfolder.subfolders.isEmpty && !subfolder.photos.isEmpty {
                                 FolderGridView(

@@ -49,7 +49,7 @@ struct AllPhotosView: View {
                 Button {
                     cycleColumnCount()
                 } label: {
-                    Image(systemName: "square.grid.\(columnCount)x\(columnCount)")
+                    Image(systemName: gridIconName)
                 }
             }
         }
@@ -79,11 +79,19 @@ struct AllPhotosView: View {
         }
     }
 
+    private var gridIconName: String {
+        switch columnCount {
+        case 3: return "square.grid.3x3"
+        case 4: return "rectangle.grid.3x2"
+        default: return "rectangle.grid.3x2"
+        }
+    }
+
     private func cycleColumnCount() {
         switch columnCount {
-        case 2: columnCount = 3
         case 3: columnCount = 4
-        default: columnCount = 2
+        case 4: columnCount = 5
+        default: columnCount = 3
         }
     }
 }

@@ -32,9 +32,7 @@ struct ContentView: View {
             }
         }
         .task {
-            if manager.rootFolder == nil {
-                await manager.restoreFolder()
-            }
+            await manager.restoreFolder()
         }
     }
 }

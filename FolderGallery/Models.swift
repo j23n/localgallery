@@ -1,14 +1,20 @@
 import Foundation
 import CoreGraphics
 
-struct PhotoFile: Identifiable, Hashable {
+struct PhotoFile: Identifiable, Hashable, Codable {
     let id: UUID
     let url: URL
     var filename: String
     var fileSize: Int64
     var dateTaken: Date?
-    var dimensions: CGSize?
-    var exif: EXIFData?
+
+    // Not persisted — loaded lazily at runtime
+    var dimensions: CGSize? = nil
+    var exif: EXIFData? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case id, url, filename, fileSize, dateTaken
+    }
 
     static func == (lhs: PhotoFile, rhs: PhotoFile) -> Bool {
         lhs.id == rhs.id
@@ -33,7 +39,7 @@ struct EXIFData: Equatable {
     var pixelHeight: Int?
 }
 
-struct PhotoFolder: Identifiable {
+struct PhotoFolder: Identifiable, Codable {
     let id: UUID
     let url: URL
     var name: String
@@ -41,6 +47,28 @@ struct PhotoFolder: Identifiable {
     var photos: [PhotoFile]
     var coverPhotoURL: URL?
     var totalPhotoCount: Int
+    var dateModified: Date?
+    var dateCreated: Date?
+}
+
+enum FolderSortOrder: String, CaseIterable {
+    case nameAscending
+    case nameDescending
+    case dateModifiedNewest
+    case dateModifiedOldest
+    case dateCreatedNewest
+    case dateCreatedOldest
+
+    var label: String {
+        switch self {
+        case .nameAscending: return "Name ↑"
+        case .nameDescending: return "Name ↓"
+        case .dateModifiedNewest: return "Modified ↓"
+        case .dateModifiedOldest: return "Modified ↑"
+        case .dateCreatedNewest: return "Created ↓"
+        case .dateCreatedOldest: return "Created ↑"
+        }
+    }
 }
 
 enum SortOrder: String, CaseIterable {

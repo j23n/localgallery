@@ -32,19 +32,30 @@ final class GalleryManager: ObservableObject {
         }
     }
 
-    func restoreFolder() async {
-        guard let data = UserDefaults.standard.data(forKey: bookmarkKey) else { return }
+    func resolveBookmark() -> URL? {
+        guard let data = UserDefaults.standard.data(forKey: bookmarkKey) else { return nil }
         var isStale = false
         do {
-            let url = try URL(resolvingBookmarkData: data, bookmarkDataIsStale: &isStale)
-            _ = url.startAccessingSecurityScopedResource()
+            let url = try URL(
+                resolvingBookmarkData: data,
+                options: [],
+                relativeTo: nil,
+                bookmarkDataIsStale: &isStale
+            )
             if isStale {
                 saveBookmark(for: url)
             }
-            await scanFolder(at: url)
+            return url
         } catch {
             print("Failed to resolve bookmark: \(error)")
+            return nil
         }
+    }
+
+    func restoreFolder() async {
+        guard let url = resolveBookmark() else { return }
+        _ = url.startAccessingSecurityScopedResource()
+        await scanFolder(at: url)
     }
 
     // MARK: - Folder Scanning (Iterative)

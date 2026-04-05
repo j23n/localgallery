@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <!-- Background: deep warm dark -->
+    <linearGradient id="bg" x1="0" y1="0" x2="1024" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#1E1B2E"/>
+      <stop offset="100%" stop-color="#100E19"/>
+    </linearGradient>
+
+    <!-- Folder surfaces -->
+    <linearGradient id="folderBody" x1="512" y1="375" x2="512" y2="795" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#F5EADB"/>
+      <stop offset="100%" stop-color="#E2CDAF"/>
+    </linearGradient>
+    <linearGradient id="folderTab" x1="310" y1="275" x2="310" y2="375" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FAF2E8"/>
+      <stop offset="100%" stop-color="#EEDDCA"/>
+    </linearGradient>
+
+    <!-- Landscape sky: golden hour -->
+    <linearGradient id="sky" x1="512" y1="425" x2="512" y2="680" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FCCF90"/>
+      <stop offset="30%" stop-color="#F0A672"/>
+      <stop offset="65%" stop-color="#6EB4CE"/>
+      <stop offset="100%" stop-color="#4A95B8"/>
+    </linearGradient>
+
+    <!-- Shadows -->
+    <filter id="folderShadow">
+      <feDropShadow dx="0" dy="10" stdDeviation="22" flood-color="#000" flood-opacity="0.5"/>
+    </filter>
+    <filter id="photoShadow">
+      <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#000" flood-opacity="0.25"/>
+    </filter>
+
+    <!-- Clip for landscape scene -->
+    <clipPath id="photoClip">
+      <rect x="240" y="432" width="544" height="296" rx="10"/>
+    </clipPath>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+
+  <!-- Subtle ambient glow behind folder -->
+  <ellipse cx="512" cy="580" rx="340" ry="260" fill="#2E2844" opacity="0.6"/>
+
+  <!-- ====== FOLDER ====== -->
+  <g filter="url(#folderShadow)">
+    <!-- Tab -->
+    <path d="M205,375 L205,320 Q205,288 235,288 L400,288 Q426,288 436,316 L458,375" fill="url(#folderTab)"/>
+    <!-- Body -->
+    <rect x="182" y="375" width="660" height="420" rx="28" fill="url(#folderBody)"/>
+  </g>
+
+  <!-- ====== BACK PHOTO (tilted, peeking out) ====== -->
+  <g filter="url(#photoShadow)">
+    <rect x="248" y="408" width="556" height="316" rx="14" fill="#FFFFFF"
+          transform="rotate(-2.5, 512, 566)" opacity="0.8"/>
+  </g>
+
+  <!-- ====== FRONT PHOTO FRAME ====== -->
+  <g filter="url(#photoShadow)">
+    <rect x="232" y="424" width="560" height="312" rx="14" fill="#FFFFFF"/>
+  </g>
+
+  <!-- ====== LANDSCAPE SCENE ====== -->
+  <g clip-path="url(#photoClip)">
+    <!-- Sky -->
+    <rect x="240" y="432" width="544" height="296" fill="url(#sky)"/>
+
+    <!-- Sun with soft glow -->
+    <circle cx="636" cy="488" r="52" fill="#F7D26B" opacity="0.18"/>
+    <circle cx="636" cy="488" r="36" fill="#F7D26B"/>
+
+    <!-- Far mountain range (misty) -->
+    <polygon points="240,605 330,548 408,578 488,528 558,560 636,518 714,548 784,522 784,728 240,728"
+             fill="#5E9F92" opacity="0.55"/>
+
+    <!-- Near mountain range -->
+    <polygon points="240,640 326,578 414,618 504,564 586,598 668,558 754,588 784,572 784,728 240,728"
+             fill="#2E7C6A"/>
+
+    <!-- Foreground foliage -->
+    <polygon points="240,690 370,668 530,680 690,664 784,678 784,728 240,728"
+             fill="#1A5446"/>
+  </g>
+
+  <!-- Subtle inner border on photo -->
+  <rect x="240" y="432" width="544" height="296" rx="10" fill="none" stroke="#000" stroke-opacity="0.06" stroke-width="1.5"/>
+</svg>

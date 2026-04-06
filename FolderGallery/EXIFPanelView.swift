@@ -12,6 +12,7 @@ struct EXIFSheetView: View {
             ScrollView {
                 EXIFContentView(photo: photo, exifData: exifData, isLoading: isLoading)
             }
+            .background(Color(.systemGroupedBackground))
             .navigationTitle("Info")
             .navigationBarTitleDisplayMode(.inline)
         }
@@ -72,10 +73,18 @@ struct EXIFContentView: View {
     private func section(_ title: String, @ViewBuilder content: () -> some View) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title)
-                .font(.headline)
-            VStack(spacing: 6) {
+                .font(.caption)
+                .fontWeight(.semibold)
+                .foregroundStyle(.secondary)
+                .textCase(.uppercase)
+                .tracking(0.8)
+            VStack(spacing: 0) {
                 content()
             }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
         }
     }
 
@@ -89,8 +98,10 @@ struct EXIFContentView: View {
             Spacer()
             Text(value ?? "—")
                 .font(.subheadline)
+                .fontWeight(.medium)
                 .multilineTextAlignment(.trailing)
         }
+        .padding(.vertical, 5)
     }
 
     // MARK: - Formatted Values
@@ -164,8 +175,8 @@ struct EXIFContentView: View {
         Map(initialPosition: .region(region)) {
             Marker("", coordinate: coordinate)
         }
-        .frame(height: 180)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .frame(height: 200)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
         .allowsHitTesting(false)
     }
 }

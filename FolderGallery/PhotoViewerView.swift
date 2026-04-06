@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import AVFoundation
 
 // MARK: - Swipe-down dismiss (UIKit gesture — doesn't conflict with TabView paging)
 
@@ -137,19 +138,20 @@ struct PhotoViewerView: View {
                     HStack {
                         Button { dismiss() } label: {
                             Image(systemName: "xmark")
-                                .font(.title3)
-                                .fontWeight(.semibold)
+                                .font(.system(size: 14, weight: .semibold))
                                 .foregroundStyle(.white)
-                                .padding(10)
-                                .background(.ultraThinMaterial, in: Circle())
+                                .frame(width: 36, height: 36)
+                                .background(.white.opacity(0.15), in: Circle())
                         }
                         Spacer()
                         Text("\(currentIndex + 1) / \(photos.count)")
-                            .font(.subheadline)
-                            .fontWeight(.medium)
-                            .foregroundStyle(.white)
+                            .font(.system(size: 13, weight: .medium, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.85))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 5)
+                            .background(.white.opacity(0.12), in: Capsule())
                         Spacer()
-                        Color.clear.frame(width: 40, height: 40)
+                        Color.clear.frame(width: 36, height: 36)
                     }
                     .padding(.horizontal)
                     .padding(.top, 8)
@@ -159,26 +161,46 @@ struct PhotoViewerView: View {
                     HStack {
                         Button { showShareSheet = true } label: {
                             Image(systemName: "square.and.arrow.up")
-                                .font(.title3)
+                                .font(.system(size: 18))
                                 .foregroundStyle(.white)
+                                .frame(width: 44, height: 44)
                         }
                         Spacer()
                         Button { showEXIF = true } label: {
                             Image(systemName: "info.circle")
-                                .font(.title3)
+                                .font(.system(size: 18))
                                 .foregroundStyle(.white)
+                                .frame(width: 44, height: 44)
                         }
                     }
                     .padding(.horizontal, 24)
-                    .padding(.vertical, 12)
-                    .background(.ultraThinMaterial)
+                    .padding(.bottom, 4)
                 }
+                .background(
+                    VStack(spacing: 0) {
+                        LinearGradient(
+                            colors: [.black.opacity(0.55), .black.opacity(0.15), .clear],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                        .frame(height: 120)
+                        Spacer()
+                        LinearGradient(
+                            colors: [.clear, .black.opacity(0.15), .black.opacity(0.55)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                        .frame(height: 120)
+                    }
+                    .allowsHitTesting(false)
+                    .ignoresSafeArea()
+                )
                 .transition(.opacity)
                 .offset(y: dismissOffset)
             }
         }
         .preferredColorScheme(.dark)
-        .animation(.easeInOut(duration: 0.2), value: isChromeVisible)
+        .animation(.easeInOut(duration: 0.25), value: isChromeVisible)
         .statusBarHidden(!isChromeVisible)
         .background(
             SwipeToDismissGestureInstaller(
@@ -218,24 +240,53 @@ struct PhotoPageView: View {
     @State private var lastScale: CGFloat = 1.0
     @State private var panOffset: CGSize = .zero
     @State private var lastPanOffset: CGSize = .zero
+    @State private var showVideoPlayer = false
+    @State private var isPlayingLive = false
+    @State private var livePlayer: AVPlayer?
 
     var body: some View {
         GeometryReader { geo in
             ZStack {
-                if let displayImage = fullImage ?? thumbnail {
-                    Image(uiImage: displayImage)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .scaleEffect(scale)
-                        .offset(scale > 1.0 ? panOffset : .zero)
+                if photo.isVideo {
+                    // Video: show thumbnail with play button
+                    if let img = thumbnail {
+                        Image(uiImage: img)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                    } else {
+                        ProgressView().tint(.white)
+                    }
+
+                    Button { showVideoPlayer = true } label: {
+                        Image(systemName: "play.circle.fill")
+                            .font(.system(size: 64))
+                            .foregroundStyle(.white.opacity(0.9))
+                            .shadow(radius: 8)
+                    }
                 } else {
-                    ProgressView().tint(.white)
+                    // Photo: zoomable image
+                    if let displayImage = fullImage ?? thumbnail {
+                        Image(uiImage: displayImage)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .scaleEffect(scale)
+                            .offset(scale > 1.0 ? panOffset : .zero)
+                    } else {
+                        ProgressView().tint(.white)
+                    }
+
+                    // Live photo video overlay
+                    if isPlayingLive, let player = livePlayer {
+                        AVPlayerLayerView(player: player)
+                            .allowsHitTesting(false)
+                    }
                 }
             }
             .frame(width: geo.size.width, height: geo.size.height)
             .contentShape(Rectangle())
             .onTapGesture(count: 2) {
-                withAnimation(.easeInOut(duration: 0.3)) {
+                guard !photo.isVideo else { return }
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
                     if scale > 1.0 {
                         scale = 1.0
                         lastScale = 1.0
@@ -248,9 +299,25 @@ struct PhotoPageView: View {
                 }
             }
             .onTapGesture(count: 1) {
+                if photo.isVideo { return }
                 withAnimation { isChromeVisible.toggle() }
             }
+            .onLongPressGesture(minimumDuration: 0.3, pressing: { pressing in
+                guard let liveURL = photo.livePhotoVideoURL, scale <= 1.0 else { return }
+                if pressing {
+                    let player = AVPlayer(url: liveURL)
+                    livePlayer = player
+                    player.play()
+                    withAnimation(.easeIn(duration: 0.15)) { isPlayingLive = true }
+                    isChromeVisible = false
+                } else {
+                    withAnimation(.easeOut(duration: 0.15)) { isPlayingLive = false }
+                    livePlayer?.pause()
+                    livePlayer = nil
+                }
+            }, perform: {})
             .simultaneousGesture(
+                photo.isVideo ? nil :
                 MagnificationGesture()
                     .onChanged { value in
                         scale = min(max(lastScale * value, 1.0), 5.0)
@@ -260,7 +327,7 @@ struct PhotoPageView: View {
                         scale = min(max(lastScale * value, 1.0), 5.0)
                         lastScale = scale
                         if scale <= 1.0 {
-                            withAnimation(.easeOut(duration: 0.2)) {
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                                 panOffset = .zero
                                 lastPanOffset = .zero
                             }
@@ -289,11 +356,19 @@ struct PhotoPageView: View {
             lastScale = 1.0
             panOffset = .zero
             lastPanOffset = .zero
+            isPlayingLive = false
+            livePlayer?.pause()
+            livePlayer = nil
 
             if thumbnail == nil {
-                thumbnail = await manager.thumbnail(for: photo.url, size: CGSize(width: 400, height: 400))
+                thumbnail = await manager.thumbnail(for: photo.url, size: CGSize(width: 400, height: 400), isVideo: photo.isVideo)
             }
-            fullImage = await manager.loadFullImage(for: photo.url)
+            if !photo.isVideo {
+                fullImage = await manager.loadFullImage(for: photo.url)
+            }
+        }
+        .fullScreenCover(isPresented: $showVideoPlayer) {
+            VideoPlayerView(url: photo.url)
         }
     }
 }

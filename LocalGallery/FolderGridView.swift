@@ -19,19 +19,21 @@ struct FolderGridView: View {
         Array(repeating: GridItem(.flexible(), spacing: 2), count: columnCount)
     }
 
+    private var cellSize: CGFloat {
+        let screenWidth = UIScreen.main.bounds.width
+        return max(1, (screenWidth - CGFloat(columnCount - 1) * 2) / CGFloat(columnCount))
+    }
+
     var body: some View {
-        GeometryReader { geo in
-            let cellSize = max(1, (geo.size.width - CGFloat(columnCount - 1) * 2) / CGFloat(columnCount))
-            ScrollView {
-                LazyVGrid(columns: columns, spacing: 2) {
-                    ForEach(sortedPhotos) { photo in
-                        gridCell(photo: photo, cellSize: cellSize)
-                    }
+        ScrollView {
+            LazyVGrid(columns: columns, spacing: 2) {
+                ForEach(sortedPhotos) { photo in
+                    gridCell(photo: photo, cellSize: cellSize)
                 }
             }
-            .refreshable {
-                await manager.rescan()
-            }
+        }
+        .refreshable {
+            await manager.rescan()
         }
         .navigationTitle(title)
         .toolbar {
@@ -64,17 +66,6 @@ struct FolderGridView: View {
                     .disabled(selectedIDs.isEmpty)
                 }
             } else {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        Picker("Sort", selection: $manager.currentSortOrder) {
-                            ForEach(SortOrder.allCases, id: \.self) { order in
-                                Text(order.label).tag(order)
-                            }
-                        }
-                    } label: {
-                        Image(systemName: "arrow.up.arrow.down")
-                    }
-                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { cycleColumnCount() } label: {
                         Image(systemName: gridIconName)

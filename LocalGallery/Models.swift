@@ -9,16 +9,17 @@ struct PhotoFile: Identifiable, Hashable, Codable {
     var dateTaken: Date?
     var isVideo: Bool = false
     var livePhotoVideoURL: URL? = nil
+    var keywords: [String] = []
 
     // Not persisted — loaded lazily at runtime
     var dimensions: CGSize? = nil
     var exif: EXIFData? = nil
 
     enum CodingKeys: String, CodingKey {
-        case id, url, filename, fileSize, dateTaken, isVideo, livePhotoVideoURL
+        case id, url, filename, fileSize, dateTaken, isVideo, livePhotoVideoURL, keywords
     }
 
-    init(id: UUID, url: URL, filename: String, fileSize: Int64, dateTaken: Date?, isVideo: Bool = false, livePhotoVideoURL: URL? = nil) {
+    init(id: UUID, url: URL, filename: String, fileSize: Int64, dateTaken: Date?, isVideo: Bool = false, livePhotoVideoURL: URL? = nil, keywords: [String] = []) {
         self.id = id
         self.url = url
         self.filename = filename
@@ -26,6 +27,7 @@ struct PhotoFile: Identifiable, Hashable, Codable {
         self.dateTaken = dateTaken
         self.isVideo = isVideo
         self.livePhotoVideoURL = livePhotoVideoURL
+        self.keywords = keywords
     }
 
     init(from decoder: Decoder) throws {
@@ -37,6 +39,7 @@ struct PhotoFile: Identifiable, Hashable, Codable {
         dateTaken = try c.decodeIfPresent(Date.self, forKey: .dateTaken)
         isVideo = try c.decodeIfPresent(Bool.self, forKey: .isVideo) ?? false
         livePhotoVideoURL = try c.decodeIfPresent(URL.self, forKey: .livePhotoVideoURL)
+        keywords = try c.decodeIfPresent([String].self, forKey: .keywords) ?? []
     }
 
     static func == (lhs: PhotoFile, rhs: PhotoFile) -> Bool {
@@ -94,22 +97,3 @@ enum FolderSortOrder: String, CaseIterable {
     }
 }
 
-enum SortOrder: String, CaseIterable {
-    case nameAscending
-    case nameDescending
-    case dateAscending
-    case dateDescending
-    case sizeAscending
-    case sizeDescending
-
-    var label: String {
-        switch self {
-        case .nameAscending: return "Name ↑"
-        case .nameDescending: return "Name ↓"
-        case .dateAscending: return "Date ↑"
-        case .dateDescending: return "Date ↓"
-        case .sizeAscending: return "Size ↑"
-        case .sizeDescending: return "Size ↓"
-        }
-    }
-}

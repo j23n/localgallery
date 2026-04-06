@@ -1,4 +1,5 @@
 import SwiftUI
+import AVFoundation
 
 // MARK: - Design Constants
 
@@ -7,8 +8,12 @@ enum Design {
 }
 
 @main
-struct FolderGalleryApp: App {
+struct LocalGalleryApp: App {
     @StateObject private var galleryManager = GalleryManager()
+
+    init() {
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
+    }
 
     var body: some Scene {
         WindowGroup {

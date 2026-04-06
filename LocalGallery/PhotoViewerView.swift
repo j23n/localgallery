@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import AVFoundation
+import AVKit
 
 // MARK: - Swipe-down dismiss (UIKit gesture — doesn't conflict with TabView paging)
 
@@ -100,6 +101,82 @@ private extension UIView {
     }
 }
 
+// MARK: - Efficient Pager (UIPageViewController)
+
+struct PagingPhotoView: UIViewControllerRepresentable {
+    let photos: [PhotoFile]
+    let manager: GalleryManager
+    @Binding var currentIndex: Int
+    @Binding var isChromeVisible: Bool
+
+    func makeUIViewController(context: Context) -> UIPageViewController {
+        let pvc = UIPageViewController(
+            transitionStyle: .scroll,
+            navigationOrientation: .horizontal,
+            options: [.interPageSpacing: 12]
+        )
+        pvc.dataSource = context.coordinator
+        pvc.delegate = context.coordinator
+        pvc.view.backgroundColor = .clear
+        let initial = context.coordinator.makeHostingController(for: currentIndex)
+        pvc.setViewControllers([initial], direction: .forward, animated: false)
+        return pvc
+    }
+
+    func updateUIViewController(_ pvc: UIPageViewController, context: Context) {
+        context.coordinator.parent = self
+        guard let current = pvc.viewControllers?.first as? IndexedHostingController,
+              current.pageIndex != currentIndex else { return }
+        let direction: UIPageViewController.NavigationDirection = currentIndex > current.pageIndex ? .forward : .reverse
+        let vc = context.coordinator.makeHostingController(for: currentIndex)
+        pvc.setViewControllers([vc], direction: direction, animated: false)
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    class IndexedHostingController: UIHostingController<AnyView> {
+        let pageIndex: Int
+        init(pageIndex: Int, rootView: AnyView) {
+            self.pageIndex = pageIndex
+            super.init(rootView: rootView)
+            view.backgroundColor = .clear
+        }
+        @MainActor required init?(coder: NSCoder) { fatalError() }
+    }
+
+    class Coordinator: NSObject, UIPageViewControllerDataSource, UIPageViewControllerDelegate {
+        var parent: PagingPhotoView
+        init(_ parent: PagingPhotoView) { self.parent = parent }
+
+        func makeHostingController(for index: Int) -> IndexedHostingController {
+            let photo = parent.photos[index]
+            let view = PhotoPageView(
+                photo: photo,
+                initialThumbnail: parent.manager.cachedThumbnail(for: photo.url),
+                isChromeVisible: parent.$isChromeVisible
+            )
+            .environmentObject(parent.manager)
+            return IndexedHostingController(pageIndex: index, rootView: AnyView(view))
+        }
+
+        func pageViewController(_ pvc: UIPageViewController, viewControllerBefore vc: UIViewController) -> UIViewController? {
+            guard let indexed = vc as? IndexedHostingController, indexed.pageIndex > 0 else { return nil }
+            return makeHostingController(for: indexed.pageIndex - 1)
+        }
+
+        func pageViewController(_ pvc: UIPageViewController, viewControllerAfter vc: UIViewController) -> UIViewController? {
+            guard let indexed = vc as? IndexedHostingController, indexed.pageIndex < parent.photos.count - 1 else { return nil }
+            return makeHostingController(for: indexed.pageIndex + 1)
+        }
+
+        func pageViewController(_ pvc: UIPageViewController, didFinishAnimating finished: Bool, previousViewControllers: [UIViewController], transitionCompleted completed: Bool) {
+            if completed, let indexed = pvc.viewControllers?.first as? IndexedHostingController {
+                parent.currentIndex = indexed.pageIndex
+            }
+        }
+    }
+}
+
 // MARK: - Photo Viewer
 
 struct PhotoViewerView: View {
@@ -108,7 +185,13 @@ struct PhotoViewerView: View {
     @EnvironmentObject var manager: GalleryManager
     @Environment(\.dismiss) private var dismiss
 
-    @State private var currentIndex: Int = 0
+    @State private var currentIndex: Int
+
+    init(photos: [PhotoFile], initialPhoto: PhotoFile) {
+        self.photos = photos
+        self.initialPhoto = initialPhoto
+        _currentIndex = State(initialValue: photos.firstIndex(where: { $0.id == initialPhoto.id }) ?? 0)
+    }
     @State private var isChromeVisible: Bool = true
     @State private var showShareSheet: Bool = false
     @State private var showEXIF: Bool = false
@@ -120,16 +203,12 @@ struct PhotoViewerView: View {
                 .opacity(dismissOffset > 0 ? max(0.3, 1.0 - Double(dismissOffset) / 300.0) : 1.0)
                 .ignoresSafeArea()
 
-            TabView(selection: $currentIndex) {
-                ForEach(Array(photos.enumerated()), id: \.element.id) { index, photo in
-                    PhotoPageView(
-                        photo: photo,
-                        isChromeVisible: $isChromeVisible
-                    )
-                    .tag(index)
-                }
-            }
-            .tabViewStyle(.page(indexDisplayMode: .never))
+            PagingPhotoView(
+                photos: photos,
+                manager: manager,
+                currentIndex: $currentIndex,
+                isChromeVisible: $isChromeVisible
+            )
             .ignoresSafeArea()
             .offset(y: dismissOffset)
 
@@ -209,11 +288,6 @@ struct PhotoViewerView: View {
             )
             .frame(width: 0, height: 0)
         )
-        .onAppear {
-            if let idx = photos.firstIndex(where: { $0.id == initialPhoto.id }) {
-                currentIndex = idx
-            }
-        }
         .sheet(isPresented: $showShareSheet) {
             if currentIndex < photos.count {
                 ShareSheet(items: [photos[currentIndex].url])
@@ -231,6 +305,7 @@ struct PhotoViewerView: View {
 
 struct PhotoPageView: View {
     let photo: PhotoFile
+    var initialThumbnail: UIImage? = nil
     @EnvironmentObject var manager: GalleryManager
     @Binding var isChromeVisible: Bool
 
@@ -240,7 +315,8 @@ struct PhotoPageView: View {
     @State private var lastScale: CGFloat = 1.0
     @State private var panOffset: CGSize = .zero
     @State private var lastPanOffset: CGSize = .zero
-    @State private var showVideoPlayer = false
+    @State private var videoPlayer: AVPlayer?
+    @State private var isPlayingVideo = false
     @State private var isPlayingLive = false
     @State private var livePlayer: AVPlayer?
 
@@ -248,24 +324,34 @@ struct PhotoPageView: View {
         GeometryReader { geo in
             ZStack {
                 if photo.isVideo {
-                    // Video: show thumbnail with play button
-                    if let img = thumbnail {
-                        Image(uiImage: img)
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
+                    if isPlayingVideo, let player = videoPlayer {
+                        VideoPlayer(player: player)
                     } else {
-                        ProgressView().tint(.white)
-                    }
+                        // Thumbnail with play button
+                        if let img = thumbnail ?? initialThumbnail {
+                            Image(uiImage: img)
+                                .resizable()
+                                .aspectRatio(contentMode: .fit)
+                        } else {
+                            ProgressView().tint(.white)
+                        }
 
-                    Button { showVideoPlayer = true } label: {
-                        Image(systemName: "play.circle.fill")
-                            .font(.system(size: 64))
-                            .foregroundStyle(.white.opacity(0.9))
-                            .shadow(radius: 8)
+                        Button {
+                            let player = AVPlayer(url: photo.url)
+                            videoPlayer = player
+                            isPlayingVideo = true
+                            player.play()
+                            isChromeVisible = false
+                        } label: {
+                            Image(systemName: "play.circle.fill")
+                                .font(.system(size: 64))
+                                .foregroundStyle(.white.opacity(0.9))
+                                .shadow(radius: 8)
+                        }
                     }
                 } else {
                     // Photo: zoomable image
-                    if let displayImage = fullImage ?? thumbnail {
+                    if let displayImage = fullImage ?? thumbnail ?? initialThumbnail {
                         Image(uiImage: displayImage)
                             .resizable()
                             .aspectRatio(contentMode: .fit)
@@ -356,6 +442,9 @@ struct PhotoPageView: View {
             lastScale = 1.0
             panOffset = .zero
             lastPanOffset = .zero
+            isPlayingVideo = false
+            videoPlayer?.pause()
+            videoPlayer = nil
             isPlayingLive = false
             livePlayer?.pause()
             livePlayer = nil
@@ -366,9 +455,6 @@ struct PhotoPageView: View {
             if !photo.isVideo {
                 fullImage = await manager.loadFullImage(for: photo.url)
             }
-        }
-        .fullScreenCover(isPresented: $showVideoPlayer) {
-            VideoPlayerView(url: photo.url)
         }
     }
 }

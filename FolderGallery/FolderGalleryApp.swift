@@ -1,5 +1,11 @@
 import SwiftUI
 
+// MARK: - Design Constants
+
+enum Design {
+    static let accentColor = Color(red: 0.90, green: 0.65, blue: 0.22)
+}
+
 @main
 struct FolderGalleryApp: App {
     @StateObject private var galleryManager = GalleryManager()
@@ -8,6 +14,7 @@ struct FolderGalleryApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(galleryManager)
+                .tint(Design.accentColor)
         }
     }
 }
@@ -30,6 +37,7 @@ struct ContentView: View {
             .tabItem {
                 Label("All Photos", systemImage: "photo.stack.fill")
             }
+            .badge(manager.allPhotos.count)
         }
         .task {
             await manager.restoreFolder()

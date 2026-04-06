@@ -64,21 +64,29 @@ struct FolderBrowserView: View {
     }
 
     private var emptyState: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 20) {
             Image(systemName: "folder")
-                .font(.system(size: 56))
-                .foregroundStyle(.secondary)
-            Text("No Folder Selected")
-                .font(.title2)
-                .fontWeight(.semibold)
-            Text("Choose a folder to browse your photos.")
-                .foregroundStyle(.secondary)
-            Button("Choose Folder") {
+                .font(.system(size: 64, weight: .thin))
+                .foregroundStyle(Design.accentColor.opacity(0.7))
+            VStack(spacing: 8) {
+                Text("No Folder Selected")
+                    .font(.title2)
+                    .fontWeight(.semibold)
+                Text("Choose a folder to browse your photo library.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            Button {
                 showPicker = true
+            } label: {
+                Label("Choose Folder", systemImage: "folder.badge.plus")
+                    .font(.body.weight(.medium))
             }
             .buttonStyle(.borderedProminent)
+            .controlSize(.large)
         }
-        .padding()
+        .padding(32)
     }
 
     @ViewBuilder
@@ -125,31 +133,36 @@ struct FolderBrowserView: View {
                 )
             }
         }
+        .refreshable {
+            await manager.rescan()
+        }
     }
 
     private func folderRow(_ folder: PhotoFolder) -> some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 14) {
             if let coverURL = folder.coverPhotoURL {
-                ThumbnailView(url: coverURL, size: 56)
+                ThumbnailView(url: coverURL, size: 72, cornerRadius: 8)
             } else {
-                RoundedRectangle(cornerRadius: 4)
+                RoundedRectangle(cornerRadius: 8)
                     .fill(Color(.systemGray5))
-                    .frame(width: 56, height: 56)
+                    .frame(width: 72, height: 72)
                     .overlay {
                         Image(systemName: "folder.fill")
-                            .foregroundStyle(.secondary)
+                            .font(.title2)
+                            .foregroundStyle(.tertiary)
                     }
             }
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(folder.name)
                     .font(.body)
+                    .fontWeight(.medium)
                     .lineLimit(1)
                 Text("\(folder.totalPhotoCount) photos")
-                    .font(.caption)
+                    .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 4)
     }
 }

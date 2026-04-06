@@ -2,6 +2,7 @@ import Foundation
 import UIKit
 import ImageIO
 import UniformTypeIdentifiers
+import AVFoundation
 
 @MainActor
 final class GalleryManager: ObservableObject {
@@ -176,6 +177,11 @@ final class GalleryManager: ObservableObject {
         await scanFolder(at: url, silent: hadCache)
     }
 
+    func rescan() async {
+        guard let url = activeSecurityScopedURL else { return }
+        await scanFolder(at: url, silent: true)
+    }
+
     // MARK: - Folder Scanning (Iterative)
 
     func scanFolder(at url: URL, silent: Bool = false) async {
@@ -213,6 +219,12 @@ final class GalleryManager: ObservableObject {
                     includingPropertiesForKeys: keys,
                     options: [.skipsHiddenFiles, .skipsPackageDescendants]
                 ) {
+                    // First pass: classify files and collect metadata
+                    struct ScannedFile {
+                        let url: URL; let fileSize: Int64; let modDate: Date?; let isImage: Bool; let isVideo: Bool
+                    }
+                    var scannedFiles: [ScannedFile] = []
+
                     for itemURL in contents {
                         let resourceValues = try? itemURL.resourceValues(forKeys: Set(keys))
                         let isDir = resourceValues?.isDirectory ?? false
@@ -221,20 +233,51 @@ final class GalleryManager: ObservableObject {
                             subdirs.append(itemURL)
                         } else {
                             let ext = itemURL.pathExtension.lowercased()
-                            if !ext.isEmpty,
-                               let utType = UTType(filenameExtension: ext),
-                               utType.conforms(to: .image) {
-                                let fileSize = Int64(resourceValues?.fileSize ?? 0)
-                                let modDate = resourceValues?.contentModificationDate
-                                let photo = PhotoFile(
-                                    id: UUID(),
-                                    url: itemURL,
-                                    filename: itemURL.deletingPathExtension().lastPathComponent,
-                                    fileSize: fileSize,
-                                    dateTaken: modDate
-                                )
-                                photos.append(photo)
+                            if !ext.isEmpty, let utType = UTType(filenameExtension: ext) {
+                                let isImage = utType.conforms(to: .image)
+                                let isVideo = utType.conforms(to: .movie)
+                                if isImage || isVideo {
+                                    scannedFiles.append(ScannedFile(
+                                        url: itemURL,
+                                        fileSize: Int64(resourceValues?.fileSize ?? 0),
+                                        modDate: resourceValues?.contentModificationDate,
+                                        isImage: isImage, isVideo: isVideo
+                                    ))
+                                }
                             }
+                        }
+                    }
+
+                    // Second pass: pair live photos (image + video with same stem)
+                    let videoByName = Dictionary(
+                        scannedFiles.filter(\.isVideo).map {
+                            ($0.url.deletingPathExtension().lastPathComponent.lowercased(), $0.url)
+                        },
+                        uniquingKeysWith: { first, _ in first }
+                    )
+                    let imageStemSet = Set(
+                        scannedFiles.filter(\.isImage).map {
+                            $0.url.deletingPathExtension().lastPathComponent.lowercased()
+                        }
+                    )
+
+                    for file in scannedFiles where file.isImage {
+                        let stem = file.url.deletingPathExtension().lastPathComponent
+                        photos.append(PhotoFile(
+                            id: UUID(), url: file.url, filename: stem,
+                            fileSize: file.fileSize, dateTaken: file.modDate,
+                            livePhotoVideoURL: videoByName[stem.lowercased()]
+                        ))
+                    }
+                    // Standalone videos only (no matching image)
+                    for file in scannedFiles where file.isVideo {
+                        let stem = file.url.deletingPathExtension().lastPathComponent
+                        if !imageStemSet.contains(stem.lowercased()) {
+                            photos.append(PhotoFile(
+                                id: UUID(), url: file.url, filename: stem,
+                                fileSize: file.fileSize, dateTaken: file.modDate,
+                                isVideo: true
+                            ))
                         }
                     }
                 }
@@ -360,30 +403,38 @@ final class GalleryManager: ObservableObject {
         thumbnailCache.object(forKey: url as NSURL)
     }
 
-    func thumbnail(for url: URL, size: CGSize) async -> UIImage? {
+    func thumbnail(for url: URL, size: CGSize, isVideo: Bool = false) async -> UIImage? {
         if let cached = thumbnailCache.object(forKey: url as NSURL) {
             return cached
         }
 
         let maxPixelSize = max(size.width, size.height) * UIScreen.main.scale
         let result: UIImage? = await Task.detached(priority: .background) {
-            let options: [CFString: Any] = [
-                kCGImageSourceShouldCache: false
-            ]
-            guard let source = CGImageSourceCreateWithURL(url as CFURL, options as CFDictionary) else {
+            if isVideo {
+                let asset = AVAsset(url: url)
+                let generator = AVAssetImageGenerator(asset: asset)
+                generator.appliesPreferredTrackTransform = true
+                generator.maximumSize = CGSize(width: maxPixelSize, height: maxPixelSize)
+                if let cgImage = try? generator.copyCGImage(at: .zero, actualTime: nil) {
+                    return UIImage(cgImage: cgImage)
+                }
                 return nil
+            } else {
+                let options: [CFString: Any] = [kCGImageSourceShouldCache: false]
+                guard let source = CGImageSourceCreateWithURL(url as CFURL, options as CFDictionary) else {
+                    return nil
+                }
+                let thumbOptions: [CFString: Any] = [
+                    kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+                    kCGImageSourceCreateThumbnailFromImageAlways: true,
+                    kCGImageSourceCreateThumbnailWithTransform: true,
+                    kCGImageSourceShouldCacheImmediately: true
+                ]
+                guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbOptions as CFDictionary) else {
+                    return nil
+                }
+                return UIImage(cgImage: cgImage)
             }
-
-            let thumbOptions: [CFString: Any] = [
-                kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceShouldCacheImmediately: true
-            ]
-            guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbOptions as CFDictionary) else {
-                return nil
-            }
-            return UIImage(cgImage: cgImage)
         }.value
 
         if let image = result {

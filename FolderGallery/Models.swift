@@ -7,13 +7,36 @@ struct PhotoFile: Identifiable, Hashable, Codable {
     var filename: String
     var fileSize: Int64
     var dateTaken: Date?
+    var isVideo: Bool = false
+    var livePhotoVideoURL: URL? = nil
 
     // Not persisted — loaded lazily at runtime
     var dimensions: CGSize? = nil
     var exif: EXIFData? = nil
 
     enum CodingKeys: String, CodingKey {
-        case id, url, filename, fileSize, dateTaken
+        case id, url, filename, fileSize, dateTaken, isVideo, livePhotoVideoURL
+    }
+
+    init(id: UUID, url: URL, filename: String, fileSize: Int64, dateTaken: Date?, isVideo: Bool = false, livePhotoVideoURL: URL? = nil) {
+        self.id = id
+        self.url = url
+        self.filename = filename
+        self.fileSize = fileSize
+        self.dateTaken = dateTaken
+        self.isVideo = isVideo
+        self.livePhotoVideoURL = livePhotoVideoURL
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        url = try c.decode(URL.self, forKey: .url)
+        filename = try c.decode(String.self, forKey: .filename)
+        fileSize = try c.decode(Int64.self, forKey: .fileSize)
+        dateTaken = try c.decodeIfPresent(Date.self, forKey: .dateTaken)
+        isVideo = try c.decodeIfPresent(Bool.self, forKey: .isVideo) ?? false
+        livePhotoVideoURL = try c.decodeIfPresent(URL.self, forKey: .livePhotoVideoURL)
     }
 
     static func == (lhs: PhotoFile, rhs: PhotoFile) -> Bool {

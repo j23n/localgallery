@@ -10,9 +10,6 @@ final class GalleryManager: ObservableObject {
     @Published var allPhotos: [PhotoFile] = []
     @Published var isScanning: Bool = false
 
-    @Published var currentSortOrder: SortOrder = .dateDescending {
-        didSet { UserDefaults.standard.set(currentSortOrder.rawValue, forKey: "photoSortOrder") }
-    }
     @Published var folderSortOrder: FolderSortOrder = .nameAscending {
         didSet { UserDefaults.standard.set(folderSortOrder.rawValue, forKey: "folderSortOrder") }
     }
@@ -32,11 +29,6 @@ final class GalleryManager: ObservableObject {
         thumbnailCache.totalCostLimit = 100 * 1024 * 1024
         fullImageCache.totalCostLimit = 200 * 1024 * 1024
 
-        // Restore persisted sort orders
-        if let raw = UserDefaults.standard.string(forKey: "photoSortOrder"),
-           let order = SortOrder(rawValue: raw) {
-            currentSortOrder = order
-        }
         if let raw = UserDefaults.standard.string(forKey: "folderSortOrder"),
            let order = FolderSortOrder(rawValue: raw) {
             folderSortOrder = order
@@ -119,14 +111,17 @@ final class GalleryManager: ObservableObject {
 
     // MARK: - Disk Cache
 
+    private static let cacheVersion = 3 // Bump to invalidate old caches (added keywords + EXIF dates)
+
     private struct LibraryCache: Codable {
+        let version: Int
         let rootFolder: PhotoFolder
         let allPhotos: [PhotoFile]
     }
 
     private func saveCache() {
         guard let root = rootFolder else { return }
-        let cache = LibraryCache(rootFolder: root, allPhotos: allPhotos)
+        let cache = LibraryCache(version: Self.cacheVersion, rootFolder: root, allPhotos: allPhotos)
         let url = cacheURL
         Task.detached(priority: .utility) {
             do {
@@ -144,8 +139,14 @@ final class GalleryManager: ObservableObject {
         do {
             let data = try Data(contentsOf: cacheURL)
             let cache = try JSONDecoder().decode(LibraryCache.self, from: data)
+            guard cache.version == Self.cacheVersion else {
+                print("[Cache] Version mismatch (\(cache.version) vs \(Self.cacheVersion)), discarding")
+                try? FileManager.default.removeItem(at: cacheURL)
+                return false
+            }
             self.rootFolder = cache.rootFolder
             self.allPhotos = cache.allPhotos
+            rebuildSortAndIndex()
             return true
         } catch {
             print("Failed to load cache: \(error)")
@@ -180,6 +181,125 @@ final class GalleryManager: ObservableObject {
     func rescan() async {
         guard let url = activeSecurityScopedURL else { return }
         await scanFolder(at: url, silent: true)
+    }
+
+    // MARK: - Metadata Reading
+
+    /// Read capture date and keywords from image metadata (EXIF/IPTC/XMP) + XMP sidecar
+    private nonisolated static func readImageMetadata(url: URL) -> (date: Date?, keywords: [String]) {
+        var captureDate: Date? = nil
+        var keywords: [String] = []
+
+        let options: [CFString: Any] = [kCGImageSourceShouldCache: false]
+        if let source = CGImageSourceCreateWithURL(url as CFURL, options as CFDictionary),
+           let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] {
+
+            // EXIF date: DateTimeOriginal → DateTimeDigitized → TIFF DateTime
+            let exifDict = properties[kCGImagePropertyExifDictionary] as? [CFString: Any]
+            let tiffDict = properties[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
+
+            let dateFormatter = DateFormatter()
+            dateFormatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
+
+            let dateStrings = [
+                exifDict?[kCGImagePropertyExifDateTimeOriginal] as? String,
+                exifDict?[kCGImagePropertyExifDateTimeDigitized] as? String,
+                tiffDict?[kCGImagePropertyTIFFDateTime] as? String,
+            ]
+            for dateString in dateStrings {
+                if let s = dateString, let d = dateFormatter.date(from: s) {
+                    captureDate = d
+                    break
+                }
+            }
+
+            // IPTC keywords
+            if let iptcDict = properties[kCGImagePropertyIPTCDictionary] as? [CFString: Any],
+               let iptcKeywords = iptcDict[kCGImagePropertyIPTCKeywords] as? [String] {
+                keywords.append(contentsOf: iptcKeywords)
+            }
+
+            // XMP metadata (dc:subject, lr:hierarchicalSubject)
+            if let xmpMetadata = CGImageSourceCopyMetadataAtIndex(source, 0, nil) {
+                let tags = CGImageMetadataCopyTags(xmpMetadata) as? [CGImageMetadataTag] ?? []
+                for tag in tags {
+                    let name = CGImageMetadataTagCopyName(tag) as String? ?? ""
+                    if name == "subject" || name == "TagsList" || name == "hierarchicalSubject" {
+                        if let value = CGImageMetadataTagCopyValue(tag) {
+                            if let array = value as? [String] {
+                                for item in array {
+                                    // Split hierarchical tags: "People|John Smith" → ["People", "John Smith"]
+                                    let parts = item.split(separator: "|").map { String($0).trimmingCharacters(in: .whitespaces) }
+                                    keywords.append(contentsOf: parts)
+                                }
+                            } else if let str = value as? String {
+                                let parts = str.split(separator: "|").map { String($0).trimmingCharacters(in: .whitespaces) }
+                                keywords.append(contentsOf: parts)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Also check for XMP sidecar file
+        let sidecarKeywords = readXMPSidecar(for: url)
+        keywords.append(contentsOf: sidecarKeywords)
+
+        // Deduplicate keywords (case-insensitive)
+        var seen = Set<String>()
+        keywords = keywords.filter { kw in
+            let lower = kw.lowercased()
+            if seen.contains(lower) { return false }
+            seen.insert(lower)
+            return true
+        }
+
+        return (captureDate, keywords)
+    }
+
+    /// Parse XMP sidecar file (.xmp) for keywords
+    private nonisolated static func readXMPSidecar(for imageURL: URL) -> [String] {
+        let xmpURL = imageURL.appendingPathExtension("xmp")
+        guard let data = try? Data(contentsOf: xmpURL),
+              let xml = String(data: data, encoding: .utf8) else { return [] }
+
+        var keywords: [String] = []
+
+        // Parse dc:subject, digiKam:TagsList, lr:hierarchicalSubject
+        // These appear as <rdf:li>value</rdf:li> inside their respective tags
+        let patterns = [
+            "dc:subject", "digiKam:TagsList", "lr:hierarchicalSubject",
+            "MicrosoftPhoto:LastKeywordXMP"
+        ]
+
+        for pattern in patterns {
+            guard let startRange = xml.range(of: "<\(pattern)>") ?? xml.range(of: "<\(pattern) ") else { continue }
+            guard let endRange = xml.range(of: "</\(pattern)>", range: startRange.upperBound..<xml.endIndex) else { continue }
+            let block = String(xml[startRange.upperBound..<endRange.lowerBound])
+
+            // Extract <rdf:li> values
+            var searchRange = block.startIndex..<block.endIndex
+            while let liStart = block.range(of: "<rdf:li>", range: searchRange) {
+                guard let liEnd = block.range(of: "</rdf:li>", range: liStart.upperBound..<block.endIndex) else { break }
+                let value = String(block[liStart.upperBound..<liEnd.lowerBound])
+                let parts = value.split(separator: "|").map { String($0).trimmingCharacters(in: .whitespaces) }
+                keywords.append(contentsOf: parts)
+                searchRange = liEnd.upperBound..<block.endIndex
+            }
+        }
+
+        return keywords
+    }
+
+    /// Read capture date from video metadata
+    private nonisolated static func readVideoDate(url: URL) async -> Date? {
+        let asset = AVAsset(url: url)
+        guard let creationDate = try? await asset.load(.creationDate),
+              let dateValue = try? await creationDate.load(.dateValue) else {
+            return nil
+        }
+        return dateValue
     }
 
     // MARK: - Folder Scanning (Iterative)
@@ -249,9 +369,20 @@ final class GalleryManager: ObservableObject {
                     }
 
                     // Second pass: pair live photos (image + video with same stem)
+                    // Handle double-extension patterns like IMG_1234.heic.mov or IMG_1234.jpg.mov
+                    let imageExtensions: Set<String> = ["heic", "heif", "jpg", "jpeg", "png", "tiff", "tif", "dng", "webp"]
+                    let videoStem: (URL) -> String = { url in
+                        var stem = url.deletingPathExtension().lastPathComponent.lowercased()
+                        let ext = (stem as NSString).pathExtension.lowercased()
+                        if imageExtensions.contains(ext) {
+                            stem = (stem as NSString).deletingPathExtension
+                        }
+                        return stem
+                    }
+
                     let videoByName = Dictionary(
                         scannedFiles.filter(\.isVideo).map {
-                            ($0.url.deletingPathExtension().lastPathComponent.lowercased(), $0.url)
+                            (videoStem($0.url), $0.url)
                         },
                         uniquingKeysWith: { first, _ in first }
                     )
@@ -261,23 +392,44 @@ final class GalleryManager: ObservableObject {
                         }
                     )
 
+                    var pairedCount = 0
                     for file in scannedFiles where file.isImage {
                         let stem = file.url.deletingPathExtension().lastPathComponent
+                        let liveURL = videoByName[stem.lowercased()]
+                        if liveURL != nil { pairedCount += 1 }
+                        let metadata = GalleryManager.readImageMetadata(url: file.url)
                         photos.append(PhotoFile(
                             id: UUID(), url: file.url, filename: stem,
-                            fileSize: file.fileSize, dateTaken: file.modDate,
-                            livePhotoVideoURL: videoByName[stem.lowercased()]
+                            fileSize: file.fileSize,
+                            dateTaken: metadata.date ?? file.modDate,
+                            livePhotoVideoURL: liveURL,
+                            keywords: metadata.keywords
                         ))
                     }
                     // Standalone videos only (no matching image)
+                    var standaloneVideoCount = 0
                     for file in scannedFiles where file.isVideo {
-                        let stem = file.url.deletingPathExtension().lastPathComponent
-                        if !imageStemSet.contains(stem.lowercased()) {
+                        let stem = videoStem(file.url)
+                        if !imageStemSet.contains(stem) {
+                            standaloneVideoCount += 1
                             photos.append(PhotoFile(
                                 id: UUID(), url: file.url, filename: stem,
                                 fileSize: file.fileSize, dateTaken: file.modDate,
                                 isVideo: true
                             ))
+                        }
+                    }
+
+                    let imageCount = scannedFiles.filter(\.isImage).count
+                    let videoCount = scannedFiles.filter(\.isVideo).count
+                    if videoCount > 0 {
+                        print("[Scan] \(dirName): \(imageCount) images, \(videoCount) videos → \(pairedCount) live pairs, \(standaloneVideoCount) standalone videos")
+                        if pairedCount == 0 && videoCount > 0 {
+                            // Log sample stems to debug mismatch
+                            let sampleImageStems = Array(imageStemSet.prefix(3))
+                            let sampleVideoStems = Array(videoByName.keys.prefix(3))
+                            print("[Scan]   Image stems: \(sampleImageStems)")
+                            print("[Scan]   Video stems: \(sampleVideoStems)")
                         }
                     }
                 }
@@ -345,6 +497,7 @@ final class GalleryManager: ObservableObject {
         if !result.flatPhotos.isEmpty || !silent {
             self.rootFolder = result.root
             self.allPhotos = result.flatPhotos
+            rebuildSortAndIndex()
             saveCache()
         }
         isScanning = false
@@ -352,25 +505,25 @@ final class GalleryManager: ObservableObject {
 
     // MARK: - Sorted / Search
 
-    var sortedPhotos: [PhotoFile] {
-        sortPhotos(allPhotos)
-    }
+    /// Pre-sorted array, rebuilt when allPhotos changes
+    private var _sortedPhotos: [PhotoFile] = []
+    /// Lowercase search corpus per photo ID for fast substring matching
+    private var searchIndex: [UUID: String] = [:]
+
+    var sortedPhotos: [PhotoFile] { _sortedPhotos }
 
     func sortPhotos(_ photos: [PhotoFile]) -> [PhotoFile] {
-        switch currentSortOrder {
-        case .nameAscending:
-            return photos.sorted { $0.filename.localizedStandardCompare($1.filename) == .orderedAscending }
-        case .nameDescending:
-            return photos.sorted { $0.filename.localizedStandardCompare($1.filename) == .orderedDescending }
-        case .dateAscending:
-            return photos.sorted { ($0.dateTaken ?? .distantPast) < ($1.dateTaken ?? .distantPast) }
-        case .dateDescending:
-            return photos.sorted { ($0.dateTaken ?? .distantPast) > ($1.dateTaken ?? .distantPast) }
-        case .sizeAscending:
-            return photos.sorted { $0.fileSize < $1.fileSize }
-        case .sizeDescending:
-            return photos.sorted { $0.fileSize > $1.fileSize }
-        }
+        photos.sorted { ($0.dateTaken ?? .distantPast) > ($1.dateTaken ?? .distantPast) }
+    }
+
+    private func rebuildSortAndIndex() {
+        _sortedPhotos = sortPhotos(allPhotos)
+        searchIndex = Dictionary(uniqueKeysWithValues: allPhotos.map { photo in
+            let corpus = ([photo.filename] + photo.keywords)
+                .joined(separator: " ")
+                .lowercased()
+            return (photo.id, corpus)
+        })
     }
 
     func sortFolders(_ folders: [PhotoFolder]) -> [PhotoFolder] {
@@ -391,9 +544,10 @@ final class GalleryManager: ObservableObject {
     }
 
     func search(query: String) -> [PhotoFile] {
-        guard !query.isEmpty else { return sortedPhotos }
-        return sortedPhotos.filter {
-            $0.filename.localizedCaseInsensitiveContains(query)
+        guard !query.isEmpty else { return _sortedPhotos }
+        let q = query.lowercased()
+        return _sortedPhotos.filter { photo in
+            searchIndex[photo.id]?.contains(q) ?? false
         }
     }
 

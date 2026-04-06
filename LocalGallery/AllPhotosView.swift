@@ -23,15 +23,8 @@ struct AllPhotosView: View {
         manager.search(query: searchText)
     }
 
-    private var isDateSorted: Bool {
-        manager.currentSortOrder == .dateAscending || manager.currentSortOrder == .dateDescending
-    }
-
     private var photoSections: [PhotoSection] {
         let photos = filteredPhotos
-        guard isDateSorted else {
-            return [PhotoSection(id: "all", title: "", photos: photos)]
-        }
 
         let cal = Calendar.current
         let fmt = DateFormatter()
@@ -115,7 +108,7 @@ struct AllPhotosView: View {
             }
         }
         .navigationTitle("All Photos")
-        .searchable(text: $searchText, prompt: "Search by filename")
+        .searchable(text: $searchText, prompt: "Search by name or tag")
         .toolbar {
             if isSelecting {
                 ToolbarItem(placement: .topBarLeading) {
@@ -147,17 +140,6 @@ struct AllPhotosView: View {
                 }
             } else {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        Picker("Sort", selection: $manager.currentSortOrder) {
-                            ForEach(SortOrder.allCases, id: \.self) { order in
-                                Text(order.label).tag(order)
-                            }
-                        }
-                    } label: {
-                        Image(systemName: "arrow.up.arrow.down")
-                    }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
                     Button { cycleColumnCount() } label: {
                         Image(systemName: gridIconName)
                     }
@@ -178,42 +160,44 @@ struct AllPhotosView: View {
         }
     }
 
+    private var cellSize: CGFloat {
+        let screenWidth = UIScreen.main.bounds.width
+        return max(1, (screenWidth - CGFloat(columnCount - 1) * 2) / CGFloat(columnCount))
+    }
+
     private var photoGrid: some View {
-        GeometryReader { geo in
-            let cellSize = max(1, (geo.size.width - CGFloat(columnCount - 1) * 2) / CGFloat(columnCount))
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVGrid(columns: columns, spacing: 2, pinnedViews: [.sectionHeaders]) {
-                        ForEach(photoSections) { section in
-                            Section {
-                                ForEach(section.photos) { photo in
-                                    gridCell(photo: photo, cellSize: cellSize)
-                                }
-                            } header: {
-                                if !section.title.isEmpty {
-                                    Text(section.title)
-                                        .font(.title3)
-                                        .fontWeight(.bold)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                        .padding(.horizontal, 12)
-                                        .padding(.top, 16)
-                                        .padding(.bottom, 6)
-                                        .background(.bar)
-                                        .id(section.id)
-                                }
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVGrid(columns: columns, spacing: 2, pinnedViews: [.sectionHeaders]) {
+                    ForEach(photoSections) { section in
+                        Section {
+                            ForEach(section.photos) { photo in
+                                gridCell(photo: photo, cellSize: cellSize)
+                            }
+                        } header: {
+                            if !section.title.isEmpty {
+                                Text(section.title)
+                                    .font(.title3)
+                                    .fontWeight(.bold)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.horizontal, 12)
+                                    .padding(.top, 16)
+                                    .padding(.bottom, 6)
+                                    .background(.bar)
+                                    .id(section.id)
                             }
                         }
                     }
                 }
-                .refreshable {
-                    await manager.rescan()
-                }
-                .overlay(alignment: .trailing) {
-                    if isDateSorted && yearIndex.count > 1 {
-                        YearScrubber(years: yearIndex) { sectionID in
-                            withAnimation {
-                                proxy.scrollTo(sectionID, anchor: .top)
-                            }
+            }
+            .refreshable {
+                await manager.rescan()
+            }
+            .overlay(alignment: .trailing) {
+                if yearIndex.count > 1 {
+                    YearScrubber(years: yearIndex) { sectionID in
+                        withAnimation {
+                            proxy.scrollTo(sectionID, anchor: .top)
                         }
                     }
                 }

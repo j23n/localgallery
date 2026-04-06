@@ -7,7 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		A10001010000000000000001 /* FolderGalleryApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10002010000000000000001 /* FolderGalleryApp.swift */; };
+		A10001010000000000000001 /* LocalGalleryApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10002010000000000000001 /* LocalGalleryApp.swift */; };
 		A10001010000000000000002 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10002010000000000000002 /* Models.swift */; };
 		A10001010000000000000003 /* GalleryManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10002010000000000000003 /* GalleryManager.swift */; };
 		A10001010000000000000004 /* FolderBrowserView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10002010000000000000004 /* FolderBrowserView.swift */; };
@@ -23,7 +23,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		A10002010000000000000001 /* FolderGalleryApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FolderGalleryApp.swift; sourceTree = "<group>"; };
+		A10002010000000000000001 /* LocalGalleryApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalGalleryApp.swift; sourceTree = "<group>"; };
 		A10002010000000000000002 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		A10002010000000000000003 /* GalleryManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GalleryManager.swift; sourceTree = "<group>"; };
 		A10002010000000000000004 /* FolderBrowserView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FolderBrowserView.swift; sourceTree = "<group>"; };
@@ -36,7 +36,7 @@
 		A1000201000000000000000B /* ShareSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareSheet.swift; sourceTree = "<group>"; };
 		A1000201000000000000000C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A1000201000000000000000D /* VideoPlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoPlayerView.swift; sourceTree = "<group>"; };
-		A10003010000000000000001 /* FolderGallery.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FolderGallery.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10003010000000000000001 /* LocalGallery.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LocalGallery.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -53,15 +53,15 @@
 		A10005010000000000000001 = {
 			isa = PBXGroup;
 			children = (
-				A10005010000000000000002 /* FolderGallery */,
+				A10005010000000000000002 /* LocalGallery */,
 				A10005010000000000000003 /* Products */,
 			);
 			sourceTree = "<group>";
 		};
-		A10005010000000000000002 /* FolderGallery */ = {
+		A10005010000000000000002 /* LocalGallery */ = {
 			isa = PBXGroup;
 			children = (
-				A10002010000000000000001 /* FolderGalleryApp.swift */,
+				A10002010000000000000001 /* LocalGalleryApp.swift */,
 				A10002010000000000000002 /* Models.swift */,
 				A10002010000000000000003 /* GalleryManager.swift */,
 				A10002010000000000000004 /* FolderBrowserView.swift */,
@@ -75,13 +75,13 @@
 				A1000201000000000000000D /* VideoPlayerView.swift */,
 				A1000201000000000000000C /* Assets.xcassets */,
 			);
-			path = FolderGallery;
+			path = LocalGallery;
 			sourceTree = "<group>";
 		};
 		A10005010000000000000003 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				A10003010000000000000001 /* FolderGallery.app */,
+				A10003010000000000000001 /* LocalGallery.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -89,9 +89,9 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		A10006010000000000000001 /* FolderGallery */ = {
+		A10006010000000000000001 /* LocalGallery */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = A10008010000000000000001 /* Build configuration list for PBXNativeTarget "FolderGallery" */;
+			buildConfigurationList = A10008010000000000000001 /* Build configuration list for PBXNativeTarget "LocalGallery" */;
 			buildPhases = (
 				A10007010000000000000001 /* Sources */,
 				A10004010000000000000001 /* Frameworks */,
@@ -101,9 +101,9 @@
 			);
 			dependencies = (
 			);
-			name = FolderGallery;
-			productName = FolderGallery;
-			productReference = A10003010000000000000001 /* FolderGallery.app */;
+			name = LocalGallery;
+			productName = LocalGallery;
+			productReference = A10003010000000000000001 /* LocalGallery.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -121,7 +121,7 @@
 					};
 				};
 			};
-			buildConfigurationList = A10008010000000000000002 /* Build configuration list for PBXProject "FolderGallery" */;
+			buildConfigurationList = A10008010000000000000002 /* Build configuration list for PBXProject "LocalGallery" */;
 			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
@@ -134,7 +134,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				A10006010000000000000001 /* FolderGallery */,
+				A10006010000000000000001 /* LocalGallery */,
 			);
 		};
 /* End PBXProject section */
@@ -155,7 +155,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				A10001010000000000000001 /* FolderGalleryApp.swift in Sources */,
+				A10001010000000000000001 /* LocalGalleryApp.swift in Sources */,
 				A10001010000000000000002 /* Models.swift in Sources */,
 				A10001010000000000000003 /* GalleryManager.swift in Sources */,
 				A10001010000000000000004 /* FolderBrowserView.swift in Sources */,
@@ -308,7 +308,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.foldergallery.app;
+				PRODUCT_BUNDLE_IDENTIFIER = com.localgallery.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
@@ -335,7 +335,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.foldergallery.app;
+				PRODUCT_BUNDLE_IDENTIFIER = com.localgallery.app;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
@@ -346,7 +346,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		A10008010000000000000001 /* Build configuration list for PBXNativeTarget "FolderGallery" */ = {
+		A10008010000000000000001 /* Build configuration list for PBXNativeTarget "LocalGallery" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				A1000A010000000000000003 /* Debug */,
@@ -355,7 +355,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		A10008010000000000000002 /* Build configuration list for PBXProject "FolderGallery" */ = {
+		A10008010000000000000002 /* Build configuration list for PBXProject "LocalGallery" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				A1000A010000000000000001 /* Debug */,

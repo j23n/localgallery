@@ -3,7 +3,6 @@ import SwiftUI
 struct FolderBrowserView: View {
     @EnvironmentObject var manager: GalleryManager
     var folder: PhotoFolder? = nil
-    @State private var showPicker = false
 
     private var displayFolder: PhotoFolder? {
         folder ?? manager.rootFolder
@@ -21,15 +20,6 @@ struct FolderBrowserView: View {
         }
         .navigationTitle(displayFolder?.name ?? "Folders")
         .toolbar {
-            if self.folder == nil {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        showPicker = true
-                    } label: {
-                        Image(systemName: "folder.badge.plus")
-                    }
-                }
-            }
             if displayFolder != nil && !(displayFolder?.subfolders.isEmpty ?? true) {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
@@ -40,23 +30,6 @@ struct FolderBrowserView: View {
                         }
                     } label: {
                         Image(systemName: "arrow.up.arrow.down")
-                    }
-                }
-            }
-        }
-        .sheet(isPresented: $showPicker) {
-            DocumentPicker { pickerURL in
-                // Start security-scoped access BEFORE creating bookmark —
-                // the scope token must be active for it to be embedded in the bookmark data.
-                _ = pickerURL.startAccessingSecurityScopedResource()
-                manager.saveBookmark(for: pickerURL)
-                pickerURL.stopAccessingSecurityScopedResource()
-
-                // Now resolve the bookmark and use the resolved URL
-                if let resolvedURL = manager.resolveBookmark() {
-                    Task {
-                        manager.startAccessingFolder(resolvedURL)
-                        await manager.scanFolder(at: resolvedURL)
                     }
                 }
             }
@@ -72,19 +45,11 @@ struct FolderBrowserView: View {
                 Text("No Folder Selected")
                     .font(.title2)
                     .fontWeight(.semibold)
-                Text("Choose a folder to browse your photo library.")
+                Text("Set a folder in Settings to get started.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             }
-            Button {
-                showPicker = true
-            } label: {
-                Label("Choose Folder", systemImage: "folder.badge.plus")
-                    .font(.body.weight(.medium))
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
         }
         .padding(32)
     }

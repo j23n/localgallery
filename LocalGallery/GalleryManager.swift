@@ -14,6 +14,7 @@ final class GalleryManager: ObservableObject {
         didSet { UserDefaults.standard.set(folderSortOrder.rawValue, forKey: "folderSortOrder") }
     }
 
+    private var isEnriching = false
     private let thumbnailCache = NSCache<NSURL, UIImage>()
     private let fullImageCache = NSCache<NSURL, UIImage>()
     private let bookmarkKey = "rootFolderBookmark"
@@ -111,7 +112,7 @@ final class GalleryManager: ObservableObject {
 
     // MARK: - Disk Cache
 
-    private static let cacheVersion = 3 // Bump to invalidate old caches (added keywords + EXIF dates)
+    private static let cacheVersion = 8
 
     private struct LibraryCache: Codable {
         let version: Int
@@ -146,6 +147,7 @@ final class GalleryManager: ObservableObject {
             }
             self.rootFolder = cache.rootFolder
             self.allPhotos = cache.allPhotos
+            print("[Cache] Loaded \(cache.allPhotos.count) photos from cache v\(cache.version)")
             rebuildSortAndIndex()
             return true
         } catch {
@@ -185,10 +187,13 @@ final class GalleryManager: ObservableObject {
 
     // MARK: - Metadata Reading
 
+    private typealias MetadataResult = (date: Date?, keywords: [String], hierarchicalTags: [HierarchicalTag])
+
     /// Read capture date and keywords from image metadata (EXIF/IPTC/XMP) + XMP sidecar
-    private nonisolated static func readImageMetadata(url: URL) -> (date: Date?, keywords: [String]) {
+    private nonisolated static func readImageMetadata(url: URL) -> MetadataResult {
         var captureDate: Date? = nil
         var keywords: [String] = []
+        var rawTags: [String] = []  // preserves original hierarchical paths
 
         let options: [CFString: Any] = [kCGImageSourceShouldCache: false]
         if let source = CGImageSourceCreateWithURL(url as CFURL, options as CFDictionary),
@@ -213,28 +218,39 @@ final class GalleryManager: ObservableObject {
                 }
             }
 
-            // IPTC keywords
+            // IPTC keywords (flat)
             if let iptcDict = properties[kCGImagePropertyIPTCDictionary] as? [CFString: Any],
                let iptcKeywords = iptcDict[kCGImagePropertyIPTCKeywords] as? [String] {
-                keywords.append(contentsOf: iptcKeywords)
+                for kw in iptcKeywords {
+                    keywords.append(kw)
+                    rawTags.append(kw)
+                }
             }
 
-            // XMP metadata (dc:subject, lr:hierarchicalSubject)
+            // XMP metadata (dc:subject, lr:hierarchicalSubject, digiKam:TagsList)
             if let xmpMetadata = CGImageSourceCopyMetadataAtIndex(source, 0, nil) {
                 let tags = CGImageMetadataCopyTags(xmpMetadata) as? [CGImageMetadataTag] ?? []
                 for tag in tags {
                     let name = CGImageMetadataTagCopyName(tag) as String? ?? ""
                     if name == "subject" || name == "TagsList" || name == "hierarchicalSubject" {
                         if let value = CGImageMetadataTagCopyValue(tag) {
+                            let items: [String]
                             if let array = value as? [String] {
-                                for item in array {
-                                    // Split hierarchical tags: "People|John Smith" → ["People", "John Smith"]
-                                    let parts = item.split(separator: "|").map { String($0).trimmingCharacters(in: .whitespaces) }
-                                    keywords.append(contentsOf: parts)
-                                }
+                                items = array
                             } else if let str = value as? String {
-                                let parts = str.split(separator: "|").map { String($0).trimmingCharacters(in: .whitespaces) }
-                                keywords.append(contentsOf: parts)
+                                items = [str]
+                            } else {
+                                items = []
+                            }
+                            for item in items {
+                                rawTags.append(item)
+                                let sep: Character? = item.contains("|") ? "|" : item.contains("/") ? "/" : item.contains(":") ? ":" : nil
+                                if let sep = sep {
+                                    let parts = item.split(separator: sep).map { String($0).trimmingCharacters(in: .whitespaces) }
+                                    keywords.append(contentsOf: parts)
+                                } else {
+                                    keywords.append(item)
+                                }
                             }
                         }
                     }
@@ -243,8 +259,9 @@ final class GalleryManager: ObservableObject {
         }
 
         // Also check for XMP sidecar file
-        let sidecarKeywords = readXMPSidecar(for: url)
+        let (sidecarKeywords, sidecarRawTags) = readXMPSidecar(for: url)
         keywords.append(contentsOf: sidecarKeywords)
+        rawTags.append(contentsOf: sidecarRawTags)
 
         // Deduplicate keywords (case-insensitive)
         var seen = Set<String>()
@@ -255,19 +272,29 @@ final class GalleryManager: ObservableObject {
             return true
         }
 
-        return (captureDate, keywords)
+        // Build deduplicated hierarchical tags from raw paths
+        var seenPaths = Set<String>()
+        let hierarchicalTags = rawTags.compactMap { raw -> HierarchicalTag? in
+            let key = raw.lowercased()
+            guard !seenPaths.contains(key) else { return nil }
+            seenPaths.insert(key)
+            return HierarchicalTag(raw: raw)
+        }
+
+        return (captureDate, keywords, hierarchicalTags)
     }
 
     /// Parse XMP sidecar file (.xmp) for keywords
-    private nonisolated static func readXMPSidecar(for imageURL: URL) -> [String] {
+    private nonisolated static func readXMPSidecar(for imageURL: URL) -> (keywords: [String], rawTags: [String]) {
         let xmpURL = imageURL.appendingPathExtension("xmp")
-        guard let data = try? Data(contentsOf: xmpURL),
-              let xml = String(data: data, encoding: .utf8) else { return [] }
+        guard FileManager.default.fileExists(atPath: xmpURL.path),
+              let data = try? Data(contentsOf: xmpURL),
+              let xml = String(data: data, encoding: .utf8) else { return ([], []) }
 
         var keywords: [String] = []
+        var rawTags: [String] = []
 
         // Parse dc:subject, digiKam:TagsList, lr:hierarchicalSubject
-        // These appear as <rdf:li>value</rdf:li> inside their respective tags
         let patterns = [
             "dc:subject", "digiKam:TagsList", "lr:hierarchicalSubject",
             "MicrosoftPhoto:LastKeywordXMP"
@@ -278,18 +305,23 @@ final class GalleryManager: ObservableObject {
             guard let endRange = xml.range(of: "</\(pattern)>", range: startRange.upperBound..<xml.endIndex) else { continue }
             let block = String(xml[startRange.upperBound..<endRange.lowerBound])
 
-            // Extract <rdf:li> values
             var searchRange = block.startIndex..<block.endIndex
             while let liStart = block.range(of: "<rdf:li>", range: searchRange) {
                 guard let liEnd = block.range(of: "</rdf:li>", range: liStart.upperBound..<block.endIndex) else { break }
                 let value = String(block[liStart.upperBound..<liEnd.lowerBound])
-                let parts = value.split(separator: "|").map { String($0).trimmingCharacters(in: .whitespaces) }
-                keywords.append(contentsOf: parts)
+                rawTags.append(value)
+                let sep: Character? = value.contains("|") ? "|" : value.contains("/") ? "/" : value.contains(":") ? ":" : nil
+                if let sep = sep {
+                    let parts = value.split(separator: sep).map { String($0).trimmingCharacters(in: .whitespaces) }
+                    keywords.append(contentsOf: parts)
+                } else {
+                    keywords.append(value)
+                }
                 searchRange = liEnd.upperBound..<block.endIndex
             }
         }
 
-        return keywords
+        return (keywords, rawTags)
     }
 
     /// Read capture date from video metadata
@@ -307,10 +339,15 @@ final class GalleryManager: ObservableObject {
     func scanFolder(at url: URL, silent: Bool = false) async {
         if !silent { isScanning = true }
 
+        // Snapshot cached metadata so we can merge it into the fresh scan
+        let cachedMetadata = Dictionary(allPhotos.map { ($0.url, (date: $0.dateTaken, keywords: $0.keywords, tags: $0.hierarchicalTags, enrichedFileDate: $0.enrichedFileDate)) },
+                                         uniquingKeysWith: { _, b in b })
+
         // Heavy file I/O runs off the main actor so cached UI stays responsive
-        let result: (root: PhotoFolder?, flatPhotos: [PhotoFile]) = await Task.detached(priority: .userInitiated) {
+        let result: (root: PhotoFolder?, flatPhotos: [PhotoFile], needsEnrichment: Bool) = await Task.detached(priority: .userInitiated) {
             let fm = FileManager.default
             var flatPhotos: [PhotoFile] = []
+            var needsEnrichment = false
 
             struct FolderNode {
                 let url: URL
@@ -397,13 +434,27 @@ final class GalleryManager: ObservableObject {
                         let stem = file.url.deletingPathExtension().lastPathComponent
                         let liveURL = videoByName[stem.lowercased()]
                         if liveURL != nil { pairedCount += 1 }
-                        let metadata = GalleryManager.readImageMetadata(url: file.url)
+
+                        // Merge cached EXIF metadata if available
+                        let cached = cachedMetadata[file.url]
+                        let dateTaken = cached?.date ?? file.modDate
+                        let keywords = cached?.keywords ?? []
+                        let tags = cached?.tags ?? []
+                        let cachedEnrichedDate = cached?.enrichedFileDate
+                        // Re-enrich if never enriched or file was modified since last enrichment
+                        let stale = cachedEnrichedDate == nil || file.modDate != cachedEnrichedDate
+                        if stale {
+                            needsEnrichment = true
+                        }
+
                         photos.append(PhotoFile(
                             id: UUID(), url: file.url, filename: stem,
                             fileSize: file.fileSize,
-                            dateTaken: metadata.date ?? file.modDate,
+                            dateTaken: dateTaken,
                             livePhotoVideoURL: liveURL,
-                            keywords: metadata.keywords
+                            keywords: keywords,
+                            hierarchicalTags: tags,
+                            enrichedFileDate: stale ? nil : cachedEnrichedDate
                         ))
                     }
                     // Standalone videos only (no matching image)
@@ -412,9 +463,10 @@ final class GalleryManager: ObservableObject {
                         let stem = videoStem(file.url)
                         if !imageStemSet.contains(stem) {
                             standaloneVideoCount += 1
+                            let cached = cachedMetadata[file.url]
                             photos.append(PhotoFile(
                                 id: UUID(), url: file.url, filename: stem,
-                                fileSize: file.fileSize, dateTaken: file.modDate,
+                                fileSize: file.fileSize, dateTaken: cached?.date ?? file.modDate,
                                 isVideo: true
                             ))
                         }
@@ -425,7 +477,6 @@ final class GalleryManager: ObservableObject {
                     if videoCount > 0 {
                         print("[Scan] \(dirName): \(imageCount) images, \(videoCount) videos → \(pairedCount) live pairs, \(standaloneVideoCount) standalone videos")
                         if pairedCount == 0 && videoCount > 0 {
-                            // Log sample stems to debug mismatch
                             let sampleImageStems = Array(imageStemSet.prefix(3))
                             let sampleVideoStems = Array(videoByName.keys.prefix(3))
                             print("[Scan]   Image stems: \(sampleImageStems)")
@@ -490,25 +541,118 @@ final class GalleryManager: ObservableObject {
             }
 
             let root = nodes.isEmpty ? nil : buildFolder(from: 0)
-            return (root, flatPhotos)
+            return (root, flatPhotos, needsEnrichment)
         }.value
 
         // Back on main actor — update published properties
         if !result.flatPhotos.isEmpty || !silent {
+            print("[Scan] Complete: \(result.flatPhotos.count) photos (needsEnrichment=\(result.needsEnrichment))")
             self.rootFolder = result.root
             self.allPhotos = result.flatPhotos
             rebuildSortAndIndex()
             saveCache()
         }
         isScanning = false
+
+        // Phase 2: enrich with EXIF dates and keywords in background (only if needed)
+        if result.needsEnrichment && !allPhotos.isEmpty {
+            await enrichMetadata()
+        }
     }
 
-    // MARK: - Sorted / Search
+    /// Read EXIF dates and keywords for all photos in the background.
+    /// Updates allPhotos in a single assignment so dates/keywords are live immediately.
+    private func enrichMetadata() async {
+        guard !isEnriching else { return }
+        isEnriching = true
+        defer { isEnriching = false }
+
+        let photos = allPhotos
+        let staleCount = photos.filter { $0.enrichedFileDate == nil && !$0.isVideo }.count
+        let startTime = CFAbsoluteTimeGetCurrent()
+        print("[Enrich] Starting metadata enrichment: \(staleCount) new/changed of \(photos.count) total")
+
+        if staleCount == 0 {
+            print("[Enrich] All photos up-to-date, skipping")
+            return
+        }
+
+        let enrichedPhotos: [PhotoFile] = await Task.detached(priority: .background) {
+            let fm = FileManager.default
+            var result = photos
+            var dateCount = 0
+            var keywordCount = 0
+            var uniqueKeywords = Set<String>()
+            for i in result.indices where !result[i].isVideo && result[i].enrichedFileDate == nil {
+                let metadata = GalleryManager.readImageMetadata(url: result[i].url)
+                if let date = metadata.date {
+                    result[i].dateTaken = date
+                    dateCount += 1
+                }
+                if !metadata.keywords.isEmpty {
+                    result[i].keywords = metadata.keywords
+                    result[i].hierarchicalTags = metadata.hierarchicalTags
+                    keywordCount += 1
+                    for kw in metadata.keywords { uniqueKeywords.insert(kw.lowercased()) }
+                }
+                // Stamp with the file's current modDate so we detect future changes
+                let modDate = (try? fm.attributesOfItem(atPath: result[i].url.path)[.modificationDate]) as? Date
+                result[i].enrichedFileDate = modDate ?? Date()
+                if (i + 1) % 5000 == 0 {
+                    print("[Enrich] Processed \(i + 1)/\(result.count)…")
+                }
+            }
+            let elapsed = CFAbsoluteTimeGetCurrent() - startTime
+            print("[Enrich] Done in \(String(format: "%.1f", elapsed))s: \(dateCount) EXIF dates, \(keywordCount) photos with keywords, \(uniqueKeywords.count) unique tags")
+            if !uniqueKeywords.isEmpty {
+                let sample = Array(uniqueKeywords.sorted().prefix(20))
+                print("[Enrich] Sample keywords: \(sample.joined(separator: ", "))")
+            }
+            // Log raw hierarchical tag paths to verify namespace parsing
+            let sampleTags = result.flatMap(\.hierarchicalTags).prefix(20)
+            if !sampleTags.isEmpty {
+                let tagDetails = sampleTags.map { "\($0.fullPath) → ns:\($0.namespace ?? "nil") name:\($0.displayName)" }
+                print("[Enrich] Sample hierarchical tags:\n  \(tagDetails.joined(separator: "\n  "))")
+            }
+            return result
+        }.value
+
+        // Only apply if allPhotos hasn't been replaced during enrichment
+        guard allPhotos.count == photos.count,
+              allPhotos.first?.url == photos.first?.url else {
+            print("[Enrich] Skipped — allPhotos changed during enrichment")
+            return
+        }
+
+        // Single assignment updates @Published, triggers one view update
+        self.allPhotos = enrichedPhotos
+        rebuildSortAndIndex()
+
+        // Also update folder tree and save cache
+        if let root = rootFolder {
+            let photosByURL = Dictionary(enrichedPhotos.map { ($0.url, $0) }, uniquingKeysWith: { _, b in b })
+            self.rootFolder = Self.updateFolderPhotos(root, photosByURL: photosByURL)
+        }
+        saveCache()
+        print("[Enrich] Applied enriched metadata to live data")
+    }
+
+    /// Recursively update photos inside folder tree with enriched metadata
+    nonisolated static func updateFolderPhotos(_ folder: PhotoFolder, photosByURL: [URL: PhotoFile]) -> PhotoFolder {
+        var f = folder
+        f.photos = f.photos.map { photosByURL[$0.url] ?? $0 }
+        f.subfolders = f.subfolders.map { updateFolderPhotos($0, photosByURL: photosByURL) }
+        return f
+    }
+
+    // MARK: - Sorted / Search / Tags
 
     /// Pre-sorted array, rebuilt when allPhotos changes
     private var _sortedPhotos: [PhotoFile] = []
     /// Lowercase search corpus per photo ID for fast substring matching
     private var searchIndex: [UUID: String] = [:]
+    /// All unique tags across the library, sorted by frequency
+    @Published private(set) var allTags: [TagSuggestion] = []
 
     var sortedPhotos: [PhotoFile] { _sortedPhotos }
 
@@ -517,13 +661,37 @@ final class GalleryManager: ObservableObject {
     }
 
     private func rebuildSortAndIndex() {
+        let t = CFAbsoluteTimeGetCurrent()
         _sortedPhotos = sortPhotos(allPhotos)
+        let withKeywords = allPhotos.filter { !$0.keywords.isEmpty }.count
+        let withDates = allPhotos.filter { $0.dateTaken != nil }.count
+
+        // Build search index: includes filename, keywords, and full tag paths
         searchIndex = Dictionary(uniqueKeysWithValues: allPhotos.map { photo in
-            let corpus = ([photo.filename] + photo.keywords)
-                .joined(separator: " ")
+            let tagPaths = photo.hierarchicalTags.map(\.fullPath)
+            let corpus = ([photo.filename] + photo.keywords + tagPaths)
+                .joined(separator: "\n")
                 .lowercased()
             return (photo.id, corpus)
         })
+
+        // Aggregate global tag list for autocomplete suggestions
+        var tagCounts: [String: (tag: HierarchicalTag, count: Int)] = [:]
+        for photo in allPhotos {
+            for tag in photo.hierarchicalTags {
+                let key = tag.fullPath.lowercased()
+                if let existing = tagCounts[key] {
+                    tagCounts[key] = (existing.tag, existing.count + 1)
+                } else {
+                    tagCounts[key] = (tag, 1)
+                }
+            }
+        }
+        allTags = tagCounts.values
+            .map { TagSuggestion(id: $0.tag.fullPath.lowercased(), displayName: $0.tag.displayName, fullPath: $0.tag.fullPath, namespace: $0.tag.namespace, count: $0.count) }
+            .sorted { $0.count > $1.count }
+
+        print("[Index] Built: \(allPhotos.count) photos (\(withDates) dates, \(withKeywords) keywords, \(allTags.count) unique tags) in \(String(format: "%.0f", (CFAbsoluteTimeGetCurrent() - t) * 1000))ms")
     }
 
     func sortFolders(_ folders: [PhotoFolder]) -> [PhotoFolder] {
@@ -543,12 +711,56 @@ final class GalleryManager: ObservableObject {
         }
     }
 
-    func search(query: String) -> [PhotoFile] {
-        guard !query.isEmpty else { return _sortedPhotos }
-        let q = query.lowercased()
-        return _sortedPhotos.filter { photo in
-            searchIndex[photo.id]?.contains(q) ?? false
+    func search(query: String, requiredTags: [TagSuggestion] = []) -> [PhotoFile] {
+        var results = _sortedPhotos
+
+        // Apply AND filter for each required tag
+        for tag in requiredTags {
+            let tagPath = tag.fullPath.lowercased()
+            results = results.filter { photo in
+                photo.hierarchicalTags.contains { $0.fullPath.lowercased() == tagPath }
+            }
         }
+
+        guard !query.isEmpty else {
+            if !requiredTags.isEmpty {
+                print("[Search] tags:\(requiredTags.map(\.displayName)) → \(results.count) matches")
+            }
+            return results
+        }
+
+        let q = query.lowercased()
+        // If query matches a known tag path exactly, filter by that tag
+        let isTagQuery = allTags.contains { $0.fullPath.lowercased() == q }
+        if isTagQuery {
+            results = results.filter { photo in
+                photo.hierarchicalTags.contains { $0.fullPath.lowercased() == q }
+            }
+        } else {
+            results = results.filter { photo in
+                searchIndex[photo.id]?.contains(q) ?? false
+            }
+        }
+        print("[Search] \"\(query)\" tags:\(requiredTags.map(\.displayName)) → \(results.count) matches\(isTagQuery ? " (exact tag)" : "")")
+        return results
+    }
+
+    // MARK: - Collections Helpers
+
+    var peopleTags: [TagSuggestion] {
+        allTags.filter { $0.namespace == nil }
+    }
+
+    var leafFolders: [PhotoFolder] {
+        guard let root = rootFolder else { return [] }
+        return Self.collectLeafFolders(root)
+    }
+
+    private static func collectLeafFolders(_ folder: PhotoFolder) -> [PhotoFolder] {
+        if folder.subfolders.isEmpty && !folder.photos.isEmpty {
+            return [folder]
+        }
+        return folder.subfolders.flatMap { collectLeafFolders($0) }
     }
 
     // MARK: - Thumbnails

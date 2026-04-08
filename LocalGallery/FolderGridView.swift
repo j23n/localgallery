@@ -5,30 +5,63 @@ struct FolderGridView: View {
     let photos: [PhotoFile]
 
     @EnvironmentObject var manager: GalleryManager
-    @AppStorage("gridColumnCount") private var columnCount: Int = 3
+    @AppStorage("gridSizeTier") private var sizeTier: Int = 0
     @State private var selectedPhoto: PhotoFile?
-    @State private var isSelecting = false
-    @State private var selectedIDs: Set<UUID> = []
-    @State private var showShareSheet = false
+    @State private var searchText: String = ""
+    @State private var scrollToTopTrigger = false
 
     private var sortedPhotos: [PhotoFile] {
         manager.sortPhotos(photos)
     }
 
-    private var columns: [GridItem] {
-        Array(repeating: GridItem(.flexible(), spacing: 2), count: columnCount)
+    private var filteredPhotos: [PhotoFile] {
+        guard !searchText.isEmpty else { return sortedPhotos }
+        let q = searchText.lowercased()
+        return sortedPhotos.filter { photo in
+            photo.filename.lowercased().contains(q) ||
+            photo.keywords.contains { $0.lowercased().contains(q) } ||
+            photo.hierarchicalTags.contains { $0.fullPath.lowercased().contains(q) || $0.displayName.lowercased().contains(q) }
+        }
     }
 
-    private var cellSize: CGFloat {
-        let screenWidth = UIScreen.main.bounds.width
-        return max(1, (screenWidth - CGFloat(columnCount - 1) * 2) / CGFloat(columnCount))
+    private var targetCellSize: CGFloat {
+        switch sizeTier {
+        case 0: return 130
+        case 1: return 100
+        default: return 78
+        }
+    }
+
+    private func columnCount(for width: CGFloat) -> Int {
+        max(2, Int((width + 2) / (targetCellSize + 2)))
+    }
+
+    private func columns(for width: CGFloat) -> [GridItem] {
+        Array(repeating: GridItem(.flexible(), spacing: 2), count: columnCount(for: width))
+    }
+
+    private func cellSize(for width: CGFloat) -> CGFloat {
+        let cols = columnCount(for: width)
+        return max(1, (width - CGFloat(cols - 1) * 2) / CGFloat(cols))
     }
 
     var body: some View {
-        ScrollView {
-            LazyVGrid(columns: columns, spacing: 2) {
-                ForEach(sortedPhotos) { photo in
-                    gridCell(photo: photo, cellSize: cellSize)
+        GeometryReader { geo in
+            let width = geo.size.width
+            let size = cellSize(for: width)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    Color.clear.frame(height: 0).id("__top__")
+                    LazyVGrid(columns: columns(for: width), spacing: 2) {
+                        ForEach(filteredPhotos) { photo in
+                            gridCell(photo: photo, cellSize: size)
+                        }
+                    }
+                }
+                .onChange(of: scrollToTopTrigger) {
+                    withAnimation {
+                        proxy.scrollTo("__top__", anchor: .top)
+                    }
                 }
             }
         }
@@ -36,54 +69,49 @@ struct FolderGridView: View {
             await manager.rescan()
         }
         .navigationTitle(title)
-        .toolbar {
-            if isSelecting {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Cancel") {
-                        isSelecting = false
-                        selectedIDs.removeAll()
-                    }
-                }
-                ToolbarItem(placement: .principal) {
-                    Text("\(selectedIDs.count) selected")
-                        .font(.headline)
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button(selectedIDs.count == sortedPhotos.count ? "Deselect All" : "Select All") {
-                        if selectedIDs.count == sortedPhotos.count {
-                            selectedIDs.removeAll()
-                        } else {
-                            selectedIDs = Set(sortedPhotos.map(\.id))
+        .searchable(text: $searchText, prompt: "Search by name or tag")
+        .searchSuggestions {
+            if !searchText.isEmpty {
+                let query = searchText.lowercased()
+                // Build tag suggestions from this folder's photos
+                let folderTags = Set(photos.flatMap(\.hierarchicalTags).map { $0.fullPath.lowercased() })
+                let suggestions = manager.allTags.filter {
+                    folderTags.contains($0.fullPath.lowercased()) &&
+                    ($0.displayName.lowercased().contains(query) || $0.fullPath.lowercased().contains(query))
+                }.prefix(8)
+                ForEach(Array(suggestions)) { tag in
+                    Label {
+                        HStack {
+                            Text(tag.displayName)
+                            Spacer()
+                            Text("\(tag.count)")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
                         }
+                    } icon: {
+                        Image(systemName: tag.icon)
+                            .foregroundStyle(Design.accentColor)
                     }
+                    .searchCompletion(tag.fullPath)
                 }
-                ToolbarItem(placement: .bottomBar) {
-                    Button {
-                        showShareSheet = true
-                    } label: {
-                        Label("Share", systemImage: "square.and.arrow.up")
-                    }
-                    .disabled(selectedIDs.isEmpty)
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    scrollToTopTrigger.toggle()
+                } label: {
+                    Image(systemName: "arrow.up")
                 }
-            } else {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { cycleColumnCount() } label: {
-                        Image(systemName: gridIconName)
-                    }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { isSelecting = true } label: {
-                        Image(systemName: "checkmark.circle")
-                    }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { cycleSizeTier() } label: {
+                    Image(systemName: gridIconName)
                 }
             }
         }
         .fullScreenCover(item: $selectedPhoto) { photo in
-            PhotoViewerView(photos: sortedPhotos, initialPhoto: photo)
-        }
-        .sheet(isPresented: $showShareSheet) {
-            let urls: [Any] = sortedPhotos.filter { selectedIDs.contains($0.id) }.map(\.url)
-            ShareSheet(items: urls)
+            PhotoViewerView(photos: filteredPhotos, initialPhoto: photo)
         }
     }
 
@@ -91,59 +119,21 @@ struct FolderGridView: View {
     private func gridCell(photo: PhotoFile, cellSize: CGFloat) -> some View {
         ThumbnailView(url: photo.url, size: cellSize, isVideo: photo.isVideo, isLivePhoto: photo.livePhotoVideoURL != nil)
             .frame(width: cellSize, height: cellSize)
-            .overlay {
-                if isSelecting && selectedIDs.contains(photo.id) {
-                    Color.black.opacity(0.2)
-                }
-            }
-            .overlay(alignment: .bottomTrailing) {
-                if isSelecting {
-                    ZStack {
-                        if selectedIDs.contains(photo.id) {
-                            Circle()
-                                .fill(Design.accentColor)
-                                .frame(width: 26, height: 26)
-                            Image(systemName: "checkmark")
-                                .font(.system(size: 12, weight: .bold))
-                                .foregroundStyle(.white)
-                        } else {
-                            Circle()
-                                .strokeBorder(.white.opacity(0.9), lineWidth: 1.5)
-                                .frame(width: 26, height: 26)
-                                .shadow(color: .black.opacity(0.4), radius: 3)
-                        }
-                    }
-                    .animation(.spring(response: 0.3, dampingFraction: 0.7), value: selectedIDs.contains(photo.id))
-                    .padding(6)
-                }
-            }
             .contentShape(Rectangle())
             .onTapGesture {
-                if isSelecting {
-                    if selectedIDs.contains(photo.id) {
-                        selectedIDs.remove(photo.id)
-                    } else {
-                        selectedIDs.insert(photo.id)
-                    }
-                } else {
-                    selectedPhoto = photo
-                }
+                selectedPhoto = photo
             }
     }
 
     private var gridIconName: String {
-        switch columnCount {
-        case 3: return "square.grid.3x3"
-        case 4: return "rectangle.grid.3x2"
-        default: return "rectangle.grid.3x2"
+        switch sizeTier {
+        case 0: return "square.grid.3x3"
+        case 1: return "square.grid.3x3.fill"
+        default: return "square.grid.4x3.fill"
         }
     }
 
-    private func cycleColumnCount() {
-        switch columnCount {
-        case 3: columnCount = 4
-        case 4: columnCount = 5
-        default: columnCount = 3
-        }
+    private func cycleSizeTier() {
+        sizeTier = (sizeTier + 1) % 3
     }
 }

@@ -1,6 +1,104 @@
 import Foundation
 import CoreGraphics
 
+// MARK: - Hierarchical Tag
+
+struct HierarchicalTag: Hashable, Codable {
+    let fullPath: String      // "People|Johannes" or "beach"
+    let namespace: String?    // "People", nil for flat tags
+    let displayName: String   // "Johannes" or "beach"
+
+    /// Create from a raw tag string, detecting hierarchy separator ("|", "/", or ":")
+    init(raw: String) {
+        self.fullPath = raw
+        let separator: Character? = raw.contains("|") ? "|" : raw.contains("/") ? "/" : raw.contains(":") ? ":" : nil
+        if let sep = separator {
+            let parts = raw.split(separator: sep, maxSplits: 1).map { String($0).trimmingCharacters(in: .whitespaces) }
+            if parts.count > 1 {
+                self.namespace = parts[0]
+                self.displayName = Self.prettify(parts[1])
+            } else {
+                self.namespace = nil
+                self.displayName = Self.prettify(raw)
+            }
+        } else {
+            self.namespace = nil
+            self.displayName = Self.prettify(raw)
+        }
+    }
+
+    /// Replace dashes with spaces and title-case for display
+    private static func prettify(_ s: String) -> String {
+        s.replacingOccurrences(of: "-", with: " ").capitalized
+    }
+
+    init(fullPath: String, namespace: String?, displayName: String) {
+        self.fullPath = fullPath
+        self.namespace = namespace
+        self.displayName = displayName
+    }
+}
+
+// MARK: - Tag Namespace Icons
+
+enum TagNamespace {
+    static func icon(for namespace: String?) -> String {
+        guard let ns = namespace?.lowercased() else { return "person.fill" }
+        switch ns {
+        // Geography
+        case "country", "cc":              return "flag.fill"
+        case "region":                     return "map.fill"
+        case "city":                       return "building.2.fill"
+        case "neighborhood":               return "signpost.right.fill"
+        case "landmark":                   return "mappin.and.ellipse"
+        // Built environment
+        case "architecture":               return "building.columns.fill"
+        case "scene", "setting":           return "photo.fill"
+        // Objects & living things
+        case "object":                     return "cube.fill"
+        case "animal":                     return "pawprint.fill"
+        case "plant":                      return "leaf.fill"
+        case "vehicle":                    return "car.fill"
+        // Food & drink
+        case "food":                       return "fork.knife"
+        case "cuisine":                    return "takeoutbag.and.cup.and.straw.fill"
+        // Activities & events
+        case "activity":                   return "figure.run"
+        case "event":                      return "calendar"
+        // People
+        case "people":                     return "person.fill"
+        case "age":                        return "person.crop.circle"
+        // Aesthetics
+        case "comp":                       return "viewfinder"
+        case "mood":                       return "sparkles"
+        case "color":                      return "paintpalette.fill"
+        // Environment
+        case "weather":                    return "cloud.sun.fill"
+        case "season":                     return "leaf.arrow.circlepath"
+        case "time":                       return "clock.fill"
+        // Text & dates
+        case "text":                       return "textformat"
+        case "year":                       return "calendar.badge.clock"
+        case "month":                      return "calendar"
+        case "day":                        return "sun.horizon.fill"
+        default:                           return "tag.fill"
+        }
+    }
+}
+
+// MARK: - Tag Suggestion
+
+struct TagSuggestion: Identifiable, Hashable {
+    let id: String          // fullPath lowercased
+    let displayName: String // leaf value
+    let fullPath: String    // original hierarchical path
+    let namespace: String?  // first segment or nil
+    let count: Int          // number of photos with this tag
+    var icon: String { TagNamespace.icon(for: namespace) }
+}
+
+// MARK: - Photo File
+
 struct PhotoFile: Identifiable, Hashable, Codable {
     let id: UUID
     let url: URL
@@ -10,16 +108,19 @@ struct PhotoFile: Identifiable, Hashable, Codable {
     var isVideo: Bool = false
     var livePhotoVideoURL: URL? = nil
     var keywords: [String] = []
+    var hierarchicalTags: [HierarchicalTag] = []
+    /// File modDate at the time metadata was last read; nil = never enriched
+    var enrichedFileDate: Date? = nil
 
     // Not persisted — loaded lazily at runtime
     var dimensions: CGSize? = nil
     var exif: EXIFData? = nil
 
     enum CodingKeys: String, CodingKey {
-        case id, url, filename, fileSize, dateTaken, isVideo, livePhotoVideoURL, keywords
+        case id, url, filename, fileSize, dateTaken, isVideo, livePhotoVideoURL, keywords, hierarchicalTags, enrichedFileDate
     }
 
-    init(id: UUID, url: URL, filename: String, fileSize: Int64, dateTaken: Date?, isVideo: Bool = false, livePhotoVideoURL: URL? = nil, keywords: [String] = []) {
+    init(id: UUID, url: URL, filename: String, fileSize: Int64, dateTaken: Date?, isVideo: Bool = false, livePhotoVideoURL: URL? = nil, keywords: [String] = [], hierarchicalTags: [HierarchicalTag] = [], enrichedFileDate: Date? = nil) {
         self.id = id
         self.url = url
         self.filename = filename
@@ -28,6 +129,8 @@ struct PhotoFile: Identifiable, Hashable, Codable {
         self.isVideo = isVideo
         self.livePhotoVideoURL = livePhotoVideoURL
         self.keywords = keywords
+        self.hierarchicalTags = hierarchicalTags
+        self.enrichedFileDate = enrichedFileDate
     }
 
     init(from decoder: Decoder) throws {
@@ -40,6 +143,8 @@ struct PhotoFile: Identifiable, Hashable, Codable {
         isVideo = try c.decodeIfPresent(Bool.self, forKey: .isVideo) ?? false
         livePhotoVideoURL = try c.decodeIfPresent(URL.self, forKey: .livePhotoVideoURL)
         keywords = try c.decodeIfPresent([String].self, forKey: .keywords) ?? []
+        hierarchicalTags = try c.decodeIfPresent([HierarchicalTag].self, forKey: .hierarchicalTags) ?? []
+        enrichedFileDate = try c.decodeIfPresent(Date.self, forKey: .enrichedFileDate)
     }
 
     static func == (lhs: PhotoFile, rhs: PhotoFile) -> Bool {

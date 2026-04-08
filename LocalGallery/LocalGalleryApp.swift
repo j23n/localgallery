@@ -37,6 +37,13 @@ struct ContentView: View {
             }
 
             NavigationStack {
+                CollectionsView()
+            }
+            .tabItem {
+                Label("Collections", systemImage: "rectangle.stack.fill")
+            }
+
+            NavigationStack {
                 AllPhotosView()
             }
             .tabItem {

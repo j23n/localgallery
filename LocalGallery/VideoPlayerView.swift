@@ -33,7 +33,6 @@ struct VideoPlayerView: View {
             player?.pause()
             player = nil
         }
-        .preferredColorScheme(.dark)
         .statusBarHidden()
     }
 }

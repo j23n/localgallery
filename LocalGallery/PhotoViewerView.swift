@@ -278,7 +278,6 @@ struct PhotoViewerView: View {
                 .offset(y: dismissOffset)
             }
         }
-        .preferredColorScheme(.dark)
         .animation(.easeInOut(duration: 0.25), value: isChromeVisible)
         .statusBarHidden(!isChromeVisible)
         .background(
@@ -301,6 +300,129 @@ struct PhotoViewerView: View {
     }
 }
 
+// MARK: - Zoomable Image (UIScrollView-based)
+
+struct ZoomableImageView: UIViewRepresentable {
+    let image: UIImage
+    var onSingleTap: () -> Void = {}
+
+    func makeUIView(context: Context) -> UIScrollView {
+        let scrollView = UIScrollView()
+        scrollView.delegate = context.coordinator
+        scrollView.minimumZoomScale = 1.0
+        scrollView.maximumZoomScale = 5.0
+        scrollView.bouncesZoom = true
+        scrollView.showsHorizontalScrollIndicator = false
+        scrollView.showsVerticalScrollIndicator = false
+        scrollView.backgroundColor = .clear
+        scrollView.contentInsetAdjustmentBehavior = .never
+
+        let imageView = UIImageView(image: image)
+        imageView.contentMode = .scaleAspectFit
+        imageView.frame = .zero
+        imageView.tag = 100
+        scrollView.addSubview(imageView)
+
+        // Double-tap to zoom
+        let doubleTap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleDoubleTap(_:)))
+        doubleTap.numberOfTapsRequired = 2
+        scrollView.addGestureRecognizer(doubleTap)
+
+        // Single-tap to toggle chrome
+        let singleTap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleSingleTap))
+        singleTap.numberOfTapsRequired = 1
+        singleTap.require(toFail: doubleTap)
+        scrollView.addGestureRecognizer(singleTap)
+
+        return scrollView
+    }
+
+    func updateUIView(_ scrollView: UIScrollView, context: Context) {
+        context.coordinator.onSingleTap = onSingleTap
+        guard let imageView = scrollView.viewWithTag(100) as? UIImageView else { return }
+        if imageView.image !== image {
+            imageView.image = image
+            scrollView.zoomScale = 1.0
+            layoutImageView(imageView, in: scrollView)
+        } else if imageView.frame.size == .zero {
+            layoutImageView(imageView, in: scrollView)
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onSingleTap: onSingleTap)
+    }
+
+    private func layoutImageView(_ imageView: UIImageView, in scrollView: UIScrollView) {
+        guard let image = imageView.image else { return }
+        let bounds = scrollView.bounds
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        let imageSize = image.size
+        let widthScale = bounds.width / imageSize.width
+        let heightScale = bounds.height / imageSize.height
+        let fitScale = min(widthScale, heightScale)
+        let fittedSize = CGSize(width: imageSize.width * fitScale, height: imageSize.height * fitScale)
+        imageView.frame = CGRect(origin: .zero, size: fittedSize)
+        scrollView.contentSize = fittedSize
+        centerImageView(imageView, in: scrollView)
+    }
+
+    func centerImageView(_ imageView: UIView, in scrollView: UIScrollView) {
+        let boundsSize = scrollView.bounds.size
+        let contentSize = scrollView.contentSize
+        let xOffset = max(0, (boundsSize.width - contentSize.width) / 2)
+        let yOffset = max(0, (boundsSize.height - contentSize.height) / 2)
+        imageView.center = CGPoint(
+            x: contentSize.width / 2 + xOffset,
+            y: contentSize.height / 2 + yOffset
+        )
+    }
+
+    class Coordinator: NSObject, UIScrollViewDelegate {
+        var onSingleTap: () -> Void
+
+        init(onSingleTap: @escaping () -> Void) {
+            self.onSingleTap = onSingleTap
+        }
+
+        func viewForZooming(in scrollView: UIScrollView) -> UIView? {
+            scrollView.viewWithTag(100)
+        }
+
+        func scrollViewDidZoom(_ scrollView: UIScrollView) {
+            guard let imageView = scrollView.viewWithTag(100) else { return }
+            let boundsSize = scrollView.bounds.size
+            let contentSize = scrollView.contentSize
+            let xOffset = max(0, (boundsSize.width - contentSize.width) / 2)
+            let yOffset = max(0, (boundsSize.height - contentSize.height) / 2)
+            imageView.center = CGPoint(
+                x: contentSize.width / 2 + xOffset,
+                y: contentSize.height / 2 + yOffset
+            )
+        }
+
+        @objc func handleDoubleTap(_ gesture: UITapGestureRecognizer) {
+            guard let scrollView = gesture.view as? UIScrollView else { return }
+            if scrollView.zoomScale > 1.0 {
+                scrollView.setZoomScale(1.0, animated: true)
+            } else {
+                let location = gesture.location(in: scrollView.viewWithTag(100))
+                let zoomRect = CGRect(
+                    x: location.x - 50,
+                    y: location.y - 50,
+                    width: 100,
+                    height: 100
+                )
+                scrollView.zoom(to: zoomRect, animated: true)
+            }
+        }
+
+        @objc func handleSingleTap() {
+            onSingleTap()
+        }
+    }
+}
+
 // MARK: - Photo Page
 
 struct PhotoPageView: View {
@@ -311,10 +433,6 @@ struct PhotoPageView: View {
 
     @State private var thumbnail: UIImage?
     @State private var fullImage: UIImage?
-    @State private var scale: CGFloat = 1.0
-    @State private var lastScale: CGFloat = 1.0
-    @State private var panOffset: CGSize = .zero
-    @State private var lastPanOffset: CGSize = .zero
     @State private var videoPlayer: AVPlayer?
     @State private var isPlayingVideo = false
     @State private var isPlayingLive = false
@@ -327,7 +445,6 @@ struct PhotoPageView: View {
                     if isPlayingVideo, let player = videoPlayer {
                         VideoPlayer(player: player)
                     } else {
-                        // Thumbnail with play button
                         if let img = thumbnail ?? initialThumbnail {
                             Image(uiImage: img)
                                 .resizable()
@@ -350,13 +467,10 @@ struct PhotoPageView: View {
                         }
                     }
                 } else {
-                    // Photo: zoomable image
                     if let displayImage = fullImage ?? thumbnail ?? initialThumbnail {
-                        Image(uiImage: displayImage)
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .scaleEffect(scale)
-                            .offset(scale > 1.0 ? panOffset : .zero)
+                        ZoomableImageView(image: displayImage) {
+                            withAnimation { isChromeVisible.toggle() }
+                        }
                     } else {
                         ProgressView().tint(.white)
                     }
@@ -369,27 +483,8 @@ struct PhotoPageView: View {
                 }
             }
             .frame(width: geo.size.width, height: geo.size.height)
-            .contentShape(Rectangle())
-            .onTapGesture(count: 2) {
-                guard !photo.isVideo else { return }
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
-                    if scale > 1.0 {
-                        scale = 1.0
-                        lastScale = 1.0
-                        panOffset = .zero
-                        lastPanOffset = .zero
-                    } else {
-                        scale = 3.0
-                        lastScale = 3.0
-                    }
-                }
-            }
-            .onTapGesture(count: 1) {
-                if photo.isVideo { return }
-                withAnimation { isChromeVisible.toggle() }
-            }
             .onLongPressGesture(minimumDuration: 0.3, pressing: { pressing in
-                guard let liveURL = photo.livePhotoVideoURL, scale <= 1.0 else { return }
+                guard let liveURL = photo.livePhotoVideoURL else { return }
                 if pressing {
                     let player = AVPlayer(url: liveURL)
                     livePlayer = player
@@ -402,46 +497,10 @@ struct PhotoPageView: View {
                     livePlayer = nil
                 }
             }, perform: {})
-            .simultaneousGesture(
-                photo.isVideo ? nil :
-                MagnificationGesture()
-                    .onChanged { value in
-                        scale = min(max(lastScale * value, 1.0), 5.0)
-                        if scale > 1.0 { isChromeVisible = false }
-                    }
-                    .onEnded { value in
-                        scale = min(max(lastScale * value, 1.0), 5.0)
-                        lastScale = scale
-                        if scale <= 1.0 {
-                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                                panOffset = .zero
-                                lastPanOffset = .zero
-                            }
-                        }
-                    }
-            )
-            .gesture(
-                scale > 1.0 ?
-                    DragGesture()
-                        .onChanged { value in
-                            panOffset = CGSize(
-                                width: lastPanOffset.width + value.translation.width,
-                                height: lastPanOffset.height + value.translation.height
-                            )
-                        }
-                        .onEnded { _ in
-                            lastPanOffset = panOffset
-                        }
-                    : nil
-            )
         }
         .task(id: photo.id) {
             thumbnail = manager.cachedThumbnail(for: photo.url)
             fullImage = nil
-            scale = 1.0
-            lastScale = 1.0
-            panOffset = .zero
-            lastPanOffset = .zero
             isPlayingVideo = false
             videoPlayer?.pause()
             videoPlayer = nil

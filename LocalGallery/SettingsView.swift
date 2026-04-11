@@ -12,20 +12,26 @@ struct SettingsView: View {
                     Button {
                         showPicker = true
                     } label: {
-                        Label("Choose Folder", systemImage: "folder.badge.plus")
-                    }
-
-                    if let url = manager.resolveBookmark() {
-                        LabeledContent("Current Folder") {
-                            Text(url.lastPathComponent)
+                        LabeledContent {
+                            Text(manager.resolveBookmark()?.lastPathComponent ?? "Not selected")
                                 .foregroundStyle(.secondary)
+                        } label: {
+                            Label("Folder", systemImage: "folder")
                         }
                     }
+                    .tint(.primary)
 
                     Button {
                         Task { await manager.rescan() }
                     } label: {
                         Label("Reload Library", systemImage: "arrow.clockwise")
+                    }
+
+                    if let lastSync = manager.lastSyncedAt {
+                        LabeledContent("Last Synced") {
+                            Text(lastSync, style: .relative)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
 

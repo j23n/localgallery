@@ -40,29 +40,42 @@ struct CollectionsView: View {
         .navigationTitle("Collections")
     }
 
+    /// Top 8 people: those with images tagged in the last year first, then by total count.
+    private var topPeople: [TagSuggestion] {
+        let oneYearAgo = Calendar.current.date(byAdding: .year, value: -1, to: Date()) ?? Date()
+        let people = manager.peopleTags
+
+        let scored: [(tag: TagSuggestion, hasRecent: Bool)] = people.map { person in
+            let photos = manager.search(query: "", requiredTags: [person])
+            let hasRecent = photos.contains { ($0.dateTaken ?? .distantPast) > oneYearAgo }
+            return (person, hasRecent)
+        }
+
+        return scored
+            .sorted { a, b in
+                if a.hasRecent != b.hasRecent { return a.hasRecent }
+                return a.tag.count > b.tag.count
+            }
+            .prefix(8)
+            .map(\.tag)
+    }
+
     private var collectionsList: some View {
         List {
-            let people = manager.peopleTags
+            let people = topPeople
             if !people.isEmpty {
                 Section("People") {
-                    ForEach(people) { person in
-                        NavigationLink {
-                            TagGridView(tag: person)
-                        } label: {
-                            Label {
-                                HStack {
-                                    Text(person.displayName)
-                                    Spacer()
-                                    Text("\(person.count)")
-                                        .font(.subheadline)
-                                        .foregroundStyle(.secondary)
-                                }
-                            } icon: {
-                                Image(systemName: "person.fill")
-                                    .foregroundStyle(Design.accentColor)
+                    LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 16) {
+                        ForEach(people) { person in
+                            NavigationLink {
+                                TagGridView(tag: person)
+                            } label: {
+                                PersonCard(tag: person)
                             }
+                            .buttonStyle(.plain)
                         }
                     }
+                    .padding(.vertical, 4)
                 }
             }
 
@@ -208,6 +221,51 @@ struct TagGridView: View {
         }
         .fullScreenCover(item: $selectedPhoto) { photo in
             PhotoViewerView(photos: photos, initialPhoto: photo)
+        }
+    }
+}
+
+// MARK: - Person Card (2×2 thumbnail grid + name)
+
+struct PersonCard: View {
+    let tag: TagSuggestion
+    @EnvironmentObject var manager: GalleryManager
+
+    private var coverPhotos: [PhotoFile] {
+        Array(manager.search(query: "", requiredTags: [tag]).prefix(4))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            let photos = coverPhotos
+            GeometryReader { geo in
+                let size = (geo.size.width - 2) / 2
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 2), GridItem(.flexible(), spacing: 2)], spacing: 2) {
+                    ForEach(0..<4, id: \.self) { i in
+                        if i < photos.count {
+                            ThumbnailView(url: photos[i].url, size: size, cornerRadius: 0)
+                                .frame(width: size, height: size)
+                                .clipped()
+                        } else {
+                            Rectangle()
+                                .fill(Color(.systemGray5))
+                                .frame(width: size, height: size)
+                        }
+                    }
+                }
+            }
+            .aspectRatio(1, contentMode: .fit)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(tag.displayName)
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                    .lineLimit(1)
+                Text("\(tag.count)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 }

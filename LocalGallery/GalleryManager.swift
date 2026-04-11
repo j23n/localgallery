@@ -9,6 +9,7 @@ final class GalleryManager: ObservableObject {
     @Published var rootFolder: PhotoFolder?
     @Published var allPhotos: [PhotoFile] = []
     @Published var isScanning: Bool = false
+    @Published var lastSyncedAt: Date?
 
     @Published var folderSortOrder: FolderSortOrder = .nameAscending {
         didSet { UserDefaults.standard.set(folderSortOrder.rawValue, forKey: "folderSortOrder") }
@@ -553,6 +554,7 @@ final class GalleryManager: ObservableObject {
             saveCache()
         }
         isScanning = false
+        lastSyncedAt = Date()
 
         // Phase 2: enrich with EXIF dates and keywords in background (only if needed)
         if result.needsEnrichment && !allPhotos.isEmpty {
@@ -748,7 +750,7 @@ final class GalleryManager: ObservableObject {
     // MARK: - Collections Helpers
 
     var peopleTags: [TagSuggestion] {
-        allTags.filter { $0.namespace == nil }
+        allTags.filter { $0.namespace?.lowercased() == "people" }
     }
 
     var leafFolders: [PhotoFolder] {

@@ -10,12 +10,14 @@ final class GalleryManager: ObservableObject {
     @Published var allPhotos: [PhotoFile] = []
     @Published var isScanning: Bool = false
     @Published var lastSyncedAt: Date?
+    @Published private(set) var memories: [Memory] = []
 
     @Published var folderSortOrder: FolderSortOrder = .nameAscending {
         didSet { UserDefaults.standard.set(folderSortOrder.rawValue, forKey: "folderSortOrder") }
     }
 
     private var isEnriching = false
+    private var memoriesGeneratedDate: Date?
     private let thumbnailCache = NSCache<NSURL, UIImage>()
     private let fullImageCache = NSCache<NSURL, UIImage>()
     private let bookmarkKey = "rootFolderBookmark"
@@ -113,7 +115,7 @@ final class GalleryManager: ObservableObject {
 
     // MARK: - Disk Cache
 
-    private static let cacheVersion = 8
+    private static let cacheVersion = 9
 
     private struct LibraryCache: Codable {
         let version: Int
@@ -188,13 +190,15 @@ final class GalleryManager: ObservableObject {
 
     // MARK: - Metadata Reading
 
-    private typealias MetadataResult = (date: Date?, keywords: [String], hierarchicalTags: [HierarchicalTag])
+    private typealias MetadataResult = (date: Date?, keywords: [String], hierarchicalTags: [HierarchicalTag], gpsLatitude: Double?, gpsLongitude: Double?)
 
     /// Read capture date and keywords from image metadata (EXIF/IPTC/XMP) + XMP sidecar
     private nonisolated static func readImageMetadata(url: URL) -> MetadataResult {
         var captureDate: Date? = nil
         var keywords: [String] = []
         var rawTags: [String] = []  // preserves original hierarchical paths
+        var gpsLat: Double? = nil
+        var gpsLon: Double? = nil
 
         let options: [CFString: Any] = [kCGImageSourceShouldCache: false]
         if let source = CGImageSourceCreateWithURL(url as CFURL, options as CFDictionary),
@@ -257,6 +261,16 @@ final class GalleryManager: ObservableObject {
                     }
                 }
             }
+
+            // GPS coordinates
+            if let gpsDict = properties[kCGImagePropertyGPSDictionary] as? [CFString: Any],
+               let lat = gpsDict[kCGImagePropertyGPSLatitude] as? Double,
+               let lon = gpsDict[kCGImagePropertyGPSLongitude] as? Double {
+                let latRef = gpsDict[kCGImagePropertyGPSLatitudeRef] as? String
+                let lonRef = gpsDict[kCGImagePropertyGPSLongitudeRef] as? String
+                gpsLat = latRef == "S" ? -lat : lat
+                gpsLon = lonRef == "W" ? -lon : lon
+            }
         }
 
         // Also check for XMP sidecar file
@@ -282,7 +296,7 @@ final class GalleryManager: ObservableObject {
             return HierarchicalTag(raw: raw)
         }
 
-        return (captureDate, keywords, hierarchicalTags)
+        return (captureDate, keywords, hierarchicalTags, gpsLat, gpsLon)
     }
 
     /// Parse XMP sidecar file (.xmp) for keywords
@@ -341,7 +355,7 @@ final class GalleryManager: ObservableObject {
         if !silent { isScanning = true }
 
         // Snapshot cached metadata so we can merge it into the fresh scan
-        let cachedMetadata = Dictionary(allPhotos.map { ($0.url, (date: $0.dateTaken, keywords: $0.keywords, tags: $0.hierarchicalTags, enrichedFileDate: $0.enrichedFileDate)) },
+        let cachedMetadata = Dictionary(allPhotos.map { ($0.url, (date: $0.dateTaken, keywords: $0.keywords, tags: $0.hierarchicalTags, enrichedFileDate: $0.enrichedFileDate, gpsLat: $0.gpsLatitude, gpsLon: $0.gpsLongitude)) },
                                          uniquingKeysWith: { _, b in b })
 
         // Heavy file I/O runs off the main actor so cached UI stays responsive
@@ -455,7 +469,9 @@ final class GalleryManager: ObservableObject {
                             livePhotoVideoURL: liveURL,
                             keywords: keywords,
                             hierarchicalTags: tags,
-                            enrichedFileDate: stale ? nil : cachedEnrichedDate
+                            enrichedFileDate: stale ? nil : cachedEnrichedDate,
+                            gpsLatitude: cached?.gpsLat,
+                            gpsLongitude: cached?.gpsLon
                         ))
                     }
                     // Standalone videos only (no matching image)
@@ -597,6 +613,10 @@ final class GalleryManager: ObservableObject {
                     keywordCount += 1
                     for kw in metadata.keywords { uniqueKeywords.insert(kw.lowercased()) }
                 }
+                if let lat = metadata.gpsLatitude, let lon = metadata.gpsLongitude {
+                    result[i].gpsLatitude = lat
+                    result[i].gpsLongitude = lon
+                }
                 // Stamp with the file's current modDate so we detect future changes
                 let modDate = (try? fm.attributesOfItem(atPath: result[i].url.path)[.modificationDate]) as? Date
                 result[i].enrichedFileDate = modDate ?? Date()
@@ -694,6 +714,12 @@ final class GalleryManager: ObservableObject {
             .sorted { $0.count > $1.count }
 
         print("[Index] Built: \(allPhotos.count) photos (\(withDates) dates, \(withKeywords) keywords, \(allTags.count) unique tags) in \(String(format: "%.0f", (CFAbsoluteTimeGetCurrent() - t) * 1000))ms")
+
+        let today = Calendar.current.startOfDay(for: Date())
+        if memoriesGeneratedDate != today && !allPhotos.isEmpty {
+            generateMemories()
+            memoriesGeneratedDate = today
+        }
     }
 
     func sortFolders(_ folders: [PhotoFolder]) -> [PhotoFolder] {
@@ -763,6 +789,253 @@ final class GalleryManager: ObservableObject {
             return [folder]
         }
         return folder.subfolders.flatMap { collectLeafFolders($0) }
+    }
+
+    // MARK: - Memories
+
+    private func generateMemories() {
+        let t = CFAbsoluteTimeGetCurrent()
+        let calendar = Calendar.current
+        let today = Date()
+        let todayComponents = calendar.dateComponents([.month, .day], from: today)
+        let currentYear = calendar.component(.year, from: today)
+        var candidates: [Memory] = []
+
+        let photosWithDates = allPhotos.filter { $0.dateTaken != nil }
+
+        // === 1. On This Day ===
+        let onThisDayPhotos = photosWithDates.filter { photo in
+            let c = calendar.dateComponents([.month, .day, .year], from: photo.dateTaken!)
+            return c.month == todayComponents.month && c.day == todayComponents.day && c.year != currentYear
+        }.sorted { ($0.dateTaken ?? .distantPast) < ($1.dateTaken ?? .distantPast) }
+
+        if onThisDayPhotos.count >= 2 {
+            let years = Set(onThisDayPhotos.map { calendar.component(.year, from: $0.dateTaken!) })
+            candidates.append(Memory(
+                id: UUID(), type: .onThisDay,
+                title: "On this day",
+                subtitle: "\(years.count) different years",
+                photos: onThisDayPhotos,
+                coverPhoto: onThisDayPhotos[onThisDayPhotos.count / 2],
+                dateRange: onThisDayPhotos.first!.dateTaken!...onThisDayPhotos.last!.dateTaken!,
+                score: Double(onThisDayPhotos.count) * 2.0 + Double(years.count) * 3.0,
+                yearsAgo: nil, personName: nil
+            ))
+        }
+
+        // === 2. X Years Ago ===
+        for milestone in [1, 2, 3, 5, 10, 15, 20] {
+            guard let targetDate = calendar.date(byAdding: .year, value: -milestone, to: today),
+                  let windowStart = calendar.date(byAdding: .day, value: -3, to: targetDate),
+                  let windowEnd = calendar.date(byAdding: .day, value: 3, to: targetDate) else { continue }
+
+            let windowPhotos = photosWithDates.filter { photo in
+                let d = photo.dateTaken!
+                return d >= windowStart && d <= windowEnd
+            }.sorted { ($0.dateTaken ?? .distantPast) < ($1.dateTaken ?? .distantPast) }
+
+            if windowPhotos.count >= 3 {
+                let yearLabel = milestone == 1 ? "1 year ago" : "\(milestone) years ago"
+                candidates.append(Memory(
+                    id: UUID(), type: .yearsAgo,
+                    title: "\(yearLabel) today",
+                    subtitle: formatMemoryDateRange(windowPhotos),
+                    photos: windowPhotos,
+                    coverPhoto: windowPhotos[windowPhotos.count / 2],
+                    dateRange: windowPhotos.first!.dateTaken!...windowPhotos.last!.dateTaken!,
+                    score: Double(windowPhotos.count) * 1.5 + (milestone >= 5 ? 10.0 : 5.0),
+                    yearsAgo: milestone, personName: nil
+                ))
+            }
+        }
+
+        // === 3. Person Through the Years ===
+        let peoplePairs = allPhotos.flatMap { photo in
+            photo.hierarchicalTags
+                .filter { $0.namespace?.lowercased() == "people" }
+                .map { (name: $0.displayName, photo: photo) }
+        }
+        let byPerson = Dictionary(grouping: peoplePairs, by: { $0.name })
+
+        for (name, entries) in byPerson {
+            let photos = entries.map(\.photo).filter { $0.dateTaken != nil }
+            let years = Set(photos.compactMap { $0.dateTaken.map { calendar.component(.year, from: $0) } })
+            guard years.count >= 3, photos.count >= 5 else { continue }
+            let sorted = photos.sorted { ($0.dateTaken ?? .distantPast) < ($1.dateTaken ?? .distantPast) }
+            candidates.append(Memory(
+                id: UUID(), type: .personOverTime,
+                title: "\(name) through the years",
+                subtitle: "\(years.count) years of memories",
+                photos: sorted,
+                coverPhoto: sorted.last!,
+                dateRange: sorted.first!.dateTaken!...sorted.last!.dateTaken!,
+                score: Double(years.count) * 4.0 + Double(photos.count) * 0.5,
+                yearsAgo: nil, personName: name
+            ))
+        }
+
+        // === 4. Folder-based Event Memories ===
+        let currentMonthYear = calendar.dateComponents([.month, .year], from: today)
+        for folder in leafFolders {
+            let photos = folder.photos.filter { $0.dateTaken != nil }
+                .sorted { ($0.dateTaken ?? .distantPast) < ($1.dateTaken ?? .distantPast) }
+            guard photos.count >= 8,
+                  let newest = photos.last?.dateTaken,
+                  calendar.dateComponents([.month, .year], from: newest) != currentMonthYear
+            else { continue }
+
+            let daySpan = calendar.dateComponents([.day], from: photos.first!.dateTaken!, to: photos.last!.dateTaken!).day ?? 0
+            let spanBonus = min(Double(daySpan), 14.0)
+
+            candidates.append(Memory(
+                id: UUID(), type: .folderEvent,
+                title: folder.name,
+                subtitle: formatMemoryDateRange(photos),
+                photos: photos,
+                coverPhoto: photos[photos.count / 3],
+                dateRange: photos.first!.dateTaken!...photos.last!.dateTaken!,
+                score: Double(photos.count) * 0.8 + spanBonus * 2.0,
+                yearsAgo: nil, personName: nil
+            ))
+        }
+
+        // === 5. Photo Density Detection ===
+        let byDay = Dictionary(grouping: photosWithDates) { photo -> DateComponents in
+            calendar.dateComponents([.year, .month, .day], from: photo.dateTaken!)
+        }
+        let avgPerDay = photosWithDates.isEmpty ? 0.0 : Double(photosWithDates.count) / Double(max(byDay.count, 1))
+        let densityThreshold = max(10, Int(avgPerDay * 3.0))
+
+        for (dayComp, dayPhotos) in byDay where dayPhotos.count >= densityThreshold {
+            guard let dayDate = calendar.date(from: dayComp),
+                  !calendar.isDateInToday(dayDate),
+                  calendar.dateComponents([.month, .year], from: dayDate) != currentMonthYear
+            else { continue }
+
+            let sorted = dayPhotos.sorted { ($0.dateTaken ?? .distantPast) < ($1.dateTaken ?? .distantPast) }
+            let relDate = memoryRelativeDescription(for: dayDate, calendar: calendar, today: today)
+
+            candidates.append(Memory(
+                id: UUID(), type: .photoDensity,
+                title: "A busy day \(relDate)",
+                subtitle: "\(dayPhotos.count) photos",
+                photos: sorted,
+                coverPhoto: sorted[sorted.count / 2],
+                dateRange: sorted.first!.dateTaken!...sorted.last!.dateTaken!,
+                score: Double(dayPhotos.count) * 1.2,
+                yearsAgo: nil, personName: nil
+            ))
+        }
+
+        // === 6. Trip Detection ===
+        generateTripMemories(from: photosWithDates, calendar: calendar, today: today, into: &candidates)
+
+        // Sort by score, take top 15
+        candidates.sort { $0.score > $1.score }
+        self.memories = Array(candidates.prefix(15))
+        let elapsed = (CFAbsoluteTimeGetCurrent() - t) * 1000
+        print("[Memories] Generated \(candidates.count) candidates, showing top \(memories.count) in \(String(format: "%.0f", elapsed))ms")
+    }
+
+    // MARK: Trip Detection
+
+    private func generateTripMemories(
+        from photosWithDates: [PhotoFile],
+        calendar: Calendar,
+        today: Date,
+        into candidates: inout [Memory]
+    ) {
+        let geoPhotos = photosWithDates
+            .filter { $0.gpsLatitude != nil && $0.gpsLongitude != nil }
+            .sorted { ($0.dateTaken ?? .distantPast) < ($1.dateTaken ?? .distantPast) }
+
+        guard geoPhotos.count >= 5 else { return }
+
+        // "Home" = median GPS coordinate (robust to outlier vacation photos)
+        let allLats = geoPhotos.compactMap(\.gpsLatitude).sorted()
+        let allLons = geoPhotos.compactMap(\.gpsLongitude).sorted()
+        let homeLat = allLats[allLats.count / 2]
+        let homeLon = allLons[allLons.count / 2]
+
+        let distanceThresholdKm = 50.0
+        var currentTrip: [PhotoFile] = []
+
+        for photo in geoPhotos {
+            let dist = Self.haversineKm(lat1: homeLat, lon1: homeLon, lat2: photo.gpsLatitude!, lon2: photo.gpsLongitude!)
+
+            if dist > distanceThresholdKm {
+                if let lastDate = currentTrip.last?.dateTaken,
+                   let thisDate = photo.dateTaken,
+                   thisDate.timeIntervalSince(lastDate) > 48 * 3600 {
+                    flushTrip(currentTrip, calendar: calendar, today: today, into: &candidates)
+                    currentTrip = []
+                }
+                currentTrip.append(photo)
+            } else {
+                flushTrip(currentTrip, calendar: calendar, today: today, into: &candidates)
+                currentTrip = []
+            }
+        }
+        flushTrip(currentTrip, calendar: calendar, today: today, into: &candidates)
+    }
+
+    private func flushTrip(_ photos: [PhotoFile], calendar: Calendar, today: Date, into candidates: inout [Memory]) {
+        guard photos.count >= 5 else { return }
+        let sorted = photos.sorted { ($0.dateTaken ?? .distantPast) < ($1.dateTaken ?? .distantPast) }
+        guard let first = sorted.first?.dateTaken, let last = sorted.last?.dateTaken else { return }
+
+        let currentMonthYear = calendar.dateComponents([.month, .year], from: today)
+        guard calendar.dateComponents([.month, .year], from: last) != currentMonthYear else { return }
+
+        let days = max(1, calendar.dateComponents([.day], from: first, to: last).day ?? 1)
+        let relDate = memoryRelativeDescription(for: first, calendar: calendar, today: today)
+
+        candidates.append(Memory(
+            id: UUID(), type: .trip,
+            title: "A trip \(relDate)",
+            subtitle: "\(photos.count) photos over \(days) \(days == 1 ? "day" : "days")",
+            photos: sorted,
+            coverPhoto: sorted[sorted.count / 3],
+            dateRange: first...last,
+            score: Double(photos.count) * 1.5 + Double(days) * 2.0 + 8.0,
+            yearsAgo: nil, personName: nil
+        ))
+    }
+
+    // MARK: Memory Helpers
+
+    nonisolated private static func haversineKm(lat1: Double, lon1: Double, lat2: Double, lon2: Double) -> Double {
+        let R = 6371.0
+        let dLat = (lat2 - lat1) * .pi / 180
+        let dLon = (lon2 - lon1) * .pi / 180
+        let a = sin(dLat / 2) * sin(dLat / 2) +
+                cos(lat1 * .pi / 180) * cos(lat2 * .pi / 180) *
+                sin(dLon / 2) * sin(dLon / 2)
+        return R * 2 * atan2(sqrt(a), sqrt(1 - a))
+    }
+
+    private func formatMemoryDateRange(_ photos: [PhotoFile]) -> String? {
+        let dates = photos.compactMap(\.dateTaken).sorted()
+        guard let first = dates.first, let last = dates.last else { return nil }
+        let fmt = DateFormatter()
+        fmt.dateStyle = .medium
+        fmt.timeStyle = .none
+        if Calendar.current.isDate(first, inSameDayAs: last) {
+            return fmt.string(from: first)
+        }
+        return "\(fmt.string(from: first)) – \(fmt.string(from: last))"
+    }
+
+    private func memoryRelativeDescription(for date: Date, calendar: Calendar, today: Date) -> String {
+        let years = calendar.dateComponents([.year], from: date, to: today).year ?? 0
+        if years == 0 {
+            let months = calendar.dateComponents([.month], from: date, to: today).month ?? 0
+            return months <= 1 ? "last month" : "\(months) months ago"
+        } else if years == 1 {
+            return "a year ago"
+        } else {
+            return "\(years) years ago"
+        }
     }
 
     // MARK: - Thumbnails

@@ -62,6 +62,29 @@ struct CollectionsView: View {
 
     private var collectionsList: some View {
         List {
+            if !manager.memories.isEmpty {
+                Section {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        LazyHStack(spacing: 16) {
+                            ForEach(manager.memories) { memory in
+                                NavigationLink {
+                                    MemoryDetailView(memory: memory)
+                                } label: {
+                                    MemoryCardView(memory: memory)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                    }
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
+                } header: {
+                    Label("Memories", systemImage: "sparkles")
+                }
+            }
+
             let people = topPeople
             if !people.isEmpty {
                 Section("People") {
@@ -267,5 +290,57 @@ struct PersonCard: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
+}
+
+// MARK: - Memory Card View
+
+struct MemoryCardView: View {
+    let memory: Memory
+    @EnvironmentObject var manager: GalleryManager
+
+    var body: some View {
+        ZStack(alignment: .bottomLeading) {
+            ThumbnailView(url: memory.coverPhoto.url, size: 200, cornerRadius: 16)
+                .frame(width: 240, height: 200)
+
+            LinearGradient(
+                colors: [.clear, .black.opacity(0.6)],
+                startPoint: .center,
+                endPoint: .bottom
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 16))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(memory.title)
+                    .font(.headline)
+                    .fontWeight(.bold)
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+                if let subtitle = memory.subtitle {
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.85))
+                        .lineLimit(1)
+                }
+                Text("\(memory.photos.count) photos")
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.7))
+            }
+            .padding(14)
+        }
+        .frame(width: 240, height: 200)
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .shadow(color: .black.opacity(0.15), radius: 8, y: 4)
+    }
+}
+
+// MARK: - Memory Detail View
+
+struct MemoryDetailView: View {
+    let memory: Memory
+
+    var body: some View {
+        FolderGridView(title: memory.title, photos: memory.photos)
     }
 }

@@ -49,7 +49,7 @@ struct ContentView: View {
             .tabItem {
                 Label("All Photos", systemImage: "photo.stack.fill")
             }
-            .badge(manager.allPhotos.count)
+
         }
         .task {
             await manager.restoreFolder()

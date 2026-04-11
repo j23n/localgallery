@@ -111,16 +111,18 @@ struct PhotoFile: Identifiable, Hashable, Codable {
     var hierarchicalTags: [HierarchicalTag] = []
     /// File modDate at the time metadata was last read; nil = never enriched
     var enrichedFileDate: Date? = nil
+    var gpsLatitude: Double? = nil
+    var gpsLongitude: Double? = nil
 
     // Not persisted — loaded lazily at runtime
     var dimensions: CGSize? = nil
     var exif: EXIFData? = nil
 
     enum CodingKeys: String, CodingKey {
-        case id, url, filename, fileSize, dateTaken, isVideo, livePhotoVideoURL, keywords, hierarchicalTags, enrichedFileDate
+        case id, url, filename, fileSize, dateTaken, isVideo, livePhotoVideoURL, keywords, hierarchicalTags, enrichedFileDate, gpsLatitude, gpsLongitude
     }
 
-    init(id: UUID, url: URL, filename: String, fileSize: Int64, dateTaken: Date?, isVideo: Bool = false, livePhotoVideoURL: URL? = nil, keywords: [String] = [], hierarchicalTags: [HierarchicalTag] = [], enrichedFileDate: Date? = nil) {
+    init(id: UUID, url: URL, filename: String, fileSize: Int64, dateTaken: Date?, isVideo: Bool = false, livePhotoVideoURL: URL? = nil, keywords: [String] = [], hierarchicalTags: [HierarchicalTag] = [], enrichedFileDate: Date? = nil, gpsLatitude: Double? = nil, gpsLongitude: Double? = nil) {
         self.id = id
         self.url = url
         self.filename = filename
@@ -131,6 +133,8 @@ struct PhotoFile: Identifiable, Hashable, Codable {
         self.keywords = keywords
         self.hierarchicalTags = hierarchicalTags
         self.enrichedFileDate = enrichedFileDate
+        self.gpsLatitude = gpsLatitude
+        self.gpsLongitude = gpsLongitude
     }
 
     init(from decoder: Decoder) throws {
@@ -145,6 +149,8 @@ struct PhotoFile: Identifiable, Hashable, Codable {
         keywords = try c.decodeIfPresent([String].self, forKey: .keywords) ?? []
         hierarchicalTags = try c.decodeIfPresent([HierarchicalTag].self, forKey: .hierarchicalTags) ?? []
         enrichedFileDate = try c.decodeIfPresent(Date.self, forKey: .enrichedFileDate)
+        gpsLatitude = try c.decodeIfPresent(Double.self, forKey: .gpsLatitude)
+        gpsLongitude = try c.decodeIfPresent(Double.self, forKey: .gpsLongitude)
     }
 
     static func == (lhs: PhotoFile, rhs: PhotoFile) -> Bool {
@@ -181,6 +187,32 @@ struct PhotoFolder: Identifiable, Codable {
     var dateModified: Date?
     var dateCreated: Date?
 }
+
+// MARK: - Memory
+
+enum MemoryType: String {
+    case onThisDay
+    case yearsAgo
+    case personOverTime
+    case folderEvent
+    case photoDensity
+    case trip
+}
+
+struct Memory: Identifiable {
+    let id: UUID
+    let type: MemoryType
+    let title: String
+    let subtitle: String?
+    let photos: [PhotoFile]
+    let coverPhoto: PhotoFile
+    let dateRange: ClosedRange<Date>?
+    let score: Double
+    let yearsAgo: Int?
+    let personName: String?
+}
+
+// MARK: - Folder Sort
 
 enum FolderSortOrder: String, CaseIterable {
     case nameAscending

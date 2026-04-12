@@ -717,8 +717,10 @@ final class GalleryManager: ObservableObject {
 
         let today = Calendar.current.startOfDay(for: Date())
         if memoriesGeneratedDate != today && !allPhotos.isEmpty {
-            generateMemories()
             memoriesGeneratedDate = today
+            let snapshot = allPhotos
+            let leaves = leafFolders
+            Task { await generateMemories(from: snapshot, leafFolders: leaves) }
         }
     }
 
@@ -793,184 +795,220 @@ final class GalleryManager: ObservableObject {
 
     // MARK: - Memories
 
-    private func generateMemories() {
+    /// Resolve photo IDs from a memory back to PhotoFile instances.
+    func photos(for memory: Memory) -> [PhotoFile] {
+        let lookup = Dictionary(allPhotos.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        return memory.photoIDs.compactMap { lookup[$0] }
+    }
+
+    private func generateMemories(from allPhotos: [PhotoFile], leafFolders: [PhotoFolder]) async {
         let t = CFAbsoluteTimeGetCurrent()
-        let calendar = Calendar.current
-        let today = Date()
-        let todayComponents = calendar.dateComponents([.month, .day], from: today)
-        let currentYear = calendar.component(.year, from: today)
-        var candidates: [Memory] = []
 
-        let photosWithDates = allPhotos.filter { $0.dateTaken != nil }
+        let results: [Memory] = await Task.detached(priority: .utility) {
+            let calendar = Calendar.current
+            let today = Date()
+            let todayComponents = calendar.dateComponents([.month, .day], from: today)
+            let currentYear = calendar.component(.year, from: today)
+            let currentMonthYear = calendar.dateComponents([.month, .year], from: today)
+            var candidates: [Memory] = []
 
-        // === 1. On This Day ===
-        let onThisDayPhotos = photosWithDates.filter { photo in
-            let c = calendar.dateComponents([.month, .day, .year], from: photo.dateTaken!)
-            return c.month == todayComponents.month && c.day == todayComponents.day && c.year != currentYear
-        }.sorted { ($0.dateTaken ?? .distantPast) < ($1.dateTaken ?? .distantPast) }
+            let photosWithDates = allPhotos.compactMap { photo -> (PhotoFile, Date)? in
+                guard let date = photo.dateTaken else { return nil }
+                return (photo, date)
+            }
 
-        if onThisDayPhotos.count >= 2 {
-            let years = Set(onThisDayPhotos.map { calendar.component(.year, from: $0.dateTaken!) })
-            candidates.append(Memory(
-                id: UUID(), type: .onThisDay,
-                title: "On this day",
-                subtitle: "\(years.count) different years",
-                photos: onThisDayPhotos,
-                coverPhoto: onThisDayPhotos[onThisDayPhotos.count / 2],
-                dateRange: onThisDayPhotos.first!.dateTaken!...onThisDayPhotos.last!.dateTaken!,
-                score: Double(onThisDayPhotos.count) * 2.0 + Double(years.count) * 3.0,
-                yearsAgo: nil, personName: nil
-            ))
-        }
+            // === 1. On This Day ===
+            let onThisDay = photosWithDates.filter { (_, date) in
+                let c = calendar.dateComponents([.month, .day, .year], from: date)
+                return c.month == todayComponents.month && c.day == todayComponents.day && c.year != currentYear
+            }.sorted { $0.1 < $1.1 }
 
-        // === 2. X Years Ago ===
-        for milestone in [1, 2, 3, 5, 10, 15, 20] {
-            guard let targetDate = calendar.date(byAdding: .year, value: -milestone, to: today),
-                  let windowStart = calendar.date(byAdding: .day, value: -3, to: targetDate),
-                  let windowEnd = calendar.date(byAdding: .day, value: 3, to: targetDate) else { continue }
-
-            let windowPhotos = photosWithDates.filter { photo in
-                let d = photo.dateTaken!
-                return d >= windowStart && d <= windowEnd
-            }.sorted { ($0.dateTaken ?? .distantPast) < ($1.dateTaken ?? .distantPast) }
-
-            if windowPhotos.count >= 3 {
-                let yearLabel = milestone == 1 ? "1 year ago" : "\(milestone) years ago"
+            if onThisDay.count >= 2 {
+                let years = Set(onThisDay.map { calendar.component(.year, from: $0.1) })
+                let ids = onThisDay.map(\.0.id)
                 candidates.append(Memory(
-                    id: UUID(), type: .yearsAgo,
+                    id: "onThisDay", type: .onThisDay,
+                    title: "On this day",
+                    subtitle: "\(years.count) different years",
+                    photoIDs: ids,
+                    coverPhotoID: ids[ids.count / 2],
+                    dateRange: onThisDay.first!.1...onThisDay.last!.1,
+                    score: Double(ids.count) * 2.0 + Double(years.count) * 3.0,
+                    yearsAgo: nil, personName: nil
+                ))
+            }
+
+            // === 2. X Years Ago ===
+            for milestone in [1, 2, 3, 5, 10, 15, 20] {
+                guard let targetDate = calendar.date(byAdding: .year, value: -milestone, to: today),
+                      let windowStart = calendar.date(byAdding: .day, value: -3, to: targetDate),
+                      let windowEnd = calendar.date(byAdding: .day, value: 3, to: targetDate) else { continue }
+
+                let window = photosWithDates.filter { $0.1 >= windowStart && $0.1 <= windowEnd }
+                    .sorted { $0.1 < $1.1 }
+                guard window.count >= 3,
+                      let first = window.first?.1, let last = window.last?.1 else { continue }
+
+                let yearLabel = milestone == 1 ? "1 year ago" : "\(milestone) years ago"
+                let ids = window.map(\.0.id)
+                candidates.append(Memory(
+                    id: "yearsAgo-\(milestone)", type: .yearsAgo,
                     title: "\(yearLabel) today",
-                    subtitle: formatMemoryDateRange(windowPhotos),
-                    photos: windowPhotos,
-                    coverPhoto: windowPhotos[windowPhotos.count / 2],
-                    dateRange: windowPhotos.first!.dateTaken!...windowPhotos.last!.dateTaken!,
-                    score: Double(windowPhotos.count) * 1.5 + (milestone >= 5 ? 10.0 : 5.0),
+                    subtitle: Self.formatDateRange(first, last),
+                    photoIDs: ids,
+                    coverPhotoID: ids[ids.count / 2],
+                    dateRange: first...last,
+                    score: Double(ids.count) * 1.5 + (milestone >= 5 ? 10.0 : 5.0),
                     yearsAgo: milestone, personName: nil
                 ))
             }
-        }
 
-        // === 3. Person Through the Years ===
-        let peoplePairs = allPhotos.flatMap { photo in
-            photo.hierarchicalTags
-                .filter { $0.namespace?.lowercased() == "people" }
-                .map { (name: $0.displayName, photo: photo) }
-        }
-        let byPerson = Dictionary(grouping: peoplePairs, by: { $0.name })
+            // === 3. Person Through the Years ===
+            let peoplePairs = allPhotos.flatMap { photo in
+                photo.hierarchicalTags
+                    .filter { $0.namespace?.lowercased() == "people" }
+                    .map { (name: $0.displayName, photo: photo) }
+            }
+            let byPerson = Dictionary(grouping: peoplePairs, by: { $0.name })
 
-        for (name, entries) in byPerson {
-            let photos = entries.map(\.photo).filter { $0.dateTaken != nil }
-            let years = Set(photos.compactMap { $0.dateTaken.map { calendar.component(.year, from: $0) } })
-            guard years.count >= 3, photos.count >= 5 else { continue }
-            let sorted = photos.sorted { ($0.dateTaken ?? .distantPast) < ($1.dateTaken ?? .distantPast) }
-            candidates.append(Memory(
-                id: UUID(), type: .personOverTime,
-                title: "\(name) through the years",
-                subtitle: "\(years.count) years of memories",
-                photos: sorted,
-                coverPhoto: sorted.last!,
-                dateRange: sorted.first!.dateTaken!...sorted.last!.dateTaken!,
-                score: Double(years.count) * 4.0 + Double(photos.count) * 0.5,
-                yearsAgo: nil, personName: name
-            ))
-        }
+            for (name, entries) in byPerson {
+                let withDates = entries.compactMap { entry -> (PhotoFile, Date)? in
+                    guard let date = entry.photo.dateTaken else { return nil }
+                    return (entry.photo, date)
+                }
+                let years = Set(withDates.map { calendar.component(.year, from: $0.1) })
+                guard years.count >= 3, withDates.count >= 5 else { continue }
+                let sorted = withDates.sorted { $0.1 < $1.1 }
+                let ids = sorted.map(\.0.id)
+                guard let first = sorted.first?.1, let last = sorted.last?.1 else { continue }
+                candidates.append(Memory(
+                    id: "person-\(name)", type: .personOverTime,
+                    title: "\(name) through the years",
+                    subtitle: "\(years.count) years of memories",
+                    photoIDs: ids,
+                    coverPhotoID: ids.last!,
+                    dateRange: first...last,
+                    score: Double(years.count) * 4.0 + Double(ids.count) * 0.5,
+                    yearsAgo: nil, personName: name
+                ))
+            }
 
-        // === 4. Folder-based Event Memories ===
-        let currentMonthYear = calendar.dateComponents([.month, .year], from: today)
-        for folder in leafFolders {
-            let photos = folder.photos.filter { $0.dateTaken != nil }
-                .sorted { ($0.dateTaken ?? .distantPast) < ($1.dateTaken ?? .distantPast) }
-            guard photos.count >= 8,
-                  let newest = photos.last?.dateTaken,
-                  calendar.dateComponents([.month, .year], from: newest) != currentMonthYear
-            else { continue }
+            // === 4. Folder-based Event Memories ===
+            for folder in leafFolders {
+                let withDates = folder.photos.compactMap { photo -> (PhotoFile, Date)? in
+                    guard let date = photo.dateTaken else { return nil }
+                    return (photo, date)
+                }.sorted { $0.1 < $1.1 }
+                guard withDates.count >= 8,
+                      let first = withDates.first?.1, let last = withDates.last?.1,
+                      calendar.dateComponents([.month, .year], from: last) != currentMonthYear
+                else { continue }
 
-            let daySpan = calendar.dateComponents([.day], from: photos.first!.dateTaken!, to: photos.last!.dateTaken!).day ?? 0
-            let spanBonus = min(Double(daySpan), 14.0)
+                let daySpan = calendar.dateComponents([.day], from: first, to: last).day ?? 0
+                let spanBonus = min(Double(daySpan), 14.0)
+                let ids = withDates.map(\.0.id)
 
-            candidates.append(Memory(
-                id: UUID(), type: .folderEvent,
-                title: folder.name,
-                subtitle: formatMemoryDateRange(photos),
-                photos: photos,
-                coverPhoto: photos[photos.count / 3],
-                dateRange: photos.first!.dateTaken!...photos.last!.dateTaken!,
-                score: Double(photos.count) * 0.8 + spanBonus * 2.0,
-                yearsAgo: nil, personName: nil
-            ))
-        }
+                candidates.append(Memory(
+                    id: "folder-\(folder.url.lastPathComponent)", type: .folderEvent,
+                    title: folder.name,
+                    subtitle: Self.formatDateRange(first, last),
+                    photoIDs: ids,
+                    coverPhotoID: ids[ids.count / 3],
+                    dateRange: first...last,
+                    score: Double(ids.count) * 0.8 + spanBonus * 2.0,
+                    yearsAgo: nil, personName: nil
+                ))
+            }
 
-        // === 5. Photo Density Detection ===
-        let byDay = Dictionary(grouping: photosWithDates) { photo -> DateComponents in
-            calendar.dateComponents([.year, .month, .day], from: photo.dateTaken!)
-        }
-        let avgPerDay = photosWithDates.isEmpty ? 0.0 : Double(photosWithDates.count) / Double(max(byDay.count, 1))
-        let densityThreshold = max(10, Int(avgPerDay * 3.0))
+            // === 5. Photo Density Detection ===
+            let byDay = Dictionary(grouping: photosWithDates) { (_, date) -> DateComponents in
+                calendar.dateComponents([.year, .month, .day], from: date)
+            }
+            let avgPerDay = photosWithDates.isEmpty ? 0.0 : Double(photosWithDates.count) / Double(max(byDay.count, 1))
+            let densityThreshold = max(10, Int(avgPerDay * 3.0))
 
-        for (dayComp, dayPhotos) in byDay where dayPhotos.count >= densityThreshold {
-            guard let dayDate = calendar.date(from: dayComp),
-                  !calendar.isDateInToday(dayDate),
-                  calendar.dateComponents([.month, .year], from: dayDate) != currentMonthYear
-            else { continue }
+            for (dayComp, dayEntries) in byDay where dayEntries.count >= densityThreshold {
+                guard let dayDate = calendar.date(from: dayComp),
+                      !calendar.isDateInToday(dayDate),
+                      calendar.dateComponents([.month, .year], from: dayDate) != currentMonthYear
+                else { continue }
 
-            let sorted = dayPhotos.sorted { ($0.dateTaken ?? .distantPast) < ($1.dateTaken ?? .distantPast) }
-            let relDate = memoryRelativeDescription(for: dayDate, calendar: calendar, today: today)
+                let sorted = dayEntries.sorted { $0.1 < $1.1 }
+                let ids = sorted.map(\.0.id)
+                guard let first = sorted.first?.1, let last = sorted.last?.1 else { continue }
+                let relDate = Self.relativeDescription(for: dayDate, calendar: calendar, today: today)
+                let dayKey = "\(dayComp.year ?? 0)-\(dayComp.month ?? 0)-\(dayComp.day ?? 0)"
 
-            candidates.append(Memory(
-                id: UUID(), type: .photoDensity,
-                title: "A busy day \(relDate)",
-                subtitle: "\(dayPhotos.count) photos",
-                photos: sorted,
-                coverPhoto: sorted[sorted.count / 2],
-                dateRange: sorted.first!.dateTaken!...sorted.last!.dateTaken!,
-                score: Double(dayPhotos.count) * 1.2,
-                yearsAgo: nil, personName: nil
-            ))
-        }
+                candidates.append(Memory(
+                    id: "density-\(dayKey)", type: .photoDensity,
+                    title: "A busy day \(relDate)",
+                    subtitle: Self.formatDateRange(first, last),
+                    photoIDs: ids,
+                    coverPhotoID: ids[ids.count / 2],
+                    dateRange: first...last,
+                    score: Double(ids.count) * 1.2,
+                    yearsAgo: nil, personName: nil
+                ))
+            }
 
-        // === 6. Trip Detection ===
-        generateTripMemories(from: photosWithDates, calendar: calendar, today: today, into: &candidates)
+            // === 6. Trip Detection ===
+            Self.generateTripMemories(from: photosWithDates, calendar: calendar, today: today, into: &candidates)
 
-        // Sort by score, take top 15
-        candidates.sort { $0.score > $1.score }
-        self.memories = Array(candidates.prefix(15))
+            // Sort by score, then greedily select top 15 with overlap penalty
+            candidates.sort { $0.score > $1.score }
+            var selected: [Memory] = []
+            var usedPhotoIDs = Set<UUID>()
+            for candidate in candidates {
+                let candidateSet = Set(candidate.photoIDs)
+                let overlapCount = candidateSet.intersection(usedPhotoIDs).count
+                let overlapRatio = candidateSet.isEmpty ? 0.0 : Double(overlapCount) / Double(candidateSet.count)
+                if overlapRatio > 0.7 { continue }
+                selected.append(candidate)
+                usedPhotoIDs.formUnion(candidateSet)
+                if selected.count >= 15 { break }
+            }
+
+            return selected
+        }.value
+
         let elapsed = (CFAbsoluteTimeGetCurrent() - t) * 1000
-        print("[Memories] Generated \(candidates.count) candidates, showing top \(memories.count) in \(String(format: "%.0f", elapsed))ms")
+        self.memories = results
+        print("[Memories] Generated \(results.count) memories in \(String(format: "%.0f", elapsed))ms")
     }
 
     // MARK: Trip Detection
 
-    private func generateTripMemories(
-        from photosWithDates: [PhotoFile],
+    private nonisolated static func generateTripMemories(
+        from photosWithDates: [(PhotoFile, Date)],
         calendar: Calendar,
         today: Date,
         into candidates: inout [Memory]
     ) {
         let geoPhotos = photosWithDates
-            .filter { $0.gpsLatitude != nil && $0.gpsLongitude != nil }
-            .sorted { ($0.dateTaken ?? .distantPast) < ($1.dateTaken ?? .distantPast) }
+            .filter { $0.0.gpsLatitude != nil && $0.0.gpsLongitude != nil }
+            .sorted { $0.1 < $1.1 }
 
         guard geoPhotos.count >= 5 else { return }
 
-        // "Home" = median GPS coordinate (robust to outlier vacation photos)
-        let allLats = geoPhotos.compactMap(\.gpsLatitude).sorted()
-        let allLons = geoPhotos.compactMap(\.gpsLongitude).sorted()
+        let allLats = geoPhotos.compactMap(\.0.gpsLatitude).sorted()
+        let allLons = geoPhotos.compactMap(\.0.gpsLongitude).sorted()
         let homeLat = allLats[allLats.count / 2]
         let homeLon = allLons[allLons.count / 2]
 
         let distanceThresholdKm = 50.0
-        var currentTrip: [PhotoFile] = []
+        var currentTrip: [(PhotoFile, Date)] = []
 
-        for photo in geoPhotos {
-            let dist = Self.haversineKm(lat1: homeLat, lon1: homeLon, lat2: photo.gpsLatitude!, lon2: photo.gpsLongitude!)
+        for entry in geoPhotos {
+            guard let lat = entry.0.gpsLatitude, let lon = entry.0.gpsLongitude else { continue }
+            let dist = haversineKm(lat1: homeLat, lon1: homeLon, lat2: lat, lon2: lon)
 
             if dist > distanceThresholdKm {
-                if let lastDate = currentTrip.last?.dateTaken,
-                   let thisDate = photo.dateTaken,
-                   thisDate.timeIntervalSince(lastDate) > 48 * 3600 {
+                if let lastDate = currentTrip.last?.1,
+                   entry.1.timeIntervalSince(lastDate) > 48 * 3600 {
                     flushTrip(currentTrip, calendar: calendar, today: today, into: &candidates)
                     currentTrip = []
                 }
-                currentTrip.append(photo)
+                currentTrip.append(entry)
             } else {
                 flushTrip(currentTrip, calendar: calendar, today: today, into: &candidates)
                 currentTrip = []
@@ -979,25 +1017,32 @@ final class GalleryManager: ObservableObject {
         flushTrip(currentTrip, calendar: calendar, today: today, into: &candidates)
     }
 
-    private func flushTrip(_ photos: [PhotoFile], calendar: Calendar, today: Date, into candidates: inout [Memory]) {
-        guard photos.count >= 5 else { return }
-        let sorted = photos.sorted { ($0.dateTaken ?? .distantPast) < ($1.dateTaken ?? .distantPast) }
-        guard let first = sorted.first?.dateTaken, let last = sorted.last?.dateTaken else { return }
+    private nonisolated static func flushTrip(
+        _ entries: [(PhotoFile, Date)],
+        calendar: Calendar,
+        today: Date,
+        into candidates: inout [Memory]
+    ) {
+        guard entries.count >= 5 else { return }
+        let sorted = entries.sorted { $0.1 < $1.1 }
+        guard let first = sorted.first?.1, let last = sorted.last?.1 else { return }
 
         let currentMonthYear = calendar.dateComponents([.month, .year], from: today)
         guard calendar.dateComponents([.month, .year], from: last) != currentMonthYear else { return }
 
         let days = max(1, calendar.dateComponents([.day], from: first, to: last).day ?? 1)
-        let relDate = memoryRelativeDescription(for: first, calendar: calendar, today: today)
+        let relDate = relativeDescription(for: first, calendar: calendar, today: today)
+        let ids = sorted.map(\.0.id)
+        let tripKey = "\(calendar.component(.year, from: first))-\(calendar.component(.month, from: first))-\(calendar.component(.day, from: first))"
 
         candidates.append(Memory(
-            id: UUID(), type: .trip,
+            id: "trip-\(tripKey)", type: .trip,
             title: "A trip \(relDate)",
-            subtitle: "\(photos.count) photos over \(days) \(days == 1 ? "day" : "days")",
-            photos: sorted,
-            coverPhoto: sorted[sorted.count / 3],
+            subtitle: "\(days) \(days == 1 ? "day" : "days")",
+            photoIDs: ids,
+            coverPhotoID: ids[ids.count / 3],
             dateRange: first...last,
-            score: Double(photos.count) * 1.5 + Double(days) * 2.0 + 8.0,
+            score: Double(ids.count) * 1.5 + Double(days) * 2.0 + 8.0,
             yearsAgo: nil, personName: nil
         ))
     }
@@ -1014,19 +1059,22 @@ final class GalleryManager: ObservableObject {
         return R * 2 * atan2(sqrt(a), sqrt(1 - a))
     }
 
-    private func formatMemoryDateRange(_ photos: [PhotoFile]) -> String? {
-        let dates = photos.compactMap(\.dateTaken).sorted()
-        guard let first = dates.first, let last = dates.last else { return nil }
+    private static let dateRangeFormatter: DateFormatter = {
         let fmt = DateFormatter()
         fmt.dateStyle = .medium
         fmt.timeStyle = .none
+        return fmt
+    }()
+
+    private nonisolated static func formatDateRange(_ first: Date, _ last: Date) -> String {
+        let fmt = dateRangeFormatter
         if Calendar.current.isDate(first, inSameDayAs: last) {
             return fmt.string(from: first)
         }
         return "\(fmt.string(from: first)) – \(fmt.string(from: last))"
     }
 
-    private func memoryRelativeDescription(for date: Date, calendar: Calendar, today: Date) -> String {
+    private nonisolated static func relativeDescription(for date: Date, calendar: Calendar, today: Date) -> String {
         let years = calendar.dateComponents([.year], from: date, to: today).year ?? 0
         if years == 0 {
             let months = calendar.dateComponents([.month], from: date, to: today).month ?? 0

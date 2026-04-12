@@ -115,7 +115,7 @@ final class GalleryManager: ObservableObject {
 
     // MARK: - Disk Cache
 
-    private static let cacheVersion = 9
+    private static let cacheVersion = 10
 
     private struct LibraryCache: Codable {
         let version: Int
@@ -384,7 +384,7 @@ final class GalleryManager: ObservableObject {
                 var photos: [PhotoFile] = []
                 var subdirs: [URL] = []
 
-                let keys: [URLResourceKey] = [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey, .typeIdentifierKey]
+                let keys: [URLResourceKey] = [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey, .creationDateKey, .typeIdentifierKey]
 
                 if let contents = try? fm.contentsOfDirectory(
                     at: dirURL,
@@ -393,7 +393,7 @@ final class GalleryManager: ObservableObject {
                 ) {
                     // First pass: classify files and collect metadata
                     struct ScannedFile {
-                        let url: URL; let fileSize: Int64; let modDate: Date?; let isImage: Bool; let isVideo: Bool
+                        let url: URL; let fileSize: Int64; let modDate: Date?; let creationDate: Date?; let isImage: Bool; let isVideo: Bool
                     }
                     var scannedFiles: [ScannedFile] = []
 
@@ -413,6 +413,7 @@ final class GalleryManager: ObservableObject {
                                         url: itemURL,
                                         fileSize: Int64(resourceValues?.fileSize ?? 0),
                                         modDate: resourceValues?.contentModificationDate,
+                                        creationDate: resourceValues?.creationDate,
                                         isImage: isImage, isVideo: isVideo
                                     ))
                                 }
@@ -452,7 +453,9 @@ final class GalleryManager: ObservableObject {
 
                         // Merge cached EXIF metadata if available
                         let cached = cachedMetadata[file.url]
-                        let dateTaken = cached?.date ?? file.modDate
+                        // Prefer cached EXIF date; fall back to file creation date (not modDate,
+                        // which changes when metadata is rewritten and would misplace photos)
+                        let dateTaken = cached?.date ?? file.creationDate
                         let keywords = cached?.keywords ?? []
                         let tags = cached?.tags ?? []
                         let cachedEnrichedDate = cached?.enrichedFileDate
@@ -483,7 +486,7 @@ final class GalleryManager: ObservableObject {
                             let cached = cachedMetadata[file.url]
                             photos.append(PhotoFile(
                                 id: UUID(), url: file.url, filename: stem,
-                                fileSize: file.fileSize, dateTaken: cached?.date ?? file.modDate,
+                                fileSize: file.fileSize, dateTaken: cached?.date ?? file.creationDate ?? file.modDate,
                                 isVideo: true
                             ))
                         }
@@ -606,6 +609,11 @@ final class GalleryManager: ObservableObject {
                 if let date = metadata.date {
                     result[i].dateTaken = date
                     dateCount += 1
+                } else if result[i].dateTaken == nil {
+                    // No EXIF date; prefer file creation date over modification date
+                    // (modDate changes when metadata is rewritten externally)
+                    let attrs = try? result[i].url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
+                    result[i].dateTaken = attrs?.creationDate ?? attrs?.contentModificationDate
                 }
                 if !metadata.keywords.isEmpty {
                     result[i].keywords = metadata.keywords

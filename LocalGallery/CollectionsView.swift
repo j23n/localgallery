@@ -299,17 +299,28 @@ struct MemoryCardView: View {
     let memory: Memory
     @EnvironmentObject var manager: GalleryManager
 
+    private var coverURL: URL? {
+        manager.allPhotos.first { $0.id == memory.coverPhotoID }?.url
+    }
+
     var body: some View {
         ZStack(alignment: .bottomLeading) {
-            ThumbnailView(url: memory.coverPhoto.url, size: 200, cornerRadius: 16)
-                .frame(width: 240, height: 200)
+            if let url = coverURL {
+                ThumbnailView(url: url, size: 240)
+                    .frame(width: 240, height: 200)
+                    .clipped()
+            } else {
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(Color(.systemGray5))
+                    .frame(width: 240, height: 200)
+            }
 
             LinearGradient(
                 colors: [.clear, .black.opacity(0.6)],
                 startPoint: .center,
                 endPoint: .bottom
             )
-            .clipShape(RoundedRectangle(cornerRadius: 16))
+            .frame(width: 240, height: 200)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(memory.title)
@@ -323,7 +334,7 @@ struct MemoryCardView: View {
                         .foregroundStyle(.white.opacity(0.85))
                         .lineLimit(1)
                 }
-                Text("\(memory.photos.count) photos")
+                Text("\(memory.photoIDs.count) photos")
                     .font(.caption2)
                     .foregroundStyle(.white.opacity(0.7))
             }
@@ -339,8 +350,9 @@ struct MemoryCardView: View {
 
 struct MemoryDetailView: View {
     let memory: Memory
+    @EnvironmentObject var manager: GalleryManager
 
     var body: some View {
-        FolderGridView(title: memory.title, photos: memory.photos)
+        FolderGridView(title: memory.title, photos: manager.photos(for: memory))
     }
 }

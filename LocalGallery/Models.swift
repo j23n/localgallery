@@ -200,12 +200,12 @@ enum MemoryType: String {
 }
 
 struct Memory: Identifiable {
-    let id: UUID
+    let id: String            // deterministic key, e.g. "onThisDay", "yearsAgo-5"
     let type: MemoryType
     let title: String
     let subtitle: String?
-    let photos: [PhotoFile]
-    let coverPhoto: PhotoFile
+    let photoIDs: [UUID]
+    let coverPhotoID: UUID
     let dateRange: ClosedRange<Date>?
     let score: Double
     let yearsAgo: Int?

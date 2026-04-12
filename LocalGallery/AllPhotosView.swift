@@ -209,12 +209,13 @@ struct AllPhotosView: View {
                             } header: {
                                 if !section.title.isEmpty {
                                     Text(section.title)
-                                        .font(.title3)
-                                        .fontWeight(.bold)
+                                        .font(.subheadline)
+                                        .fontWeight(.semibold)
+                                        .foregroundStyle(.secondary)
                                         .frame(maxWidth: .infinity, alignment: .leading)
                                         .padding(.horizontal, 12)
-                                        .padding(.top, 16)
-                                        .padding(.bottom, 6)
+                                        .padding(.top, 10)
+                                        .padding(.bottom, 4)
                                         .background(.bar)
                                         .id(section.id)
                                 }

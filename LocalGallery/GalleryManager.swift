@@ -683,6 +683,8 @@ final class GalleryManager: ObservableObject {
     private var searchIndex: [UUID: String] = [:]
     /// All unique tags across the library, sorted by frequency
     @Published private(set) var allTags: [TagSuggestion] = []
+    /// Generation counter to cancel stale tag aggregation tasks
+    private var tagBuildGeneration = 0
 
     var sortedPhotos: [PhotoFile] { _sortedPhotos }
 
@@ -705,23 +707,34 @@ final class GalleryManager: ObservableObject {
             return (photo.id, corpus)
         })
 
-        // Aggregate global tag list for autocomplete suggestions
-        var tagCounts: [String: (tag: HierarchicalTag, count: Int)] = [:]
-        for photo in allPhotos {
-            for tag in photo.hierarchicalTags {
-                let key = tag.fullPath.lowercased()
-                if let existing = tagCounts[key] {
-                    tagCounts[key] = (existing.tag, existing.count + 1)
-                } else {
-                    tagCounts[key] = (tag, 1)
+        print("[Index] Built: \(allPhotos.count) photos (\(withDates) dates, \(withKeywords) keywords) in \(String(format: "%.0f", (CFAbsoluteTimeGetCurrent() - t) * 1000))ms")
+
+        // Aggregate global tag list lazily in background to avoid blocking scroll
+        tagBuildGeneration += 1
+        let generation = tagBuildGeneration
+        let photos = allPhotos
+        Task.detached(priority: .utility) {
+            var tagCounts: [String: (tag: HierarchicalTag, count: Int)] = [:]
+            for photo in photos {
+                for tag in photo.hierarchicalTags {
+                    let key = tag.fullPath.lowercased()
+                    if let existing = tagCounts[key] {
+                        tagCounts[key] = (existing.tag, existing.count + 1)
+                    } else {
+                        tagCounts[key] = (tag, 1)
+                    }
                 }
             }
-        }
-        allTags = tagCounts.values
-            .map { TagSuggestion(id: $0.tag.fullPath.lowercased(), displayName: $0.tag.displayName, fullPath: $0.tag.fullPath, namespace: $0.tag.namespace, count: $0.count) }
-            .sorted { $0.count > $1.count }
+            let tags = tagCounts.values
+                .map { TagSuggestion(id: $0.tag.fullPath.lowercased(), displayName: $0.tag.displayName, fullPath: $0.tag.fullPath, namespace: $0.tag.namespace, count: $0.count) }
+                .sorted { $0.count > $1.count }
 
-        print("[Index] Built: \(allPhotos.count) photos (\(withDates) dates, \(withKeywords) keywords, \(allTags.count) unique tags) in \(String(format: "%.0f", (CFAbsoluteTimeGetCurrent() - t) * 1000))ms")
+            await MainActor.run { [weak self] in
+                guard let self, self.tagBuildGeneration == generation else { return }
+                self.allTags = tags
+                print("[Index] Tags: \(tags.count) unique tags built in background")
+            }
+        }
 
         let today = Calendar.current.startOfDay(for: Date())
         if memoriesGeneratedDate != today && !allPhotos.isEmpty {

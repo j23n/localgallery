@@ -8,6 +8,10 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   build:
     runs-on: macos-15
@@ -20,9 +24,13 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen
 
-      - name: Build
+      - name: Build and report errors
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set +e
+          set +o pipefail
           xcodebuild build \
             -project LocalGallery.xcodeproj \
             -scheme LocalGallery \
@@ -30,30 +38,24 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO 2>&1 | tee build.log
-          RESULT=${PIPESTATUS[0]}
-          echo "xcodebuild_exit=$RESULT" >> "$GITHUB_ENV"
-          exit $RESULT
-
-      - name: Post build errors to PR
-        if: failure() && github.event_name == 'pull_request'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          echo 'CI build errors from xcodebuild:' > comment.md
-          echo '```' >> comment.md
-          grep 'error:' build.log | head -30 >> comment.md || echo 'No lines matching error: found' >> comment.md
-          echo '' >> comment.md
-          echo '--- last 15 lines ---' >> comment.md
-          tail -15 build.log >> comment.md
-          echo '```' >> comment.md
-          gh pr comment ${{ github.event.pull_request.number }} --body-file comment.md
-
-      - name: Upload build log
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log
-          path: build.log
+          BUILD_EXIT=${PIPESTATUS[0]:-$?}
+          if [ "$BUILD_EXIT" != "0" ]; then
+            echo ""
+            echo "========== BUILD ERRORS =========="
+            grep 'error:' build.log | head -40
+            echo "========== END ERRORS =========="
+            echo ""
+            if [ -n "$PR_NUMBER" ]; then
+              echo 'Build failed. Compiler errors:' > /tmp/comment.md
+              echo '```' >> /tmp/comment.md
+              grep 'error:' build.log | head -30 >> /tmp/comment.md
+              echo '' >> /tmp/comment.md
+              tail -10 build.log >> /tmp/comment.md
+              echo '```' >> /tmp/comment.md
+              gh pr comment "$PR_NUMBER" --body-file /tmp/comment.md || echo "Failed to post PR comment"
+            fi
+            exit 1
+          fi
 
       - name: Archive
         run: |

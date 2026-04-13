@@ -164,7 +164,7 @@ struct PhotoFile: Identifiable, Hashable, Codable, Sendable {
 
     /// Deterministic UUID derived from the file URL path for stable identity across scans
     static func stableID(for url: URL) -> UUID {
-        let hash = Insecure.MD5.hash(data: Data(url.standardizedFileURL.path.utf8))
+        let hash = Insecure.MD5.hash(data: Data(url.standardized.path.utf8))
         let bytes = Array(hash)
         return UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3],
                            bytes[4], bytes[5], bytes[6], bytes[7],
@@ -199,7 +199,7 @@ struct PhotoFolder: Identifiable, Codable, Sendable {
     var dateCreated: Date?
 
     static func stableID(for url: URL) -> UUID {
-        let hash = Insecure.MD5.hash(data: Data(("folder:" + url.standardizedFileURL.path).utf8))
+        let hash = Insecure.MD5.hash(data: Data(("folder:" + url.standardized.path).utf8))
         let bytes = Array(hash)
         return UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3],
                            bytes[4], bytes[5], bytes[6], bytes[7],

@@ -17,6 +17,7 @@ struct AllPhotosView: View {
     @State private var searchText: String = ""
     @State private var activeTags: [TagSuggestion] = []
     @State private var selectedPhoto: PhotoFile?
+    @State private var presentationID = UUID()
     @State private var showSettings = false
     @State private var scrollToTopTrigger = false
 
@@ -78,27 +79,7 @@ struct AllPhotosView: View {
         return result
     }
 
-    /// Target cell size in points for each tier
-    private var targetCellSize: CGFloat {
-        switch sizeTier {
-        case 0: return 130  // large
-        case 1: return 100  // medium
-        default: return 78  // small
-        }
-    }
-
-    private func columnCount(for width: CGFloat) -> Int {
-        max(2, Int((width + 2) / (targetCellSize + 2)))
-    }
-
-    private func columns(for width: CGFloat) -> [GridItem] {
-        Array(repeating: GridItem(.flexible(), spacing: 2), count: columnCount(for: width))
-    }
-
-    private func cellSize(for width: CGFloat) -> CGFloat {
-        let cols = columnCount(for: width)
-        return max(1, (width - CGFloat(cols - 1) * 2) / CGFloat(cols))
-    }
+    private var grid: GridLayoutConfig { GridLayoutConfig(sizeTier: sizeTier) }
 
     var body: some View {
         let sections = photoSections
@@ -174,12 +155,13 @@ struct AllPhotosView: View {
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Button { cycleSizeTier() } label: {
-                    Image(systemName: gridIconName)
+                    Image(systemName: grid.gridIconName)
                 }
             }
         }
         .fullScreenCover(item: $selectedPhoto) { photo in
             PhotoViewerView(photos: filteredPhotos, initialPhoto: photo)
+                .id(presentationID)
         }
         .sheet(isPresented: $showSettings) {
             SettingsView()
@@ -189,7 +171,7 @@ struct AllPhotosView: View {
     private func photoGrid(sections: [PhotoSection], years: [(year: String, sectionID: String)]) -> some View {
         GeometryReader { geo in
             let width = geo.size.width
-            let size = cellSize(for: width)
+            let size = grid.cellSize(for: width)
             ScrollViewReader { proxy in
                 ScrollView {
                     // Active tag pills
@@ -200,7 +182,7 @@ struct AllPhotosView: View {
                         Color.clear.frame(height: 0).id("__top__")
                     }
 
-                    LazyVGrid(columns: columns(for: width), spacing: 2, pinnedViews: [.sectionHeaders]) {
+                    LazyVGrid(columns: grid.columns(for: width), spacing: 2, pinnedViews: [.sectionHeaders]) {
                         ForEach(sections) { section in
                             Section {
                                 ForEach(section.photos) { photo in
@@ -277,20 +259,13 @@ struct AllPhotosView: View {
             .frame(width: cellSize, height: cellSize)
             .contentShape(Rectangle())
             .onTapGesture {
+                presentationID = UUID()
                 selectedPhoto = photo
             }
     }
 
-    private var gridIconName: String {
-        switch sizeTier {
-        case 0: return "square.grid.3x3"
-        case 1: return "square.grid.3x3.fill"
-        default: return "square.grid.4x3.fill"
-        }
-    }
-
     private func cycleSizeTier() {
-        sizeTier = (sizeTier + 1) % 3
+        GridLayoutConfig.cycleSizeTier(&sizeTier)
     }
 }
 

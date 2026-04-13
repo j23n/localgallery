@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import CryptoKit
 
 // MARK: - Hierarchical Tag
 
@@ -160,6 +161,16 @@ struct PhotoFile: Identifiable, Hashable, Codable {
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
     }
+
+    /// Deterministic UUID derived from the file URL path for stable identity across scans
+    static func stableID(for url: URL) -> UUID {
+        let hash = Insecure.MD5.hash(data: Data(url.standardizedFileURL.path.utf8))
+        let bytes = Array(hash)
+        return UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3],
+                           bytes[4], bytes[5], bytes[6], bytes[7],
+                           bytes[8], bytes[9], bytes[10], bytes[11],
+                           bytes[12], bytes[13], bytes[14], bytes[15]))
+    }
 }
 
 struct EXIFData: Equatable {
@@ -186,6 +197,15 @@ struct PhotoFolder: Identifiable, Codable {
     var totalPhotoCount: Int
     var dateModified: Date?
     var dateCreated: Date?
+
+    static func stableID(for url: URL) -> UUID {
+        let hash = Insecure.MD5.hash(data: Data(("folder:" + url.standardizedFileURL.path).utf8))
+        let bytes = Array(hash)
+        return UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3],
+                           bytes[4], bytes[5], bytes[6], bytes[7],
+                           bytes[8], bytes[9], bytes[10], bytes[11],
+                           bytes[12], bytes[13], bytes[14], bytes[15]))
+    }
 }
 
 // MARK: - Memory

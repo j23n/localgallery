@@ -3,6 +3,7 @@ import UIKit
 import ImageIO
 import UniformTypeIdentifiers
 import AVFoundation
+import os
 
 @MainActor
 final class GalleryManager: ObservableObject {
@@ -11,6 +12,8 @@ final class GalleryManager: ObservableObject {
     @Published var isScanning: Bool = false
     @Published var lastSyncedAt: Date?
     @Published private(set) var memories: [Memory] = []
+    @Published private(set) var topPeople: [TagSuggestion] = []
+    @Published private(set) var eventFolders: [PhotoFolder] = []
 
     @Published var folderSortOrder: FolderSortOrder = .nameAscending {
         didSet { UserDefaults.standard.set(folderSortOrder.rawValue, forKey: "folderSortOrder") }
@@ -23,6 +26,13 @@ final class GalleryManager: ObservableObject {
     private let bookmarkKey = "rootFolderBookmark"
     private var activeSecurityScopedURL: URL?
     private var foregroundObserver: Any?
+
+    private let thumbnailDiskCacheDir: URL = {
+        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("thumbnails", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }()
 
     private var cacheURL: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -89,7 +99,7 @@ final class GalleryManager: ObservableObject {
             )
             UserDefaults.standard.set(bookmarkData, forKey: bookmarkKey)
         } catch {
-            print("Failed to save bookmark: \(error)")
+            Log.cache.error("Failed to save bookmark: \(error)")
         }
     }
 
@@ -108,14 +118,14 @@ final class GalleryManager: ObservableObject {
             }
             return url
         } catch {
-            print("Failed to resolve bookmark: \(error)")
+            Log.cache.error("Failed to resolve bookmark: \(error)")
             return nil
         }
     }
 
     // MARK: - Disk Cache
 
-    private static let cacheVersion = 10
+    private static let cacheVersion = 11
 
     private struct LibraryCache: Codable {
         let version: Int
@@ -132,7 +142,7 @@ final class GalleryManager: ObservableObject {
                 let data = try JSONEncoder().encode(cache)
                 try data.write(to: url, options: .atomic)
             } catch {
-                print("Failed to save cache: \(error)")
+                Log.cache.error("Failed to save cache: \(error)")
             }
         }
     }
@@ -144,17 +154,17 @@ final class GalleryManager: ObservableObject {
             let data = try Data(contentsOf: cacheURL)
             let cache = try JSONDecoder().decode(LibraryCache.self, from: data)
             guard cache.version == Self.cacheVersion else {
-                print("[Cache] Version mismatch (\(cache.version) vs \(Self.cacheVersion)), discarding")
+                Log.cache.warning("Version mismatch (\(cache.version) vs \(Self.cacheVersion)), discarding")
                 try? FileManager.default.removeItem(at: cacheURL)
                 return false
             }
             self.rootFolder = cache.rootFolder
             self.allPhotos = cache.allPhotos
-            print("[Cache] Loaded \(cache.allPhotos.count) photos from cache v\(cache.version)")
+            Log.cache.info("Loaded \(cache.allPhotos.count) photos from cache v\(cache.version)")
             rebuildSortAndIndex()
             return true
         } catch {
-            print("Failed to load cache: \(error)")
+            Log.cache.error("Failed to load cache: \(error)")
             return false
         }
     }
@@ -466,7 +476,7 @@ final class GalleryManager: ObservableObject {
                         }
 
                         photos.append(PhotoFile(
-                            id: UUID(), url: file.url, filename: stem,
+                            id: PhotoFile.stableID(for: file.url), url: file.url, filename: stem,
                             fileSize: file.fileSize,
                             dateTaken: dateTaken,
                             livePhotoVideoURL: liveURL,
@@ -485,7 +495,7 @@ final class GalleryManager: ObservableObject {
                             standaloneVideoCount += 1
                             let cached = cachedMetadata[file.url]
                             photos.append(PhotoFile(
-                                id: UUID(), url: file.url, filename: stem,
+                                id: PhotoFile.stableID(for: file.url), url: file.url, filename: stem,
                                 fileSize: file.fileSize, dateTaken: cached?.date ?? file.creationDate ?? file.modDate,
                                 isVideo: true
                             ))
@@ -495,12 +505,12 @@ final class GalleryManager: ObservableObject {
                     let imageCount = scannedFiles.filter(\.isImage).count
                     let videoCount = scannedFiles.filter(\.isVideo).count
                     if videoCount > 0 {
-                        print("[Scan] \(dirName): \(imageCount) images, \(videoCount) videos → \(pairedCount) live pairs, \(standaloneVideoCount) standalone videos")
+                        Log.scan.debug("\(dirName): \(imageCount) images, \(videoCount) videos → \(pairedCount) live pairs, \(standaloneVideoCount) standalone videos")
                         if pairedCount == 0 && videoCount > 0 {
                             let sampleImageStems = Array(imageStemSet.prefix(3))
                             let sampleVideoStems = Array(videoByName.keys.prefix(3))
-                            print("[Scan]   Image stems: \(sampleImageStems)")
-                            print("[Scan]   Video stems: \(sampleVideoStems)")
+                            Log.scan.debug("  Image stems: \(sampleImageStems)")
+                            Log.scan.debug("  Video stems: \(sampleVideoStems)")
                         }
                     }
                 }
@@ -548,7 +558,7 @@ final class GalleryManager: ObservableObject {
                 }
 
                 return PhotoFolder(
-                    id: UUID(),
+                    id: PhotoFolder.stableID(for: node.url),
                     url: node.url,
                     name: node.name,
                     subfolders: subfolders,
@@ -564,18 +574,29 @@ final class GalleryManager: ObservableObject {
             return (root, flatPhotos, needsEnrichment)
         }.value
 
-        // Back on main actor — update published properties
-        if !result.flatPhotos.isEmpty || !silent {
-            print("[Scan] Complete: \(result.flatPhotos.count) photos (needsEnrichment=\(result.needsEnrichment))")
+        // Back on main actor — update published properties only if content changed
+        let existingURLs = Set(allPhotos.map(\.url))
+        let newURLs = Set(result.flatPhotos.map(\.url))
+        let contentChanged = existingURLs != newURLs || result.needsEnrichment
+
+        if contentChanged && (!result.flatPhotos.isEmpty || !silent) {
+            Log.scan.info("Complete: \(result.flatPhotos.count) photos (needsEnrichment=\(result.needsEnrichment), changed=true)")
             self.rootFolder = result.root
             self.allPhotos = result.flatPhotos
             rebuildSortAndIndex()
             saveCache()
+        } else if result.flatPhotos.isEmpty && !silent {
+            Log.scan.info("Complete: 0 photos")
+            self.rootFolder = result.root
+            self.allPhotos = []
+            rebuildSortAndIndex()
+        } else {
+            Log.scan.info("Scan complete, no changes detected (\(result.flatPhotos.count) photos)")
         }
         isScanning = false
         lastSyncedAt = Date()
 
-        // Phase 2: enrich with EXIF dates and keywords in background (only if needed)
+        // Enrich with EXIF dates and keywords in background (only if needed)
         if result.needsEnrichment && !allPhotos.isEmpty {
             await enrichMetadata()
         }
@@ -591,58 +612,94 @@ final class GalleryManager: ObservableObject {
         let photos = allPhotos
         let staleCount = photos.filter { $0.enrichedFileDate == nil && !$0.isVideo }.count
         let startTime = CFAbsoluteTimeGetCurrent()
-        print("[Enrich] Starting metadata enrichment: \(staleCount) new/changed of \(photos.count) total")
+        Log.enrich.info("Starting metadata enrichment: \(staleCount) new/changed of \(photos.count) total")
 
         if staleCount == 0 {
-            print("[Enrich] All photos up-to-date, skipping")
+            Log.enrich.info("All photos up-to-date, skipping")
             return
         }
 
         let enrichedPhotos: [PhotoFile] = await Task.detached(priority: .background) {
             let fm = FileManager.default
             var result = photos
+            let staleIndices = result.indices.filter { !result[$0].isVideo && result[$0].enrichedFileDate == nil }
+
+            // Enrich stale photos in parallel using TaskGroup
+            struct EnrichedResult: Sendable {
+                let index: Int
+                let dateTaken: Date?
+                let keywords: [String]
+                let hierarchicalTags: [HierarchicalTag]
+                let gpsLatitude: Double?
+                let gpsLongitude: Double?
+                let enrichedFileDate: Date?
+            }
+
+            let batchResults: [EnrichedResult] = await withTaskGroup(of: EnrichedResult?.self) { group in
+                for idx in staleIndices {
+                    group.addTask {
+                        guard !Task.isCancelled else { return nil }
+                        let photo = result[idx]
+                        let metadata = GalleryManager.readImageMetadata(url: photo.url)
+
+                        var dateTaken = photo.dateTaken
+                        if let date = metadata.date {
+                            dateTaken = date
+                        } else if dateTaken == nil {
+                            let attrs = try? photo.url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
+                            dateTaken = attrs?.creationDate ?? attrs?.contentModificationDate
+                        }
+
+                        let modDate = (try? fm.attributesOfItem(atPath: photo.url.path)[.modificationDate]) as? Date
+
+                        return EnrichedResult(
+                            index: idx,
+                            dateTaken: dateTaken,
+                            keywords: metadata.keywords.isEmpty ? photo.keywords : metadata.keywords,
+                            hierarchicalTags: metadata.keywords.isEmpty ? photo.hierarchicalTags : metadata.hierarchicalTags,
+                            gpsLatitude: metadata.gpsLatitude ?? photo.gpsLatitude,
+                            gpsLongitude: metadata.gpsLongitude ?? photo.gpsLongitude,
+                            enrichedFileDate: modDate ?? Date()
+                        )
+                    }
+                }
+                var collected: [EnrichedResult] = []
+                for await item in group {
+                    if let item { collected.append(item) }
+                    if collected.count % 5000 == 0 {
+                        Log.enrich.info("Processed \(collected.count)/\(staleIndices.count)…")
+                    }
+                }
+                return collected
+            }
+
             var dateCount = 0
             var keywordCount = 0
             var uniqueKeywords = Set<String>()
-            for i in result.indices where !result[i].isVideo && result[i].enrichedFileDate == nil {
-                let metadata = GalleryManager.readImageMetadata(url: result[i].url)
-                if let date = metadata.date {
-                    result[i].dateTaken = date
-                    dateCount += 1
-                } else if result[i].dateTaken == nil {
-                    // No EXIF date; prefer file creation date over modification date
-                    // (modDate changes when metadata is rewritten externally)
-                    let attrs = try? result[i].url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
-                    result[i].dateTaken = attrs?.creationDate ?? attrs?.contentModificationDate
-                }
-                if !metadata.keywords.isEmpty {
-                    result[i].keywords = metadata.keywords
-                    result[i].hierarchicalTags = metadata.hierarchicalTags
+            for enriched in batchResults {
+                result[enriched.index].dateTaken = enriched.dateTaken
+                result[enriched.index].keywords = enriched.keywords
+                result[enriched.index].hierarchicalTags = enriched.hierarchicalTags
+                result[enriched.index].gpsLatitude = enriched.gpsLatitude
+                result[enriched.index].gpsLongitude = enriched.gpsLongitude
+                result[enriched.index].enrichedFileDate = enriched.enrichedFileDate
+                if enriched.dateTaken != nil { dateCount += 1 }
+                if !enriched.keywords.isEmpty {
                     keywordCount += 1
-                    for kw in metadata.keywords { uniqueKeywords.insert(kw.lowercased()) }
-                }
-                if let lat = metadata.gpsLatitude, let lon = metadata.gpsLongitude {
-                    result[i].gpsLatitude = lat
-                    result[i].gpsLongitude = lon
-                }
-                // Stamp with the file's current modDate so we detect future changes
-                let modDate = (try? fm.attributesOfItem(atPath: result[i].url.path)[.modificationDate]) as? Date
-                result[i].enrichedFileDate = modDate ?? Date()
-                if (i + 1) % 5000 == 0 {
-                    print("[Enrich] Processed \(i + 1)/\(result.count)…")
+                    for kw in enriched.keywords { uniqueKeywords.insert(kw.lowercased()) }
                 }
             }
+
             let elapsed = CFAbsoluteTimeGetCurrent() - startTime
-            print("[Enrich] Done in \(String(format: "%.1f", elapsed))s: \(dateCount) EXIF dates, \(keywordCount) photos with keywords, \(uniqueKeywords.count) unique tags")
+            Log.enrich.info("Done in \(String(format: "%.1f", elapsed))s: \(dateCount) EXIF dates, \(keywordCount) photos with keywords, \(uniqueKeywords.count) unique tags")
             if !uniqueKeywords.isEmpty {
                 let sample = Array(uniqueKeywords.sorted().prefix(20))
-                print("[Enrich] Sample keywords: \(sample.joined(separator: ", "))")
+                Log.enrich.debug("Sample keywords: \(sample.joined(separator: ", "))")
             }
-            // Log raw hierarchical tag paths to verify namespace parsing
             let sampleTags = result.flatMap(\.hierarchicalTags).prefix(20)
             if !sampleTags.isEmpty {
                 let tagDetails = sampleTags.map { "\($0.fullPath) → ns:\($0.namespace ?? "nil") name:\($0.displayName)" }
-                print("[Enrich] Sample hierarchical tags:\n  \(tagDetails.joined(separator: "\n  "))")
+                Log.enrich.debug("Sample hierarchical tags:\n  \(tagDetails.joined(separator: "\n  "))")
             }
             return result
         }.value
@@ -650,10 +707,22 @@ final class GalleryManager: ObservableObject {
         // Only apply if allPhotos hasn't been replaced during enrichment
         guard allPhotos.count == photos.count,
               allPhotos.first?.url == photos.first?.url else {
-            print("[Enrich] Skipped — allPhotos changed during enrichment")
+            Log.enrich.warning("Skipped — allPhotos changed during enrichment")
             return
         }
 
+        // Check if enrichment actually changed any values
+        let enrichedCount = zip(photos, enrichedPhotos).filter { old, new in
+            old.dateTaken != new.dateTaken || old.keywords != new.keywords ||
+            old.hierarchicalTags != new.hierarchicalTags || old.gpsLatitude != new.gpsLatitude
+        }.count
+
+        guard enrichedCount > 0 else {
+            Log.enrich.info("No metadata changes after enrichment, skipping update")
+            return
+        }
+
+        Log.enrich.info("Enrichment changed \(enrichedCount) photos, publishing update")
         // Single assignment updates @Published, triggers one view update
         self.allPhotos = enrichedPhotos
         rebuildSortAndIndex()
@@ -664,7 +733,7 @@ final class GalleryManager: ObservableObject {
             self.rootFolder = Self.updateFolderPhotos(root, photosByURL: photosByURL)
         }
         saveCache()
-        print("[Enrich] Applied enriched metadata to live data")
+        Log.enrich.info("Applied enriched metadata to live data")
     }
 
     /// Recursively update photos inside folder tree with enriched metadata
@@ -685,8 +754,22 @@ final class GalleryManager: ObservableObject {
     @Published private(set) var allTags: [TagSuggestion] = []
     /// Generation counter to cancel stale tag aggregation tasks
     private var tagBuildGeneration = 0
+    /// Tag -> photos index for fast collection lookups
+    private var _photosForTag: [String: [PhotoFile]] = [:]
+    /// Photo ID -> PhotoFile lookup
+    private var _photoByID: [UUID: PhotoFile] = [:]
+    /// Cached leaf folders (no subfolders, has photos)
+    private var _cachedLeafFolders: [PhotoFolder] = []
 
     var sortedPhotos: [PhotoFile] { _sortedPhotos }
+
+    /// O(1) photo lookup by ID
+    func photo(byID id: UUID) -> PhotoFile? { _photoByID[id] }
+
+    /// O(1) photos for a given tag
+    func photos(forTag tag: TagSuggestion) -> [PhotoFile] {
+        _photosForTag[tag.fullPath.lowercased()] ?? []
+    }
 
     func sortPhotos(_ photos: [PhotoFile]) -> [PhotoFile] {
         photos.sorted { ($0.dateTaken ?? .distantPast) > ($1.dateTaken ?? .distantPast) }
@@ -695,44 +778,73 @@ final class GalleryManager: ObservableObject {
     private func rebuildSortAndIndex() {
         let t = CFAbsoluteTimeGetCurrent()
         _sortedPhotos = sortPhotos(allPhotos)
+        _photoByID = Dictionary(allPhotos.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         let withKeywords = allPhotos.filter { !$0.keywords.isEmpty }.count
         let withDates = allPhotos.filter { $0.dateTaken != nil }.count
 
-        // Build search index: includes filename, keywords, and full tag paths
-        searchIndex = Dictionary(uniqueKeysWithValues: allPhotos.map { photo in
+        // Build search index and tag-to-photos index in one pass
+        var newSearchIndex: [UUID: String] = [:]
+        var tagPhotos: [String: [PhotoFile]] = [:]
+        for photo in allPhotos {
             let tagPaths = photo.hierarchicalTags.map(\.fullPath)
             let corpus = ([photo.filename] + photo.keywords + tagPaths)
                 .joined(separator: "\n")
                 .lowercased()
-            return (photo.id, corpus)
-        })
+            newSearchIndex[photo.id] = corpus
+            for tag in photo.hierarchicalTags {
+                let key = tag.fullPath.lowercased()
+                tagPhotos[key, default: []].append(photo)
+            }
+        }
+        searchIndex = newSearchIndex
+        _photosForTag = tagPhotos
 
-        print("[Index] Built: \(allPhotos.count) photos (\(withDates) dates, \(withKeywords) keywords) in \(String(format: "%.0f", (CFAbsoluteTimeGetCurrent() - t) * 1000))ms")
+        // Cache leaf folders and pre-compute event folders
+        _cachedLeafFolders = rootFolder.map { Self.collectLeafFolders($0) } ?? []
+        eventFolders = _cachedLeafFolders.sorted { a, b in
+            let aDate = a.photos.compactMap(\.dateTaken).max() ?? .distantPast
+            let bDate = b.photos.compactMap(\.dateTaken).max() ?? .distantPast
+            return aDate > bDate
+        }
 
-        // Aggregate global tag list lazily in background to avoid blocking scroll
+        Log.index.info("Built: \(allPhotos.count) photos (\(withDates) dates, \(withKeywords) keywords) in \(String(format: "%.0f", (CFAbsoluteTimeGetCurrent() - t) * 1000))ms")
+
+        // Aggregate global tag list + topPeople in background to avoid blocking scroll
         tagBuildGeneration += 1
         let generation = tagBuildGeneration
-        let photos = allPhotos
+        let tagPhotosSnapshot = tagPhotos
         Task.detached(priority: .utility) {
             var tagCounts: [String: (tag: HierarchicalTag, count: Int)] = [:]
-            for photo in photos {
-                for tag in photo.hierarchicalTags {
-                    let key = tag.fullPath.lowercased()
-                    if let existing = tagCounts[key] {
-                        tagCounts[key] = (existing.tag, existing.count + 1)
-                    } else {
-                        tagCounts[key] = (tag, 1)
-                    }
+            for (key, photos) in tagPhotosSnapshot {
+                if let first = photos.first?.hierarchicalTags.first(where: { $0.fullPath.lowercased() == key }) {
+                    tagCounts[key] = (first, photos.count)
                 }
             }
             let tags = tagCounts.values
                 .map { TagSuggestion(id: $0.tag.fullPath.lowercased(), displayName: $0.tag.displayName, fullPath: $0.tag.fullPath, namespace: $0.tag.namespace, count: $0.count) }
                 .sorted { $0.count > $1.count }
 
+            // Pre-compute top people
+            let peopleTags = tags.filter { $0.namespace?.lowercased() == "people" }
+            let oneYearAgo = Calendar.current.date(byAdding: .year, value: -1, to: Date()) ?? Date()
+            let scoredPeople: [(tag: TagSuggestion, hasRecent: Bool)] = peopleTags.map { person in
+                let photos = tagPhotosSnapshot[person.fullPath.lowercased()] ?? []
+                let hasRecent = photos.contains { ($0.dateTaken ?? .distantPast) > oneYearAgo }
+                return (person, hasRecent)
+            }
+            let computedTopPeople = scoredPeople
+                .sorted { a, b in
+                    if a.hasRecent != b.hasRecent { return a.hasRecent }
+                    return a.tag.count > b.tag.count
+                }
+                .prefix(8)
+                .map(\.tag)
+
             await MainActor.run { [weak self] in
                 guard let self, self.tagBuildGeneration == generation else { return }
                 self.allTags = tags
-                print("[Index] Tags: \(tags.count) unique tags built in background")
+                self.topPeople = computedTopPeople
+                Log.index.info("Tags: \(tags.count) unique, \(computedTopPeople.count) top people")
             }
         }
 
@@ -740,7 +852,7 @@ final class GalleryManager: ObservableObject {
         if memoriesGeneratedDate != today && !allPhotos.isEmpty {
             memoriesGeneratedDate = today
             let snapshot = allPhotos
-            let leaves = leafFolders
+            let leaves = _cachedLeafFolders
             Task { await generateMemories(from: snapshot, leafFolders: leaves) }
         }
     }
@@ -775,7 +887,7 @@ final class GalleryManager: ObservableObject {
 
         guard !query.isEmpty else {
             if !requiredTags.isEmpty {
-                print("[Search] tags:\(requiredTags.map(\.displayName)) → \(results.count) matches")
+                Log.search.debug("tags:\(requiredTags.map(\.displayName)) → \(results.count) matches")
             }
             return results
         }
@@ -792,7 +904,7 @@ final class GalleryManager: ObservableObject {
                 searchIndex[photo.id]?.contains(q) ?? false
             }
         }
-        print("[Search] \"\(query)\" tags:\(requiredTags.map(\.displayName)) → \(results.count) matches\(isTagQuery ? " (exact tag)" : "")")
+        Log.search.debug("\"\(query)\" tags:\(requiredTags.map(\.displayName)) → \(results.count) matches\(isTagQuery ? " (exact tag)" : "")")
         return results
     }
 
@@ -802,10 +914,7 @@ final class GalleryManager: ObservableObject {
         allTags.filter { $0.namespace?.lowercased() == "people" }
     }
 
-    var leafFolders: [PhotoFolder] {
-        guard let root = rootFolder else { return [] }
-        return Self.collectLeafFolders(root)
-    }
+    var leafFolders: [PhotoFolder] { _cachedLeafFolders }
 
     private static func collectLeafFolders(_ folder: PhotoFolder) -> [PhotoFolder] {
         if folder.subfolders.isEmpty && !folder.photos.isEmpty {
@@ -818,8 +927,7 @@ final class GalleryManager: ObservableObject {
 
     /// Resolve photo IDs from a memory back to PhotoFile instances.
     func photos(for memory: Memory) -> [PhotoFile] {
-        let lookup = Dictionary(allPhotos.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-        return memory.photoIDs.compactMap { lookup[$0] }
+        memory.photoIDs.compactMap { _photoByID[$0] }
     }
 
     private func generateMemories(from allPhotos: [PhotoFile], leafFolders: [PhotoFolder]) async {
@@ -994,7 +1102,7 @@ final class GalleryManager: ObservableObject {
 
         let elapsed = (CFAbsoluteTimeGetCurrent() - t) * 1000
         self.memories = results
-        print("[Memories] Generated \(results.count) memories in \(String(format: "%.0f", elapsed))ms")
+        Log.memory.info("Generated \(results.count) memories in \(String(format: "%.0f", elapsed))ms")
     }
 
     // MARK: Trip Detection
@@ -1119,88 +1227,146 @@ final class GalleryManager: ObservableObject {
         }
 
         let maxPixelSize = max(size.width, size.height) * UIScreen.main.scale
-        let result: UIImage? = await Task.detached(priority: .background) {
-            if isVideo {
-                let asset = AVAsset(url: url)
-                let generator = AVAssetImageGenerator(asset: asset)
-                generator.appliesPreferredTrackTransform = true
-                generator.maximumSize = CGSize(width: maxPixelSize, height: maxPixelSize)
-                if let cgImage = try? generator.copyCGImage(at: .zero, actualTime: nil) {
-                    return UIImage(cgImage: cgImage)
-                }
-                return nil
-            } else {
-                let options: [CFString: Any] = [kCGImageSourceShouldCache: false]
-                guard let source = CGImageSourceCreateWithURL(url as CFURL, options as CFDictionary) else {
-                    return nil
-                }
-                let thumbOptions: [CFString: Any] = [
-                    kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
-                    kCGImageSourceCreateThumbnailFromImageAlways: true,
-                    kCGImageSourceCreateThumbnailWithTransform: true,
-                    kCGImageSourceShouldCacheImmediately: true
-                ]
-                guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbOptions as CFDictionary) else {
-                    return nil
-                }
-                return UIImage(cgImage: cgImage)
-            }
-        }.value
+        let diskPath = thumbnailDiskCacheDir.appendingPathComponent(
+            PhotoFile.stableID(for: url).uuidString + ".jpg"
+        )
 
-        if let image = result {
+        do {
+            // Check disk cache
+            let image = try await Self.loadThumbnail(
+                for: url, maxPixelSize: maxPixelSize, isVideo: isVideo, diskPath: diskPath
+            )
+            guard let image else { return nil }
             let cost = image.cgImage.map { $0.bytesPerRow * $0.height } ?? 0
             thumbnailCache.setObject(image, forKey: url as NSURL, cost: cost)
+            return image
+        } catch is CancellationError {
+            Log.thumb.debug("Cancelled: \(url.lastPathComponent)")
+            return nil
+        } catch {
+            return nil
+        }
+    }
+
+    /// Generates or loads a thumbnail — nonisolated for cooperative pool execution with cancellation support
+    private nonisolated static func loadThumbnail(
+        for url: URL, maxPixelSize: CGFloat, isVideo: Bool, diskPath: URL
+    ) async throws -> UIImage? {
+        try Task.checkCancellation()
+
+        // Try disk cache first (compare modification dates)
+        if !isVideo, FileManager.default.fileExists(atPath: diskPath.path) {
+            let sourceModDate = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+            let cacheModDate = (try? diskPath.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+            if let src = sourceModDate, let cache = cacheModDate, cache >= src,
+               let data = try? Data(contentsOf: diskPath),
+               let image = UIImage(data: data) {
+                Log.thumb.debug("Disk hit: \(url.lastPathComponent)")
+                return image
+            }
         }
 
-        return result
+        try Task.checkCancellation()
+
+        if isVideo {
+            let asset = AVAsset(url: url)
+            let generator = AVAssetImageGenerator(asset: asset)
+            generator.appliesPreferredTrackTransform = true
+            generator.maximumSize = CGSize(width: maxPixelSize, height: maxPixelSize)
+            try Task.checkCancellation()
+            guard let cgImage = try? generator.copyCGImage(at: .zero, actualTime: nil) else {
+                return nil
+            }
+            try Task.checkCancellation()
+            return UIImage(cgImage: cgImage)
+        } else {
+            let options: [CFString: Any] = [kCGImageSourceShouldCache: false]
+            guard let source = CGImageSourceCreateWithURL(url as CFURL, options as CFDictionary) else {
+                return nil
+            }
+            try Task.checkCancellation()
+            let thumbOptions: [CFString: Any] = [
+                kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceShouldCacheImmediately: true
+            ]
+            guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbOptions as CFDictionary) else {
+                return nil
+            }
+            try Task.checkCancellation()
+            let image = UIImage(cgImage: cgImage)
+
+            // Write to disk cache (fire-and-forget)
+            if let jpegData = image.jpegData(compressionQuality: 0.7) {
+                try? jpegData.write(to: diskPath, options: .atomic)
+            }
+            return image
+        }
+    }
+
+    func clearThumbnailCache() {
+        thumbnailCache.removeAllObjects()
+        try? FileManager.default.removeItem(at: thumbnailDiskCacheDir)
+        try? FileManager.default.createDirectory(at: thumbnailDiskCacheDir, withIntermediateDirectories: true)
+        Log.thumb.info("Thumbnail cache cleared")
     }
 
     // MARK: - EXIF
 
     func loadEXIF(for photo: PhotoFile) async -> EXIFData? {
-        let url = photo.url
-        return await Task.detached(priority: .utility) {
-            let options: [CFString: Any] = [kCGImageSourceShouldCache: false]
-            guard let source = CGImageSourceCreateWithURL(url as CFURL, options as CFDictionary) else {
-                return nil
-            }
-            guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
-                return nil
-            }
+        do {
+            return try await Self.readEXIF(url: photo.url)
+        } catch is CancellationError {
+            return nil
+        } catch {
+            return nil
+        }
+    }
 
-            let exifDict = properties[kCGImagePropertyExifDictionary] as? [CFString: Any]
-            let tiffDict = properties[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
-            let gpsDict = properties[kCGImagePropertyGPSDictionary] as? [CFString: Any]
+    private nonisolated static func readEXIF(url: URL) async throws -> EXIFData? {
+        try Task.checkCancellation()
+        let options: [CFString: Any] = [kCGImageSourceShouldCache: false]
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, options as CFDictionary) else {
+            return nil
+        }
+        guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
+            return nil
+        }
+        try Task.checkCancellation()
 
-            var data = EXIFData()
+        let exifDict = properties[kCGImagePropertyExifDictionary] as? [CFString: Any]
+        let tiffDict = properties[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
+        let gpsDict = properties[kCGImagePropertyGPSDictionary] as? [CFString: Any]
 
-            data.pixelWidth = properties[kCGImagePropertyPixelWidth] as? Int
-            data.pixelHeight = properties[kCGImagePropertyPixelHeight] as? Int
+        var data = EXIFData()
 
-            data.cameraMake = tiffDict?[kCGImagePropertyTIFFMake] as? String
-            data.cameraModel = tiffDict?[kCGImagePropertyTIFFModel] as? String
+        data.pixelWidth = properties[kCGImagePropertyPixelWidth] as? Int
+        data.pixelHeight = properties[kCGImagePropertyPixelHeight] as? Int
 
-            data.lens = exifDict?[kCGImagePropertyExifLensModel] as? String
-            data.aperture = exifDict?[kCGImagePropertyExifFNumber] as? Double
-            data.shutterSpeed = exifDict?[kCGImagePropertyExifExposureTime] as? Double
-            data.iso = (exifDict?[kCGImagePropertyExifISOSpeedRatings] as? [Int])?.first
+        data.cameraMake = tiffDict?[kCGImagePropertyTIFFMake] as? String
+        data.cameraModel = tiffDict?[kCGImagePropertyTIFFModel] as? String
 
-            if let dateString = exifDict?[kCGImagePropertyExifDateTimeOriginal] as? String {
-                let formatter = DateFormatter()
-                formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
-                data.dateTimeOriginal = formatter.date(from: dateString)
-            }
+        data.lens = exifDict?[kCGImagePropertyExifLensModel] as? String
+        data.aperture = exifDict?[kCGImagePropertyExifFNumber] as? Double
+        data.shutterSpeed = exifDict?[kCGImagePropertyExifExposureTime] as? Double
+        data.iso = (exifDict?[kCGImagePropertyExifISOSpeedRatings] as? [Int])?.first
 
-            if let lat = gpsDict?[kCGImagePropertyGPSLatitude] as? Double,
-               let lon = gpsDict?[kCGImagePropertyGPSLongitude] as? Double {
-                let latRef = gpsDict?[kCGImagePropertyGPSLatitudeRef] as? String
-                let lonRef = gpsDict?[kCGImagePropertyGPSLongitudeRef] as? String
-                data.gpsLatitude = latRef == "S" ? -lat : lat
-                data.gpsLongitude = lonRef == "W" ? -lon : lon
-            }
+        if let dateString = exifDict?[kCGImagePropertyExifDateTimeOriginal] as? String {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
+            data.dateTimeOriginal = formatter.date(from: dateString)
+        }
 
-            return data
-        }.value
+        if let lat = gpsDict?[kCGImagePropertyGPSLatitude] as? Double,
+           let lon = gpsDict?[kCGImagePropertyGPSLongitude] as? Double {
+            let latRef = gpsDict?[kCGImagePropertyGPSLatitudeRef] as? String
+            let lonRef = gpsDict?[kCGImagePropertyGPSLongitudeRef] as? String
+            data.gpsLatitude = latRef == "S" ? -lat : lat
+            data.gpsLongitude = lonRef == "W" ? -lon : lon
+        }
+
+        return data
     }
 
     // MARK: - Full Resolution
@@ -1209,27 +1375,37 @@ final class GalleryManager: ObservableObject {
         if let cached = fullImageCache.object(forKey: url as NSURL) {
             return cached
         }
-        let result: UIImage? = await Task.detached(priority: .userInitiated) {
-            let options: [CFString: Any] = [kCGImageSourceShouldCache: false]
-            guard let source = CGImageSourceCreateWithURL(url as CFURL, options as CFDictionary) else {
-                return nil
-            }
-            // 2000px is sharp on phone screens, much faster to decode than 3600px
-            let thumbOptions: [CFString: Any] = [
-                kCGImageSourceThumbnailMaxPixelSize: 2000,
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceShouldCacheImmediately: true
-            ]
-            guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbOptions as CFDictionary) else {
-                return nil
-            }
-            return UIImage(cgImage: cgImage)
-        }.value
-        if let image = result {
+        do {
+            guard let image = try await Self.generateFullImage(for: url) else { return nil }
             let cost = image.cgImage.map { $0.bytesPerRow * $0.height } ?? 0
             fullImageCache.setObject(image, forKey: url as NSURL, cost: cost)
+            return image
+        } catch is CancellationError {
+            Log.thumb.debug("Cancelled full image: \(url.lastPathComponent)")
+            return nil
+        } catch {
+            return nil
         }
-        return result
+    }
+
+    private nonisolated static func generateFullImage(for url: URL) async throws -> UIImage? {
+        try Task.checkCancellation()
+        let options: [CFString: Any] = [kCGImageSourceShouldCache: false]
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, options as CFDictionary) else {
+            return nil
+        }
+        try Task.checkCancellation()
+        // 2000px is sharp on phone screens, much faster to decode than 3600px
+        let thumbOptions: [CFString: Any] = [
+            kCGImageSourceThumbnailMaxPixelSize: 2000,
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true
+        ]
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbOptions as CFDictionary) else {
+            return nil
+        }
+        try Task.checkCancellation()
+        return UIImage(cgImage: cgImage)
     }
 }

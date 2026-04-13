@@ -37,25 +37,23 @@ jobs:
         if: failure() && github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          ERRORS=$(grep " error:" build.log | head -30 || true)
-          TAIL=$(tail -30 build.log)
-          BODY=$(cat <<EOFCOMMENT
-          **Build failed** (exit code 65)
-
-          \`\`\`
-          ${ERRORS:-No error: lines found}
-          \`\`\`
-
-          <details><summary>Last 30 lines of build log</summary>
-
-          \`\`\`
-          ${TAIL}
-          \`\`\`
-          </details>
-          EOFCOMMENT
-          )
-          gh pr comment ${{ github.event.pull_request.number }} --body "$BODY"
+          {
+            echo "**Build failed** (exit code 65)"
+            echo ""
+            echo '```'
+            grep " error:" build.log | head -30 || echo "No error: lines found"
+            echo '```'
+            echo ""
+            echo "<details><summary>Last 30 lines</summary>"
+            echo ""
+            echo '```'
+            tail -30 build.log
+            echo '```'
+            echo "</details>"
+          } > comment_body.txt
+          gh pr comment "$PR_NUMBER" --body-file comment_body.txt
 
       - name: Create IPA
         run: |

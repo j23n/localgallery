@@ -22,7 +22,6 @@ jobs:
 
       - name: Build
         run: |
-          set -o pipefail
           xcodebuild archive \
             -project LocalGallery.xcodeproj \
             -scheme LocalGallery \
@@ -32,28 +31,14 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             2>&1 | tee build.log
-
-      - name: Post build errors to PR
-        if: failure() && github.event_name == 'pull_request'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          {
-            echo "**Build failed** (exit code 65)"
+          BUILD_EXIT=${PIPESTATUS[0]}
+          if [ "$BUILD_EXIT" -ne 0 ]; then
             echo ""
-            echo '```'
-            grep " error:" build.log | head -30 || echo "No error: lines found"
-            echo '```'
-            echo ""
-            echo "<details><summary>Last 30 lines</summary>"
-            echo ""
-            echo '```'
-            tail -30 build.log
-            echo '```'
-            echo "</details>"
-          } > comment_body.txt
-          gh pr comment "$PR_NUMBER" --body-file comment_body.txt
+            echo "========== COMPILATION ERRORS =========="
+            grep " error:" build.log || echo "(no error: lines found)"
+            echo "========== END ERRORS =========="
+            exit "$BUILD_EXIT"
+          fi
 
       - name: Create IPA
         run: |

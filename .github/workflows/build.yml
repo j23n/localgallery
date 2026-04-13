@@ -40,6 +40,24 @@ jobs:
             exit "$BUILD_EXIT"
           fi
 
+      - name: Push build errors
+        if: failure()
+        run: |
+          {
+            echo "# Build Errors"
+            echo ""
+            grep " error:" build.log || echo "No error: lines found"
+            echo ""
+            echo "# Last 50 lines"
+            echo ""
+            tail -50 build.log
+          } > build_errors.txt
+          git config user.name "CI"
+          git config user.email "ci@localgallery"
+          git add build_errors.txt
+          git commit -m "CI: build error log [skip ci]"
+          git push origin HEAD
+
       - name: Create IPA
         run: |
           mkdir -p build/Payload

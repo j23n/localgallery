@@ -1189,15 +1189,10 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         return R * 2 * atan2(sqrt(a), sqrt(1 - a))
     }
 
-    private static let dateRangeFormatter: DateFormatter = {
+    private nonisolated static func formatDateRange(_ first: Date, _ last: Date) -> String {
         let fmt = DateFormatter()
         fmt.dateStyle = .medium
         fmt.timeStyle = .none
-        return fmt
-    }()
-
-    private nonisolated static func formatDateRange(_ first: Date, _ last: Date) -> String {
-        let fmt = dateRangeFormatter
         if Calendar.current.isDate(first, inSameDayAs: last) {
             return fmt.string(from: first)
         }

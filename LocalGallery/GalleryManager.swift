@@ -127,7 +127,7 @@ final class GalleryManager: ObservableObject {
 
     private static let cacheVersion = 11
 
-    private struct LibraryCache: Codable {
+    private struct LibraryCache: Codable, Sendable {
         let version: Int
         let rootFolder: PhotoFolder
         let allPhotos: [PhotoFile]

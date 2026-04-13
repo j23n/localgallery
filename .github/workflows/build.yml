@@ -14,11 +14,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Environment info
-        run: |
-          xcodebuild -version
-          swift --version
-
       - name: Install XcodeGen
         run: brew install xcodegen
 
@@ -27,18 +22,38 @@ jobs:
 
       - name: Build
         run: |
+          set +e
           xcodebuild build \
             -project LocalGallery.xcodeproj \
             -scheme LocalGallery \
             -destination "generic/platform=iOS" \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO 2>&1 | tee build.log || BUILD_FAILED=1
-          echo "=== ERRORS ==="
-          grep 'error:' build.log | head -40 || true
-          echo "=== LAST 20 LINES ==="
-          tail -20 build.log
-          if [ "$BUILD_FAILED" = "1" ]; then exit 1; fi
+            CODE_SIGNING_ALLOWED=NO 2>&1 | tee build.log
+          RESULT=${PIPESTATUS[0]}
+          echo "xcodebuild_exit=$RESULT" >> "$GITHUB_ENV"
+          exit $RESULT
+
+      - name: Post build errors to PR
+        if: failure() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo 'CI build errors from xcodebuild:' > comment.md
+          echo '```' >> comment.md
+          grep 'error:' build.log | head -30 >> comment.md || echo 'No lines matching error: found' >> comment.md
+          echo '' >> comment.md
+          echo '--- last 15 lines ---' >> comment.md
+          tail -15 build.log >> comment.md
+          echo '```' >> comment.md
+          gh pr comment ${{ github.event.pull_request.number }} --body-file comment.md
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
 
       - name: Archive
         run: |

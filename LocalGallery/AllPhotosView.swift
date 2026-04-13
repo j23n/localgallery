@@ -265,7 +265,7 @@ struct AllPhotosView: View {
     }
 
     private func cycleSizeTier() {
-        GridLayoutConfig.cycleSizeTier(&sizeTier)
+        sizeTier = (sizeTier + 1) % 3
     }
 }
 

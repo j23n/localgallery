@@ -114,6 +114,6 @@ struct FolderGridView: View {
     }
 
     private func cycleSizeTier() {
-        GridLayoutConfig.cycleSizeTier(&sizeTier)
+        sizeTier = (sizeTier + 1) % 3
     }
 }

@@ -4,7 +4,7 @@ import CryptoKit
 
 // MARK: - Hierarchical Tag
 
-struct HierarchicalTag: Hashable, Codable {
+struct HierarchicalTag: Hashable, Codable, Sendable {
     let fullPath: String      // "People|Johannes" or "beach"
     let namespace: String?    // "People", nil for flat tags
     let displayName: String   // "Johannes" or "beach"
@@ -89,7 +89,7 @@ enum TagNamespace {
 
 // MARK: - Tag Suggestion
 
-struct TagSuggestion: Identifiable, Hashable {
+struct TagSuggestion: Identifiable, Hashable, Sendable {
     let id: String          // fullPath lowercased
     let displayName: String // leaf value
     let fullPath: String    // original hierarchical path
@@ -100,7 +100,7 @@ struct TagSuggestion: Identifiable, Hashable {
 
 // MARK: - Photo File
 
-struct PhotoFile: Identifiable, Hashable, Codable {
+struct PhotoFile: Identifiable, Hashable, Codable, Sendable {
     let id: UUID
     let url: URL
     var filename: String
@@ -173,7 +173,7 @@ struct PhotoFile: Identifiable, Hashable, Codable {
     }
 }
 
-struct EXIFData: Equatable {
+struct EXIFData: Equatable, Sendable {
     var cameraMake: String?
     var cameraModel: String?
     var lens: String?
@@ -187,7 +187,7 @@ struct EXIFData: Equatable {
     var pixelHeight: Int?
 }
 
-struct PhotoFolder: Identifiable, Codable {
+struct PhotoFolder: Identifiable, Codable, Sendable {
     let id: UUID
     let url: URL
     var name: String
@@ -210,7 +210,7 @@ struct PhotoFolder: Identifiable, Codable {
 
 // MARK: - Memory
 
-enum MemoryType: String {
+enum MemoryType: String, Sendable {
     case onThisDay
     case yearsAgo
     case personOverTime
@@ -219,7 +219,7 @@ enum MemoryType: String {
     case trip
 }
 
-struct Memory: Identifiable {
+struct Memory: Identifiable, Sendable {
     let id: String            // deterministic key, e.g. "onThisDay", "yearsAgo-5"
     let type: MemoryType
     let title: String
@@ -234,7 +234,7 @@ struct Memory: Identifiable {
 
 // MARK: - Folder Sort
 
-enum FolderSortOrder: String, CaseIterable {
+enum FolderSortOrder: String, CaseIterable, Sendable {
     case nameAscending
     case nameDescending
     case dateModifiedNewest

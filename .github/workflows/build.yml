@@ -14,6 +14,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Environment info
+        run: |
+          xcodebuild -version
+          swift --version
+
       - name: Install XcodeGen
         run: brew install xcodegen
 
@@ -21,6 +26,21 @@ jobs:
         run: xcodegen
 
       - name: Build
+        run: |
+          xcodebuild build \
+            -project LocalGallery.xcodeproj \
+            -scheme LocalGallery \
+            -destination "generic/platform=iOS" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO 2>&1 | tee build.log || BUILD_FAILED=1
+          echo "=== ERRORS ==="
+          grep 'error:' build.log | head -40 || true
+          echo "=== LAST 20 LINES ==="
+          tail -20 build.log
+          if [ "$BUILD_FAILED" = "1" ]; then exit 1; fi
+
+      - name: Archive
         run: |
           xcodebuild archive \
             -project LocalGallery.xcodeproj \

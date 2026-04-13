@@ -133,6 +133,30 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         let allPhotos: [PhotoFile]
     }
 
+    private struct ScanFolderNode {
+        let url: URL
+        let name: String
+        var photos: [PhotoFile]
+        var childIndices: [Int]
+        let parentIndex: Int?
+        let dateModified: Date?
+        let dateCreated: Date?
+    }
+
+    private struct ScanFile {
+        let url: URL; let fileSize: Int64; let modDate: Date?; let creationDate: Date?; let isImage: Bool; let isVideo: Bool
+    }
+
+    private struct EnrichedResult: Sendable {
+        let index: Int
+        let dateTaken: Date?
+        let keywords: [String]
+        let hierarchicalTags: [HierarchicalTag]
+        let gpsLatitude: Double?
+        let gpsLongitude: Double?
+        let enrichedFileDate: Date?
+    }
+
     private func saveCache() {
         guard let root = rootFolder else { return }
         let cache = LibraryCache(version: Self.cacheVersion, rootFolder: root, allPhotos: allPhotos)
@@ -374,17 +398,7 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
             var flatPhotos: [PhotoFile] = []
             var needsEnrichment = false
 
-            struct FolderNode {
-                let url: URL
-                let name: String
-                var photos: [PhotoFile]
-                var childIndices: [Int]
-                let parentIndex: Int?
-                let dateModified: Date?
-                let dateCreated: Date?
-            }
-
-            var nodes: [FolderNode] = []
+            var nodes: [ScanFolderNode] = []
             var stack: [(URL, Int?)] = [(url, nil)]
 
             while !stack.isEmpty {
@@ -402,10 +416,7 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
                     options: [.skipsHiddenFiles, .skipsPackageDescendants]
                 ) {
                     // First pass: classify files and collect metadata
-                    struct ScannedFile {
-                        let url: URL; let fileSize: Int64; let modDate: Date?; let creationDate: Date?; let isImage: Bool; let isVideo: Bool
-                    }
-                    var scannedFiles: [ScannedFile] = []
+                    var scannedFiles: [ScanFile] = []
 
                     for itemURL in contents {
                         let resourceValues = try? itemURL.resourceValues(forKeys: Set(keys))
@@ -419,7 +430,7 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
                                 let isImage = utType.conforms(to: .image)
                                 let isVideo = utType.conforms(to: .movie)
                                 if isImage || isVideo {
-                                    scannedFiles.append(ScannedFile(
+                                    scannedFiles.append(ScanFile(
                                         url: itemURL,
                                         fileSize: Int64(resourceValues?.fileSize ?? 0),
                                         modDate: resourceValues?.contentModificationDate,
@@ -519,7 +530,7 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
                 let dirValues = try? dirURL.resourceValues(forKeys: dirKeys)
 
                 let nodeIndex = nodes.count
-                nodes.append(FolderNode(
+                nodes.append(ScanFolderNode(
                     url: dirURL,
                     name: dirName,
                     photos: photos,
@@ -625,16 +636,6 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
             let staleIndices = result.indices.filter { !result[$0].isVideo && result[$0].enrichedFileDate == nil }
 
             // Enrich stale photos in parallel using TaskGroup
-            struct EnrichedResult: Sendable {
-                let index: Int
-                let dateTaken: Date?
-                let keywords: [String]
-                let hierarchicalTags: [HierarchicalTag]
-                let gpsLatitude: Double?
-                let gpsLongitude: Double?
-                let enrichedFileDate: Date?
-            }
-
             let batchResults: [EnrichedResult] = await withTaskGroup(of: EnrichedResult?.self) { group in
                 for idx in staleIndices {
                     group.addTask {

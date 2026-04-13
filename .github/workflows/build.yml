@@ -22,6 +22,7 @@ jobs:
 
       - name: Build
         run: |
+          set -o pipefail
           xcodebuild archive \
             -project LocalGallery.xcodeproj \
             -scheme LocalGallery \
@@ -29,7 +30,16 @@ jobs:
             -archivePath build/LocalGallery.xcarchive \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_ALLOWED=NO \
+            2>&1 | tee build.log
+
+      - name: Show build errors
+        if: failure()
+        run: |
+          echo "=== BUILD ERRORS ==="
+          grep -A2 " error:" build.log || true
+          echo "=== BUILD WARNINGS ==="
+          grep -A2 " warning:" build.log | head -50 || true
 
       - name: Create IPA
         run: |

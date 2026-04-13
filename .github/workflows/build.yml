@@ -33,21 +33,29 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             2>&1 | tee build.log
 
-      - name: Show build errors
-        if: failure()
+      - name: Post build errors to PR
+        if: failure() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          echo "## Build Errors" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          grep -A2 " error:" build.log >> $GITHUB_STEP_SUMMARY || echo "No error: lines found" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "## Build Warnings (first 30)" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          grep " warning:" build.log | head -30 >> $GITHUB_STEP_SUMMARY || echo "No warnings" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "## Last 50 lines of build log" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          tail -50 build.log >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          ERRORS=$(grep " error:" build.log | head -30 || true)
+          TAIL=$(tail -30 build.log)
+          BODY=$(cat <<EOFCOMMENT
+          **Build failed** (exit code 65)
+
+          \`\`\`
+          ${ERRORS:-No error: lines found}
+          \`\`\`
+
+          <details><summary>Last 30 lines of build log</summary>
+
+          \`\`\`
+          ${TAIL}
+          \`\`\`
+          </details>
+          EOFCOMMENT
+          )
+          gh pr comment ${{ github.event.pull_request.number }} --body "$BODY"
 
       - name: Create IPA
         run: |

@@ -808,7 +808,7 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
             return aDate > bDate
         }
 
-        Log.index.info("Built: \(allPhotos.count) photos (\(withDates) dates, \(withKeywords) keywords) in \(String(format: "%.0f", (CFAbsoluteTimeGetCurrent() - t) * 1000))ms")
+        Log.index.info("Built: \(self.allPhotos.count) photos (\(withDates) dates, \(withKeywords) keywords) in \(String(format: "%.0f", (CFAbsoluteTimeGetCurrent() - t) * 1000))ms")
 
         // Aggregate global tag list + topPeople in background to avoid blocking scroll
         tagBuildGeneration += 1

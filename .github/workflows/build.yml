@@ -36,10 +36,18 @@ jobs:
       - name: Show build errors
         if: failure()
         run: |
-          echo "=== BUILD ERRORS ==="
-          grep -A2 " error:" build.log || true
-          echo "=== BUILD WARNINGS ==="
-          grep -A2 " warning:" build.log | head -50 || true
+          echo "## Build Errors" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          grep -A2 " error:" build.log >> $GITHUB_STEP_SUMMARY || echo "No error: lines found" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "## Build Warnings (first 30)" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          grep " warning:" build.log | head -30 >> $GITHUB_STEP_SUMMARY || echo "No warnings" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "## Last 50 lines of build log" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          tail -50 build.log >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
 
       - name: Create IPA
         run: |

@@ -6,7 +6,7 @@ import AVFoundation
 import os
 
 @MainActor
-final class GalleryManager: ObservableObject {
+final class GalleryManager: ObservableObject, @unchecked Sendable {
     @Published var rootFolder: PhotoFolder?
     @Published var allPhotos: [PhotoFile] = []
     @Published var isScanning: Bool = false
@@ -99,7 +99,7 @@ final class GalleryManager: ObservableObject {
             )
             UserDefaults.standard.set(bookmarkData, forKey: bookmarkKey)
         } catch {
-            Log.cache.error("Failed to save bookmark: \(error)")
+            Log.cache.error("Failed to save bookmark: \(error.localizedDescription)")
         }
     }
 
@@ -118,7 +118,7 @@ final class GalleryManager: ObservableObject {
             }
             return url
         } catch {
-            Log.cache.error("Failed to resolve bookmark: \(error)")
+            Log.cache.error("Failed to resolve bookmark: \(error.localizedDescription)")
             return nil
         }
     }
@@ -142,7 +142,7 @@ final class GalleryManager: ObservableObject {
                 let data = try JSONEncoder().encode(cache)
                 try data.write(to: url, options: .atomic)
             } catch {
-                Log.cache.error("Failed to save cache: \(error)")
+                Log.cache.error("Failed to save cache: \(error.localizedDescription)")
             }
         }
     }
@@ -164,7 +164,7 @@ final class GalleryManager: ObservableObject {
             rebuildSortAndIndex()
             return true
         } catch {
-            Log.cache.error("Failed to load cache: \(error)")
+            Log.cache.error("Failed to load cache: \(error.localizedDescription)")
             return false
         }
     }

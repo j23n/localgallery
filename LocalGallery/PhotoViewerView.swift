@@ -499,21 +499,25 @@ struct PhotoPageView: View {
             }, perform: {})
         }
         .task(id: photo.id) {
-            thumbnail = manager.cachedThumbnail(for: photo.url)
-            fullImage = nil
-            isPlayingVideo = false
-            videoPlayer?.pause()
-            videoPlayer = nil
-            isPlayingLive = false
-            livePlayer?.pause()
-            livePlayer = nil
+            await loadPhoto()
+        }
+    }
 
-            if thumbnail == nil {
-                thumbnail = await manager.thumbnail(for: photo.url, size: CGSize(width: 400, height: 400), isVideo: photo.isVideo)
-            }
-            if !photo.isVideo {
-                fullImage = await manager.loadFullImage(for: photo.url)
-            }
+    private func loadPhoto() async {
+        thumbnail = manager.cachedThumbnail(for: photo.url)
+        fullImage = nil
+        isPlayingVideo = false
+        videoPlayer?.pause()
+        videoPlayer = nil
+        isPlayingLive = false
+        livePlayer?.pause()
+        livePlayer = nil
+
+        if thumbnail == nil {
+            thumbnail = await manager.thumbnail(for: photo.url, size: CGSize(width: 400, height: 400), isVideo: photo.isVideo)
+        }
+        if !photo.isVideo {
+            fullImage = await manager.loadFullImage(for: photo.url)
         }
     }
 }

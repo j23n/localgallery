@@ -7,11 +7,13 @@ struct FolderGridView: View {
     @EnvironmentObject var manager: GalleryManager
     @AppStorage("gridSizeTier") private var sizeTier: Int = 0
     @State private var selectedPhoto: PhotoFile?
+    @State private var presentationID = UUID()
     @State private var searchText: String = ""
     @State private var scrollToTopTrigger = false
+    @State private var sortedPhotosCache: [PhotoFile]?
 
     private var sortedPhotos: [PhotoFile] {
-        manager.sortPhotos(photos)
+        sortedPhotosCache ?? photos
     }
 
     private var filteredPhotos: [PhotoFile] {
@@ -24,35 +26,16 @@ struct FolderGridView: View {
         }
     }
 
-    private var targetCellSize: CGFloat {
-        switch sizeTier {
-        case 0: return 130
-        case 1: return 100
-        default: return 78
-        }
-    }
-
-    private func columnCount(for width: CGFloat) -> Int {
-        max(2, Int((width + 2) / (targetCellSize + 2)))
-    }
-
-    private func columns(for width: CGFloat) -> [GridItem] {
-        Array(repeating: GridItem(.flexible(), spacing: 2), count: columnCount(for: width))
-    }
-
-    private func cellSize(for width: CGFloat) -> CGFloat {
-        let cols = columnCount(for: width)
-        return max(1, (width - CGFloat(cols - 1) * 2) / CGFloat(cols))
-    }
+    private var grid: GridLayoutConfig { GridLayoutConfig(sizeTier: sizeTier) }
 
     var body: some View {
         GeometryReader { geo in
             let width = geo.size.width
-            let size = cellSize(for: width)
+            let size = grid.cellSize(for: width)
             ScrollViewReader { proxy in
                 ScrollView {
                     Color.clear.frame(height: 0).id("__top__")
-                    LazyVGrid(columns: columns(for: width), spacing: 2) {
+                    LazyVGrid(columns: grid.columns(for: width), spacing: 2) {
                         ForEach(filteredPhotos) { photo in
                             gridCell(photo: photo, cellSize: size)
                         }
@@ -106,12 +89,16 @@ struct FolderGridView: View {
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Button { cycleSizeTier() } label: {
-                    Image(systemName: gridIconName)
+                    Image(systemName: grid.gridIconName)
                 }
             }
         }
         .fullScreenCover(item: $selectedPhoto) { photo in
             PhotoViewerView(photos: filteredPhotos, initialPhoto: photo)
+                .id(presentationID)
+        }
+        .task(id: photos) {
+            sortedPhotosCache = manager.sortPhotos(photos)
         }
     }
 
@@ -121,16 +108,9 @@ struct FolderGridView: View {
             .frame(width: cellSize, height: cellSize)
             .contentShape(Rectangle())
             .onTapGesture {
+                presentationID = UUID()
                 selectedPhoto = photo
             }
-    }
-
-    private var gridIconName: String {
-        switch sizeTier {
-        case 0: return "square.grid.3x3"
-        case 1: return "square.grid.3x3.fill"
-        default: return "square.grid.4x3.fill"
-        }
     }
 
     private func cycleSizeTier() {

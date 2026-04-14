@@ -3,14 +3,6 @@ import SwiftUI
 struct CollectionsView: View {
     @EnvironmentObject var manager: GalleryManager
 
-    private var events: [PhotoFolder] {
-        manager.leafFolders.sorted { a, b in
-            let aDate = a.photos.compactMap(\.dateTaken).max() ?? .distantPast
-            let bDate = b.photos.compactMap(\.dateTaken).max() ?? .distantPast
-            return aDate > bDate
-        }
-    }
-
     var body: some View {
         Group {
             if manager.allPhotos.isEmpty {
@@ -40,26 +32,6 @@ struct CollectionsView: View {
         .navigationTitle("Collections")
     }
 
-    /// Top 8 people: those with images tagged in the last year first, then by total count.
-    private var topPeople: [TagSuggestion] {
-        let oneYearAgo = Calendar.current.date(byAdding: .year, value: -1, to: Date()) ?? Date()
-        let people = manager.peopleTags
-
-        let scored: [(tag: TagSuggestion, hasRecent: Bool)] = people.map { person in
-            let photos = manager.search(query: "", requiredTags: [person])
-            let hasRecent = photos.contains { ($0.dateTaken ?? .distantPast) > oneYearAgo }
-            return (person, hasRecent)
-        }
-
-        return scored
-            .sorted { a, b in
-                if a.hasRecent != b.hasRecent { return a.hasRecent }
-                return a.tag.count > b.tag.count
-            }
-            .prefix(8)
-            .map(\.tag)
-    }
-
     private var collectionsList: some View {
         List {
             if !manager.memories.isEmpty {
@@ -85,7 +57,7 @@ struct CollectionsView: View {
                 }
             }
 
-            let people = topPeople
+            let people = manager.topPeople
             if !people.isEmpty {
                 Section("People") {
                     LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 16) {
@@ -102,10 +74,9 @@ struct CollectionsView: View {
                 }
             }
 
-            let eventFolders = events
-            if !eventFolders.isEmpty {
+            if !manager.eventFolders.isEmpty {
                 Section("Events") {
-                    ForEach(eventFolders) { folder in
+                    ForEach(manager.eventFolders) { folder in
                         NavigationLink {
                             FolderGridView(title: folder.name, photos: folder.photos)
                         } label: {
@@ -115,7 +86,7 @@ struct CollectionsView: View {
                 }
             }
 
-            if manager.peopleTags.isEmpty && events.isEmpty {
+            if manager.peopleTags.isEmpty && manager.eventFolders.isEmpty {
                 ContentUnavailableView(
                     "No Collections Yet",
                     systemImage: "rectangle.stack",
@@ -180,46 +151,29 @@ struct TagGridView: View {
     @EnvironmentObject var manager: GalleryManager
     @AppStorage("gridSizeTier") private var sizeTier: Int = 0
     @State private var selectedPhoto: PhotoFile?
+    @State private var presentationID = UUID()
     @State private var scrollToTopTrigger = false
 
     private var photos: [PhotoFile] {
         manager.search(query: "", requiredTags: [tag])
     }
 
-    private var targetCellSize: CGFloat {
-        switch sizeTier {
-        case 0: return 130
-        case 1: return 100
-        default: return 78
-        }
-    }
-
-    private func columnCount(for width: CGFloat) -> Int {
-        max(2, Int((width + 2) / (targetCellSize + 2)))
-    }
-
-    private func columns(for width: CGFloat) -> [GridItem] {
-        Array(repeating: GridItem(.flexible(), spacing: 2), count: columnCount(for: width))
-    }
-
-    private func cellSize(for width: CGFloat) -> CGFloat {
-        let cols = columnCount(for: width)
-        return max(1, (width - CGFloat(cols - 1) * 2) / CGFloat(cols))
-    }
+    private var grid: GridLayoutConfig { GridLayoutConfig(sizeTier: sizeTier) }
 
     var body: some View {
         GeometryReader { geo in
             let width = geo.size.width
-            let size = cellSize(for: width)
+            let size = grid.cellSize(for: width)
             ScrollViewReader { proxy in
                 ScrollView {
                     Color.clear.frame(height: 0).id("__top__")
-                    LazyVGrid(columns: columns(for: width), spacing: 2) {
+                    LazyVGrid(columns: grid.columns(for: width), spacing: 2) {
                         ForEach(photos) { photo in
                             ThumbnailView(url: photo.url, size: size, isVideo: photo.isVideo, isLivePhoto: photo.livePhotoVideoURL != nil)
                                 .frame(width: size, height: size)
                                 .contentShape(Rectangle())
                                 .onTapGesture {
+                                    presentationID = UUID()
                                     selectedPhoto = photo
                                 }
                         }
@@ -244,6 +198,7 @@ struct TagGridView: View {
         }
         .fullScreenCover(item: $selectedPhoto) { photo in
             PhotoViewerView(photos: photos, initialPhoto: photo)
+                .id(presentationID)
         }
     }
 }
@@ -255,7 +210,7 @@ struct PersonCard: View {
     @EnvironmentObject var manager: GalleryManager
 
     private var coverPhotos: [PhotoFile] {
-        Array(manager.search(query: "", requiredTags: [tag]).prefix(4))
+        Array(manager.photos(forTag: tag).prefix(4))
     }
 
     var body: some View {
@@ -300,7 +255,7 @@ struct MemoryCardView: View {
     @EnvironmentObject var manager: GalleryManager
 
     private var coverURL: URL? {
-        manager.allPhotos.first { $0.id == memory.coverPhotoID }?.url
+        manager.photo(byID: memory.coverPhotoID)?.url
     }
 
     var body: some View {

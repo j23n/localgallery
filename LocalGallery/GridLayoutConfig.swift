@@ -31,8 +31,4 @@ struct GridLayoutConfig {
         default: return "square.grid.4x3.fill"
         }
     }
-
-    static func cycleSizeTier(_ tier: inout Int) {
-        tier = (tier + 1) % 3
-    }
 }

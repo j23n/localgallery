@@ -501,13 +501,6 @@ struct PhotoPageView: View {
         .task(id: photo.id) {
             await loadPhoto()
         }
-        .onAppear {
-            // Fallback: if .task(id:) didn't fire (e.g. same photo re-presented),
-            // trigger loading when the view appears with no content
-            if thumbnail == nil && fullImage == nil {
-                Task { await loadPhoto() }
-            }
-        }
     }
 
     private func loadPhoto() async {

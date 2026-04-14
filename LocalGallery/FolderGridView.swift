@@ -97,7 +97,7 @@ struct FolderGridView: View {
             PhotoViewerView(photos: filteredPhotos, initialPhoto: photo)
                 .id(presentationID)
         }
-        .task {
+        .task(id: photos) {
             sortedPhotosCache = manager.sortPhotos(photos)
         }
     }

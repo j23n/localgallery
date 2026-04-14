@@ -1251,7 +1251,7 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         try Task.checkCancellation()
 
         // Try disk cache first (compare modification dates)
-        if !isVideo, FileManager.default.fileExists(atPath: diskPath.path) {
+        if FileManager.default.fileExists(atPath: diskPath.path) {
             let sourceModDate = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
             let cacheModDate = (try? diskPath.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
             if let src = sourceModDate, let cache = cacheModDate, cache >= src,
@@ -1274,7 +1274,11 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
                 return nil
             }
             try Task.checkCancellation()
-            return UIImage(cgImage: cgImage)
+            let image = UIImage(cgImage: cgImage)
+            if let jpegData = image.jpegData(compressionQuality: 0.7) {
+                try? jpegData.write(to: diskPath, options: .atomic)
+            }
+            return image
         } else {
             let options: [CFString: Any] = [kCGImageSourceShouldCache: false]
             guard let source = CGImageSourceCreateWithURL(url as CFURL, options as CFDictionary) else {

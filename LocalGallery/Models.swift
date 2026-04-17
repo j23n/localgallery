@@ -5,32 +5,22 @@ import CryptoKit
 // MARK: - Hierarchical Tag
 
 struct HierarchicalTag: Hashable, Codable, Sendable {
-    let fullPath: String      // "People|Johannes" or "beach"
+    let fullPath: String      // "People/Johannes" or "Places/Italy/Lazio/Rome"
     let namespace: String?    // "People", nil for flat tags
-    let displayName: String   // "Johannes" or "beach"
+    let displayName: String   // leaf segment, e.g. "Johannes" or "Rome"
 
-    /// Create from a raw tag string, detecting hierarchy separator ("|", "/", or ":")
+    /// Create from a photo-tools `digiKam:TagsList` entry. Paths are `/`-separated
+    /// and already Titlecased by the writer (see photo-tools xmp-schema.md §3).
     init(raw: String) {
         self.fullPath = raw
-        let separator: Character? = raw.contains("|") ? "|" : raw.contains("/") ? "/" : raw.contains(":") ? ":" : nil
-        if let sep = separator {
-            let parts = raw.split(separator: sep, maxSplits: 1).map { String($0).trimmingCharacters(in: .whitespaces) }
-            if parts.count > 1 {
-                self.namespace = parts[0]
-                self.displayName = Self.prettify(parts[1])
-            } else {
-                self.namespace = nil
-                self.displayName = Self.prettify(raw)
-            }
+        let parts = raw.split(separator: "/").map { String($0).trimmingCharacters(in: .whitespaces) }
+        if parts.count > 1 {
+            self.namespace = parts.first
+            self.displayName = parts.last ?? raw
         } else {
             self.namespace = nil
-            self.displayName = Self.prettify(raw)
+            self.displayName = raw
         }
-    }
-
-    /// Replace dashes with spaces and title-case for display
-    private static func prettify(_ s: String) -> String {
-        s.replacingOccurrences(of: "-", with: " ").capitalized
     }
 
     init(fullPath: String, namespace: String?, displayName: String) {
@@ -43,46 +33,15 @@ struct HierarchicalTag: Hashable, Codable, Sendable {
 // MARK: - Tag Namespace Icons
 
 enum TagNamespace {
+    /// SF Symbol for one of the four photo-tools taxonomy roots.
+    /// See photo-tools xmp-schema.md §2.
     static func icon(for namespace: String?) -> String {
-        guard let ns = namespace?.lowercased() else { return "person.fill" }
-        switch ns {
-        // Geography
-        case "country", "cc":              return "flag.fill"
-        case "region":                     return "map.fill"
-        case "city":                       return "building.2.fill"
-        case "neighborhood":               return "signpost.right.fill"
-        case "landmark":                   return "mappin.and.ellipse"
-        // Built environment
-        case "architecture":               return "building.columns.fill"
-        case "scene", "setting":           return "photo.fill"
-        // Objects & living things
-        case "object":                     return "cube.fill"
-        case "animal":                     return "pawprint.fill"
-        case "plant":                      return "leaf.fill"
-        case "vehicle":                    return "car.fill"
-        // Food & drink
-        case "food":                       return "fork.knife"
-        case "cuisine":                    return "takeoutbag.and.cup.and.straw.fill"
-        // Activities & events
-        case "activity":                   return "figure.run"
-        case "event":                      return "calendar"
-        // People
-        case "people":                     return "person.fill"
-        case "age":                        return "person.crop.circle"
-        // Aesthetics
-        case "comp":                       return "viewfinder"
-        case "mood":                       return "sparkles"
-        case "color":                      return "paintpalette.fill"
-        // Environment
-        case "weather":                    return "cloud.sun.fill"
-        case "season":                     return "leaf.arrow.circlepath"
-        case "time":                       return "clock.fill"
-        // Text & dates
-        case "text":                       return "textformat"
-        case "year":                       return "calendar.badge.clock"
-        case "month":                      return "calendar"
-        case "day":                        return "sun.horizon.fill"
-        default:                           return "tag.fill"
+        switch namespace?.lowercased() {
+        case "people":  return "person.fill"
+        case "places":  return "mappin.and.ellipse"
+        case "objects": return "cube.fill"
+        case "scenes":  return "photo.fill"
+        default:        return "tag.fill"
         }
     }
 }
@@ -108,8 +67,9 @@ struct PhotoFile: Identifiable, Hashable, Codable, Sendable {
     var dateTaken: Date?
     var isVideo: Bool = false
     var livePhotoVideoURL: URL? = nil
-    var keywords: [String] = []
     var hierarchicalTags: [HierarchicalTag] = []
+    /// ISO 3166-1 alpha-2 from `photo-tools:CountryCode` (uppercase, e.g. "IT").
+    var countryCode: String? = nil
     /// File modDate at the time metadata was last read; nil = never enriched
     var enrichedFileDate: Date? = nil
     var gpsLatitude: Double? = nil
@@ -119,11 +79,15 @@ struct PhotoFile: Identifiable, Hashable, Codable, Sendable {
     var dimensions: CGSize? = nil
     var exif: EXIFData? = nil
 
+    /// Flat leaf names derived from `hierarchicalTags`. Used for substring search
+    /// and the legacy "Tags" list in EXIFPanelView.
+    var keywords: [String] { hierarchicalTags.map(\.displayName) }
+
     enum CodingKeys: String, CodingKey {
-        case id, url, filename, fileSize, dateTaken, isVideo, livePhotoVideoURL, keywords, hierarchicalTags, enrichedFileDate, gpsLatitude, gpsLongitude
+        case id, url, filename, fileSize, dateTaken, isVideo, livePhotoVideoURL, hierarchicalTags, countryCode, enrichedFileDate, gpsLatitude, gpsLongitude
     }
 
-    init(id: UUID, url: URL, filename: String, fileSize: Int64, dateTaken: Date?, isVideo: Bool = false, livePhotoVideoURL: URL? = nil, keywords: [String] = [], hierarchicalTags: [HierarchicalTag] = [], enrichedFileDate: Date? = nil, gpsLatitude: Double? = nil, gpsLongitude: Double? = nil) {
+    init(id: UUID, url: URL, filename: String, fileSize: Int64, dateTaken: Date?, isVideo: Bool = false, livePhotoVideoURL: URL? = nil, hierarchicalTags: [HierarchicalTag] = [], countryCode: String? = nil, enrichedFileDate: Date? = nil, gpsLatitude: Double? = nil, gpsLongitude: Double? = nil) {
         self.id = id
         self.url = url
         self.filename = filename
@@ -131,8 +95,8 @@ struct PhotoFile: Identifiable, Hashable, Codable, Sendable {
         self.dateTaken = dateTaken
         self.isVideo = isVideo
         self.livePhotoVideoURL = livePhotoVideoURL
-        self.keywords = keywords
         self.hierarchicalTags = hierarchicalTags
+        self.countryCode = countryCode
         self.enrichedFileDate = enrichedFileDate
         self.gpsLatitude = gpsLatitude
         self.gpsLongitude = gpsLongitude
@@ -147,8 +111,8 @@ struct PhotoFile: Identifiable, Hashable, Codable, Sendable {
         dateTaken = try c.decodeIfPresent(Date.self, forKey: .dateTaken)
         isVideo = try c.decodeIfPresent(Bool.self, forKey: .isVideo) ?? false
         livePhotoVideoURL = try c.decodeIfPresent(URL.self, forKey: .livePhotoVideoURL)
-        keywords = try c.decodeIfPresent([String].self, forKey: .keywords) ?? []
         hierarchicalTags = try c.decodeIfPresent([HierarchicalTag].self, forKey: .hierarchicalTags) ?? []
+        countryCode = try c.decodeIfPresent(String.self, forKey: .countryCode)
         enrichedFileDate = try c.decodeIfPresent(Date.self, forKey: .enrichedFileDate)
         gpsLatitude = try c.decodeIfPresent(Double.self, forKey: .gpsLatitude)
         gpsLongitude = try c.decodeIfPresent(Double.self, forKey: .gpsLongitude)

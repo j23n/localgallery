@@ -21,7 +21,6 @@ struct FolderGridView: View {
         let q = searchText.lowercased()
         return sortedPhotos.filter { photo in
             photo.filename.lowercased().contains(q) ||
-            photo.keywords.contains { $0.lowercased().contains(q) } ||
             photo.hierarchicalTags.contains { $0.fullPath.lowercased().contains(q) || $0.displayName.lowercased().contains(q) }
         }
     }

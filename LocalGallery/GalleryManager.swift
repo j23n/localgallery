@@ -125,7 +125,7 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
 
     // MARK: - Disk Cache
 
-    private static let cacheVersion = 11
+    private static let cacheVersion = 12
 
     private struct LibraryCache: Codable, Sendable {
         let version: Int
@@ -150,8 +150,8 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
     private struct EnrichedResult: Sendable {
         let index: Int
         let dateTaken: Date?
-        let keywords: [String]
         let hierarchicalTags: [HierarchicalTag]
+        let countryCode: String?
         let gpsLatitude: Double?
         let gpsLongitude: Double?
         let enrichedFileDate: Date?
@@ -224,13 +224,15 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
 
     // MARK: - Metadata Reading
 
-    private typealias MetadataResult = (date: Date?, keywords: [String], hierarchicalTags: [HierarchicalTag], gpsLatitude: Double?, gpsLongitude: Double?)
+    private typealias MetadataResult = (date: Date?, hierarchicalTags: [HierarchicalTag], countryCode: String?, gpsLatitude: Double?, gpsLongitude: Double?)
 
-    /// Read capture date and keywords from image metadata (EXIF/IPTC/XMP) + XMP sidecar
+    /// Read capture date, hierarchical tags, and country code from image metadata
+    /// (EXIF/XMP) + XMP sidecar. Tag source is `digiKam:TagsList`; country code is
+    /// `photo-tools:CountryCode` (see photo-tools xmp-schema.md §1).
     private nonisolated static func readImageMetadata(url: URL) -> MetadataResult {
         var captureDate: Date? = nil
-        var keywords: [String] = []
-        var rawTags: [String] = []  // preserves original hierarchical paths
+        var rawTags: [String] = []
+        var countryCode: String? = nil
         var gpsLat: Double? = nil
         var gpsLon: Double? = nil
 
@@ -257,41 +259,17 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
                 }
             }
 
-            // IPTC keywords (flat)
-            if let iptcDict = properties[kCGImagePropertyIPTCDictionary] as? [CFString: Any],
-               let iptcKeywords = iptcDict[kCGImagePropertyIPTCKeywords] as? [String] {
-                for kw in iptcKeywords {
-                    keywords.append(kw)
-                    rawTags.append(kw)
-                }
-            }
-
-            // XMP metadata (dc:subject, lr:hierarchicalSubject, digiKam:TagsList)
+            // XMP: digiKam:TagsList (hierarchical paths) + photo-tools:CountryCode
             if let xmpMetadata = CGImageSourceCopyMetadataAtIndex(source, 0, nil) {
                 let tags = CGImageMetadataCopyTags(xmpMetadata) as? [CGImageMetadataTag] ?? []
                 for tag in tags {
                     let name = CGImageMetadataTagCopyName(tag) as String? ?? ""
-                    if name == "subject" || name == "TagsList" || name == "hierarchicalSubject" {
-                        if let value = CGImageMetadataTagCopyValue(tag) {
-                            let items: [String]
-                            if let array = value as? [String] {
-                                items = array
-                            } else if let str = value as? String {
-                                items = [str]
-                            } else {
-                                items = []
-                            }
-                            for item in items {
-                                rawTags.append(item)
-                                let sep: Character? = item.contains("|") ? "|" : item.contains("/") ? "/" : item.contains(":") ? ":" : nil
-                                if let sep = sep {
-                                    let parts = item.split(separator: sep).map { String($0).trimmingCharacters(in: .whitespaces) }
-                                    keywords.append(contentsOf: parts)
-                                } else {
-                                    keywords.append(item)
-                                }
-                            }
-                        }
+                    let value = CGImageMetadataTagCopyValue(tag)
+                    if name == "TagsList", let value {
+                        rawTags.append(contentsOf: xmpStringArray(value))
+                    } else if name == "CountryCode", countryCode == nil,
+                              let str = value as? String, !str.isEmpty {
+                        countryCode = str.uppercased()
                     }
                 }
             }
@@ -307,21 +285,12 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
             }
         }
 
-        // Also check for XMP sidecar file
-        let (sidecarKeywords, sidecarRawTags) = readXMPSidecar(for: url)
-        keywords.append(contentsOf: sidecarKeywords)
-        rawTags.append(contentsOf: sidecarRawTags)
+        // XMP sidecar file (.xmp) — same fields as embedded
+        let sidecar = readXMPSidecar(for: url)
+        rawTags.append(contentsOf: sidecar.rawTags)
+        if countryCode == nil { countryCode = sidecar.countryCode }
 
-        // Deduplicate keywords (case-insensitive)
-        var seen = Set<String>()
-        keywords = keywords.filter { kw in
-            let lower = kw.lowercased()
-            if seen.contains(lower) { return false }
-            seen.insert(lower)
-            return true
-        }
-
-        // Build deduplicated hierarchical tags from raw paths
+        // Deduplicate hierarchical tags by path (case-insensitive).
         var seenPaths = Set<String>()
         let hierarchicalTags = rawTags.compactMap { raw -> HierarchicalTag? in
             let key = raw.lowercased()
@@ -330,47 +299,51 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
             return HierarchicalTag(raw: raw)
         }
 
-        return (captureDate, keywords, hierarchicalTags, gpsLat, gpsLon)
+        return (captureDate, hierarchicalTags, countryCode, gpsLat, gpsLon)
     }
 
-    /// Parse XMP sidecar file (.xmp) for keywords
-    private nonisolated static func readXMPSidecar(for imageURL: URL) -> (keywords: [String], rawTags: [String]) {
+    /// Coerce a CGImageMetadataTag value (array of strings, or single string) into [String].
+    private nonisolated static func xmpStringArray(_ value: CFTypeRef) -> [String] {
+        if let array = value as? [String] { return array }
+        if let str = value as? String { return [str] }
+        return []
+    }
+
+    /// Parse XMP sidecar file (.xmp) for digiKam:TagsList + photo-tools:CountryCode.
+    private nonisolated static func readXMPSidecar(for imageURL: URL) -> (rawTags: [String], countryCode: String?) {
         let xmpURL = imageURL.appendingPathExtension("xmp")
         guard FileManager.default.fileExists(atPath: xmpURL.path),
               let data = try? Data(contentsOf: xmpURL),
-              let xml = String(data: data, encoding: .utf8) else { return ([], []) }
+              let xml = String(data: data, encoding: .utf8) else { return ([], nil) }
 
-        var keywords: [String] = []
         var rawTags: [String] = []
 
-        // Parse dc:subject, digiKam:TagsList, lr:hierarchicalSubject
-        let patterns = [
-            "dc:subject", "digiKam:TagsList", "lr:hierarchicalSubject",
-            "MicrosoftPhoto:LastKeywordXMP"
-        ]
-
-        for pattern in patterns {
-            guard let startRange = xml.range(of: "<\(pattern)>") ?? xml.range(of: "<\(pattern) ") else { continue }
-            guard let endRange = xml.range(of: "</\(pattern)>", range: startRange.upperBound..<xml.endIndex) else { continue }
+        // Hierarchical tags from digiKam:TagsList.
+        if let startRange = xml.range(of: "<digiKam:TagsList>") ?? xml.range(of: "<digiKam:TagsList "),
+           let endRange = xml.range(of: "</digiKam:TagsList>", range: startRange.upperBound..<xml.endIndex) {
             let block = String(xml[startRange.upperBound..<endRange.lowerBound])
-
             var searchRange = block.startIndex..<block.endIndex
             while let liStart = block.range(of: "<rdf:li>", range: searchRange) {
                 guard let liEnd = block.range(of: "</rdf:li>", range: liStart.upperBound..<block.endIndex) else { break }
                 let value = String(block[liStart.upperBound..<liEnd.lowerBound])
-                rawTags.append(value)
-                let sep: Character? = value.contains("|") ? "|" : value.contains("/") ? "/" : value.contains(":") ? ":" : nil
-                if let sep = sep {
-                    let parts = value.split(separator: sep).map { String($0).trimmingCharacters(in: .whitespaces) }
-                    keywords.append(contentsOf: parts)
-                } else {
-                    keywords.append(value)
-                }
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !value.isEmpty { rawTags.append(value) }
                 searchRange = liEnd.upperBound..<block.endIndex
             }
         }
 
-        return (keywords, rawTags)
+        // photo-tools:CountryCode — a simple scalar, optional prefix may vary.
+        var countryCode: String? = nil
+        for prefix in ["photo-tools:CountryCode", "phototools:CountryCode"] {
+            if let startRange = xml.range(of: "<\(prefix)>"),
+               let endRange = xml.range(of: "</\(prefix)>", range: startRange.upperBound..<xml.endIndex) {
+                let value = String(xml[startRange.upperBound..<endRange.lowerBound])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !value.isEmpty { countryCode = value.uppercased(); break }
+            }
+        }
+
+        return (rawTags, countryCode)
     }
 
     /// Read capture date from video metadata
@@ -389,7 +362,7 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         if !silent { isScanning = true }
 
         // Snapshot cached metadata so we can merge it into the fresh scan
-        let cachedMetadata = Dictionary(allPhotos.map { ($0.url, (date: $0.dateTaken, keywords: $0.keywords, tags: $0.hierarchicalTags, enrichedFileDate: $0.enrichedFileDate, gpsLat: $0.gpsLatitude, gpsLon: $0.gpsLongitude)) },
+        let cachedMetadata = Dictionary(allPhotos.map { ($0.url, (date: $0.dateTaken, tags: $0.hierarchicalTags, countryCode: $0.countryCode, enrichedFileDate: $0.enrichedFileDate, gpsLat: $0.gpsLatitude, gpsLon: $0.gpsLongitude)) },
                                          uniquingKeysWith: { _, b in b })
 
         // Heavy file I/O runs off the main actor so cached UI stays responsive
@@ -477,7 +450,6 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
                         // Prefer cached EXIF date; fall back to file creation date (not modDate,
                         // which changes when metadata is rewritten and would misplace photos)
                         let dateTaken = cached?.date ?? file.creationDate
-                        let keywords = cached?.keywords ?? []
                         let tags = cached?.tags ?? []
                         let cachedEnrichedDate = cached?.enrichedFileDate
                         // Re-enrich if never enriched or file was modified since last enrichment
@@ -491,8 +463,8 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
                             fileSize: file.fileSize,
                             dateTaken: dateTaken,
                             livePhotoVideoURL: liveURL,
-                            keywords: keywords,
                             hierarchicalTags: tags,
+                            countryCode: cached?.countryCode,
                             enrichedFileDate: stale ? nil : cachedEnrichedDate,
                             gpsLatitude: cached?.gpsLat,
                             gpsLongitude: cached?.gpsLon
@@ -607,14 +579,14 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         isScanning = false
         lastSyncedAt = Date()
 
-        // Enrich with EXIF dates and keywords in background (only if needed)
+        // Enrich with EXIF dates and tags in background (only if needed)
         if result.needsEnrichment && !allPhotos.isEmpty {
             await enrichMetadata()
         }
     }
 
-    /// Read EXIF dates and keywords for all photos in the background.
-    /// Updates allPhotos in a single assignment so dates/keywords are live immediately.
+    /// Read EXIF dates and hierarchical tags for all photos in the background.
+    /// Updates allPhotos in a single assignment so dates/tags are live immediately.
     private func enrichMetadata() async {
         guard !isEnriching else { return }
         isEnriching = true
@@ -656,8 +628,8 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
                         return EnrichedResult(
                             index: idx,
                             dateTaken: dateTaken,
-                            keywords: metadata.keywords.isEmpty ? photo.keywords : metadata.keywords,
-                            hierarchicalTags: metadata.keywords.isEmpty ? photo.hierarchicalTags : metadata.hierarchicalTags,
+                            hierarchicalTags: metadata.hierarchicalTags.isEmpty ? photo.hierarchicalTags : metadata.hierarchicalTags,
+                            countryCode: metadata.countryCode ?? photo.countryCode,
                             gpsLatitude: metadata.gpsLatitude ?? photo.gpsLatitude,
                             gpsLongitude: metadata.gpsLongitude ?? photo.gpsLongitude,
                             enrichedFileDate: modDate ?? Date()
@@ -675,28 +647,24 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
             }
 
             var dateCount = 0
-            var keywordCount = 0
-            var uniqueKeywords = Set<String>()
+            var tagCount = 0
+            var uniquePaths = Set<String>()
             for enriched in batchResults {
                 result[enriched.index].dateTaken = enriched.dateTaken
-                result[enriched.index].keywords = enriched.keywords
                 result[enriched.index].hierarchicalTags = enriched.hierarchicalTags
+                result[enriched.index].countryCode = enriched.countryCode
                 result[enriched.index].gpsLatitude = enriched.gpsLatitude
                 result[enriched.index].gpsLongitude = enriched.gpsLongitude
                 result[enriched.index].enrichedFileDate = enriched.enrichedFileDate
                 if enriched.dateTaken != nil { dateCount += 1 }
-                if !enriched.keywords.isEmpty {
-                    keywordCount += 1
-                    for kw in enriched.keywords { uniqueKeywords.insert(kw.lowercased()) }
+                if !enriched.hierarchicalTags.isEmpty {
+                    tagCount += 1
+                    for tag in enriched.hierarchicalTags { uniquePaths.insert(tag.fullPath.lowercased()) }
                 }
             }
 
             let elapsed = CFAbsoluteTimeGetCurrent() - startTime
-            Log.enrich.info("Done in \(String(format: "%.1f", elapsed))s: \(dateCount) EXIF dates, \(keywordCount) photos with keywords, \(uniqueKeywords.count) unique tags")
-            if !uniqueKeywords.isEmpty {
-                let sample = Array(uniqueKeywords.sorted().prefix(20))
-                Log.enrich.debug("Sample keywords: \(sample.joined(separator: ", "))")
-            }
+            Log.enrich.info("Done in \(String(format: "%.1f", elapsed))s: \(dateCount) EXIF dates, \(tagCount) photos with tags, \(uniquePaths.count) unique tag paths")
             let sampleTags = result.flatMap(\.hierarchicalTags).prefix(20)
             if !sampleTags.isEmpty {
                 let tagDetails = sampleTags.map { "\($0.fullPath) → ns:\($0.namespace ?? "nil") name:\($0.displayName)" }
@@ -714,8 +682,10 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
 
         // Check if enrichment actually changed any values
         let enrichedCount = zip(photos, enrichedPhotos).filter { old, new in
-            old.dateTaken != new.dateTaken || old.keywords != new.keywords ||
-            old.hierarchicalTags != new.hierarchicalTags || old.gpsLatitude != new.gpsLatitude
+            old.dateTaken != new.dateTaken ||
+            old.hierarchicalTags != new.hierarchicalTags ||
+            old.countryCode != new.countryCode ||
+            old.gpsLatitude != new.gpsLatitude
         }.count
 
         guard enrichedCount > 0 else {
@@ -780,18 +750,21 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         let t = CFAbsoluteTimeGetCurrent()
         _sortedPhotos = sortPhotos(allPhotos)
         _photoByID = Dictionary(allPhotos.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-        let withKeywords = allPhotos.filter { !$0.keywords.isEmpty }.count
+        let withTags = allPhotos.filter { !$0.hierarchicalTags.isEmpty }.count
         let withDates = allPhotos.filter { $0.dateTaken != nil }.count
 
-        // Build search index and tag-to-photos index in one pass
+        // Build search index and tag-to-photos index in one pass.
+        // Corpus = filename + every tag leaf + every tag full path, so substring
+        // search matches both "rome" and "italy/lazio/rome".
         var newSearchIndex: [UUID: String] = [:]
         var tagPhotos: [String: [PhotoFile]] = [:]
         for photo in allPhotos {
-            let tagPaths = photo.hierarchicalTags.map(\.fullPath)
-            let corpus = ([photo.filename] + photo.keywords + tagPaths)
-                .joined(separator: "\n")
-                .lowercased()
-            newSearchIndex[photo.id] = corpus
+            var terms: [String] = [photo.filename]
+            for tag in photo.hierarchicalTags {
+                terms.append(tag.displayName)
+                terms.append(tag.fullPath)
+            }
+            newSearchIndex[photo.id] = terms.joined(separator: "\n").lowercased()
             for tag in photo.hierarchicalTags {
                 let key = tag.fullPath.lowercased()
                 tagPhotos[key, default: []].append(photo)
@@ -808,7 +781,7 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
             return aDate > bDate
         }
 
-        Log.index.info("Built: \(self.allPhotos.count) photos (\(withDates) dates, \(withKeywords) keywords) in \(String(format: "%.0f", (CFAbsoluteTimeGetCurrent() - t) * 1000))ms")
+        Log.index.info("Built: \(self.allPhotos.count) photos (\(withDates) dates, \(withTags) tagged) in \(String(format: "%.0f", (CFAbsoluteTimeGetCurrent() - t) * 1000))ms")
 
         // Aggregate global tag list + topPeople in background to avoid blocking scroll
         tagBuildGeneration += 1

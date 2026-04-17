@@ -48,11 +48,6 @@ struct EXIFContentView: View {
                             HierarchicalTagFlowView(tags: photo.hierarchicalTags)
                                 .padding(.vertical, 2)
                         }
-                    } else if !photo.keywords.isEmpty {
-                        section("Tags") {
-                            TagFlowView(tags: photo.keywords)
-                                .padding(.vertical, 2)
-                        }
                     }
 
                     section("Camera") {
@@ -212,23 +207,6 @@ private struct HierarchicalTagFlowView: View {
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
                 .background(Color(.systemGray5), in: Capsule())
-            }
-        }
-    }
-}
-
-private struct TagFlowView: View {
-    let tags: [String]
-
-    var body: some View {
-        FlowLayout(spacing: 6) {
-            ForEach(tags, id: \.self) { tag in
-                Text(tag)
-                    .font(.caption)
-                    .fontWeight(.medium)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(Color(.systemGray5), in: Capsule())
             }
         }
     }

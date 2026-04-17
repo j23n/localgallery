@@ -1138,9 +1138,11 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         let ids = sorted.map(\.0.id)
         let tripKey = "\(calendar.component(.year, from: first))-\(calendar.component(.month, from: first))-\(calendar.component(.day, from: first))"
 
+        let title = tripLabel(for: sorted.map(\.0)) ?? "A trip \(relDate)"
+
         candidates.append(Memory(
             id: "trip-\(tripKey)", type: .trip,
-            title: "A trip \(relDate)",
+            title: title,
             subtitle: "\(days) \(days == 1 ? "day" : "days")",
             photoIDs: ids,
             coverPhotoID: ids[ids.count / 3],
@@ -1148,6 +1150,79 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
             score: Double(ids.count) * 1.5 + Double(days) * 2.0 + 8.0,
             yearsAgo: nil, personName: nil
         ))
+    }
+
+    // MARK: Trip Labeling
+
+    /// Derives a location-based title for a trip from `Places/*` tags and
+    /// `photo-tools:CountryCode`. Returns nil when no tag data is available so
+    /// the caller can fall back to the generic "A trip N years ago" string.
+    private nonisolated static func tripLabel(for photos: [PhotoFile]) -> String? {
+        var countryCounts: [String: Int] = [:]
+        for photo in photos {
+            if let code = photo.countryCode, !code.isEmpty {
+                countryCounts[code, default: 0] += 1
+            }
+        }
+
+        if countryCounts.count >= 2 {
+            let sorted = countryCounts.sorted { lhs, rhs in
+                if lhs.value != rhs.value { return lhs.value > rhs.value }
+                return lhs.key < rhs.key
+            }
+            if sorted.count > 3 {
+                return "\(sorted.count) countries"
+            }
+            let names = sorted.map { countryName(from: $0.key) ?? $0.key }
+            if names.count == 2 {
+                return "\(names[0]) & \(names[1])"
+            }
+            return "\(names[0]), \(names[1]) & \(names[2])"
+        }
+
+        let prefix = deepestSharedPlacesPrefix(in: photos)
+        if let leaf = prefix.last {
+            return leaf
+        }
+
+        if let (code, _) = countryCounts.first {
+            return countryName(from: code) ?? code
+        }
+
+        return nil
+    }
+
+    /// Longest `Places/*` path segments shared by every photo that carries at
+    /// least one `Places/*` tag. Photos without any `Places/*` tag are skipped
+    /// (collapse-on-missing-levels, per photo-tools xmp-schema.md §2.2).
+    /// Returns `[]` when no photo has a `Places/*` tag.
+    private nonisolated static func deepestSharedPlacesPrefix(in photos: [PhotoFile]) -> [String] {
+        var perPhotoSegments: [[String]] = []
+        for photo in photos {
+            let placesPaths = photo.hierarchicalTags
+                .filter { $0.namespace?.lowercased() == "places" }
+                .map { $0.fullPath.split(separator: "/").dropFirst().map(String.init) }
+            guard let longest = placesPaths.max(by: { $0.count < $1.count }), !longest.isEmpty else {
+                continue
+            }
+            perPhotoSegments.append(longest)
+        }
+        guard let first = perPhotoSegments.first else { return [] }
+        var prefix = first
+        for segments in perPhotoSegments.dropFirst() {
+            let limit = min(prefix.count, segments.count)
+            var i = 0
+            while i < limit && prefix[i].caseInsensitiveCompare(segments[i]) == .orderedSame {
+                i += 1
+            }
+            prefix = Array(prefix.prefix(i))
+            if prefix.isEmpty { break }
+        }
+        return prefix
+    }
+
+    nonisolated private static func countryName(from code: String) -> String? {
+        Locale.current.localizedString(forRegionCode: code)
     }
 
     // MARK: Memory Helpers

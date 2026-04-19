@@ -120,8 +120,8 @@ struct CollectionsView: View {
         renderedVideoURL = nil
 
         Task.detached(priority: .userInitiated) {
-            let loader: (URL, CGSize) async -> UIImage? = { url, size in
-                await mgr.thumbnail(for: url, size: size)
+            let loader: (URL, CGSize) async -> UIImage? = { url, _ in
+                await mgr.loadFullImage(for: url)
             }
             do {
                 let url = try await SlideshowVideoRenderer.render(

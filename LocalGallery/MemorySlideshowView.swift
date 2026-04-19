@@ -208,9 +208,7 @@ private struct SlideshowImage: View {
         .clipped()
         .brightness(-0.08)
         .task(id: url) {
-            let size = CGSize(width: geo.size.width * UIScreen.main.scale,
-                              height: geo.size.height * UIScreen.main.scale)
-            image = await manager.thumbnail(for: url, size: size)
+            image = await manager.loadFullImage(for: url)
         }
     }
 }

@@ -2,6 +2,19 @@ import SwiftUI
 
 struct CollectionsView: View {
     @EnvironmentObject var manager: GalleryManager
+    @State private var showSettings = false
+    @State private var personMenu: TagSuggestion?
+    @State private var memoryMenu: Memory?
+
+    // Navigation targets (state-driven, since NavigationLink inside confirmationDialog is unreliable)
+    @State private var navTag: TagSuggestion?
+    @State private var navMemory: Memory?
+
+    // Memory-to-video share state
+    @State private var renderingMemory: Memory?
+    @State private var renderProgress: Double = 0
+    @State private var renderedVideoURL: URL?
+    @State private var renderError: String?
 
     var body: some View {
         Group {
@@ -9,126 +22,284 @@ struct CollectionsView: View {
                 if manager.isScanning {
                     ProgressView("Scanning…")
                 } else {
-                    VStack(spacing: 20) {
-                        Image(systemName: "rectangle.stack")
-                            .font(.system(size: 64, weight: .thin))
-                            .foregroundStyle(Design.accentColor.opacity(0.7))
-                        VStack(spacing: 8) {
-                            Text("No Collections")
-                                .font(.title2)
-                                .fontWeight(.semibold)
-                            Text("Choose a folder in Settings to get started.")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                                .multilineTextAlignment(.center)
-                        }
-                    }
-                    .padding(32)
+                    emptyState
                 }
             } else {
-                collectionsList
+                collectionsBody
             }
         }
+        .background(Design.bg)
         .navigationTitle("Collections")
-    }
-
-    private var collectionsList: some View {
-        List {
-            if !manager.memories.isEmpty {
-                Section {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        LazyHStack(spacing: 16) {
-                            ForEach(manager.memories) { memory in
-                                NavigationLink {
-                                    MemoryDetailView(memory: memory)
-                                } label: {
-                                    MemoryCardView(memory: memory)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 8)
-                    }
-                    .listRowInsets(EdgeInsets())
-                    .listRowBackground(Color.clear)
-                } header: {
-                    Label("Memories", systemImage: "sparkles")
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button { showSettings = true } label: { Image(systemName: "gear") }
+            }
+        }
+        .sheet(isPresented: $showSettings) { SettingsView() }
+        .sheet(item: Binding<RenderedVideo?>(
+            get: { renderedVideoURL.map { RenderedVideo(url: $0) } },
+            set: { renderedVideoURL = $0?.url }
+        )) { v in
+            ShareSheet(items: [v.url])
+        }
+        .overlay {
+            if renderingMemory != nil {
+                renderingOverlay
+            }
+        }
+        .alert("Couldn’t render slideshow",
+               isPresented: Binding(get: { renderError != nil }, set: { if !$0 { renderError = nil } })) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(renderError ?? "")
+        }
+        .confirmationDialog(
+            personMenu?.displayName ?? "",
+            isPresented: Binding(get: { personMenu != nil }, set: { if !$0 { personMenu = nil } }),
+            titleVisibility: .visible
+        ) {
+            if let p = personMenu {
+                let isPinned = manager.pinnedPeople.contains(p.fullPath)
+                Button("View all photos") { navTag = p }
+                Button(isPinned ? "Unpin from top" : "Pin to top") {
+                    manager.togglePinPerson(p.fullPath)
+                }
+                Button("Hide", role: .destructive) {
+                    manager.hidePerson(p.fullPath)
                 }
             }
+        }
+        .confirmationDialog(
+            memoryMenu?.title ?? "",
+            isPresented: Binding(get: { memoryMenu != nil }, set: { if !$0 { memoryMenu = nil } }),
+            titleVisibility: .visible
+        ) {
+            if let m = memoryMenu {
+                Button("View photos") { navMemory = m }
+                Button("Share slideshow video") { startRender(memory: m) }
+                Button("Hide memory", role: .destructive) { manager.hideMemory(m.id) }
+            }
+        }
+        .navigationDestination(item: $navTag) { tag in
+            TagGridView(tag: tag)
+        }
+        .navigationDestination(item: $navMemory) { memory in
+            MemoryGridView(memory: memory)
+        }
+    }
 
-            let people = manager.topPeople
-            if !people.isEmpty {
-                Section("People") {
-                    LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 16) {
-                        ForEach(people) { person in
+    // MARK: - Memory video render
+
+    private var renderingOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.35).ignoresSafeArea()
+            VStack(spacing: 14) {
+                ProgressView(value: renderProgress)
+                    .progressViewStyle(.linear)
+                    .tint(Design.accentColor)
+                Text("Rendering slideshow… \(Int(renderProgress * 100))%")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Design.ink2)
+                Button("Cancel") { renderingMemory = nil }
+                    .font(.system(size: 13))
+                    .foregroundStyle(Design.accentColor)
+            }
+            .padding(20)
+            .frame(width: 260)
+            .background(Design.bgCard, in: RoundedRectangle(cornerRadius: 14))
+            .shadow(color: .black.opacity(0.2), radius: 16, y: 6)
+        }
+    }
+
+    private func startRender(memory: Memory) {
+        let mgr = manager
+        let photos = mgr.photos(for: memory)
+        guard !photos.isEmpty else { return }
+        renderingMemory = memory
+        renderProgress = 0
+        renderedVideoURL = nil
+
+        Task.detached(priority: .userInitiated) {
+            let loader: (URL, CGSize) async -> UIImage? = { url, _ in
+                await mgr.loadFullImage(for: url)
+            }
+            do {
+                let url = try await SlideshowVideoRenderer.render(
+                    photos: photos,
+                    title: memory.title,
+                    loadImage: loader,
+                    progress: { @MainActor p in renderProgress = p }
+                )
+                await MainActor.run {
+                    guard renderingMemory?.id == memory.id else { return }
+                    renderingMemory = nil
+                    renderedVideoURL = url
+                }
+            } catch {
+                await MainActor.run {
+                    renderingMemory = nil
+                    renderError = String(describing: error)
+                }
+            }
+        }
+    }
+
+    // MARK: - Body
+
+    private var collectionsBody: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                let memories = manager.visibleMemories
+                if !memories.isEmpty {
+                    sectionHeader("Memories", systemIcon: "sparkles", accent: true)
+                    memoriesRail(memories)
+                }
+
+                let people = manager.visiblePeople
+                if !people.isEmpty {
+                    sectionHeader("People")
+                    peopleRail(people)
+                }
+
+                if !manager.eventFolders.isEmpty {
+                    sectionHeader("Events")
+                    eventsList
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 16)
+                }
+            }
+            .padding(.bottom, 24)
+        }
+        .background(Design.bg)
+    }
+
+    // MARK: - Pieces
+
+    @ViewBuilder
+    private func sectionHeader(_ title: String, systemIcon: String? = nil, accent: Bool = false) -> some View {
+        HStack(spacing: 7) {
+            if let systemIcon {
+                Image(systemName: systemIcon)
+                    .font(.system(size: 12, weight: .semibold))
+            }
+            Text(title.uppercased())
+                .font(.system(size: 12.5, weight: .semibold))
+                .tracking(0.5)
+        }
+        .foregroundStyle(accent ? Design.accentColor : Design.ink2)
+        .padding(.horizontal, 20)
+        .padding(.top, 18)
+        .padding(.bottom, 10)
+    }
+
+    private func memoriesRail(_ memories: [Memory]) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            LazyHStack(spacing: 12) {
+                ForEach(memories) { memory in
+                    NavigationLink {
+                        MemorySlideshowView(memory: memory)
+                    } label: {
+                        MemoryCardView(memory: memory)
+                    }
+                    .buttonStyle(.plain)
+                    .onLongPressGesture { memoryMenu = memory }
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 4)
+        }
+    }
+
+    private func peopleRail(_ people: [TagSuggestion]) -> some View {
+        // Two-row horizontal scroll, column-major like the design.
+        let pairs = stride(from: 0, to: people.count, by: 2).map { i -> [TagSuggestion] in
+            if i + 1 < people.count { return [people[i], people[i + 1]] }
+            return [people[i]]
+        }
+        return ScrollView(.horizontal, showsIndicators: false) {
+            LazyHStack(alignment: .top, spacing: 10) {
+                ForEach(Array(pairs.enumerated()), id: \.offset) { _, pair in
+                    VStack(spacing: 10) {
+                        ForEach(pair) { person in
                             NavigationLink {
                                 TagGridView(tag: person)
                             } label: {
-                                PersonCard(tag: person)
+                                PersonCard(tag: person, pinned: manager.pinnedPeople.contains(person.fullPath))
                             }
                             .buttonStyle(.plain)
+                            .onLongPressGesture { personMenu = person }
                         }
-                    }
-                    .padding(.vertical, 4)
-                }
-            }
-
-            if !manager.eventFolders.isEmpty {
-                Section("Events") {
-                    ForEach(manager.eventFolders) { folder in
-                        NavigationLink {
-                            FolderGridView(title: folder.name, photos: folder.photos)
-                        } label: {
-                            eventRow(folder)
+                        if pair.count == 1 {
+                            Color.clear.frame(width: 128, height: 128)
                         }
                     }
                 }
             }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 4)
+        }
+    }
 
-            if manager.peopleTags.isEmpty && manager.eventFolders.isEmpty {
-                ContentUnavailableView(
-                    "No Collections Yet",
-                    systemImage: "rectangle.stack",
-                    description: Text("People tags and photo folders will appear here.")
-                )
+    private var eventsList: some View {
+        VStack(spacing: 0) {
+            ForEach(Array(manager.eventFolders.enumerated()), id: \.element.id) { idx, folder in
+                NavigationLink {
+                    FolderGridView(title: folder.name, photos: folder.photos)
+                } label: {
+                    eventRow(folder)
+                }
+                .buttonStyle(.plain)
+                if idx < manager.eventFolders.count - 1 {
+                    Divider()
+                        .background(Design.separator)
+                        .padding(.leading, 96)
+                }
             }
         }
+        .background(Design.bgCard)
+        .clipShape(RoundedRectangle(cornerRadius: Design.cardRadius))
+        .shadow(color: Color.black.opacity(0.04), radius: 1, y: 1)
     }
 
     private func eventRow(_ folder: PhotoFolder) -> some View {
         HStack(spacing: 14) {
             if let coverURL = folder.coverPhotoURL {
-                ThumbnailView(url: coverURL, size: 72, cornerRadius: 8)
+                ThumbnailView(url: coverURL, size: 68, cornerRadius: 10)
+                    .frame(width: 68, height: 68)
             } else {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color(.systemGray5))
-                    .frame(width: 72, height: 72)
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Design.bgGrouped)
+                    .frame(width: 68, height: 68)
                     .overlay {
                         Image(systemName: "photo.on.rectangle")
-                            .font(.title2)
-                            .foregroundStyle(.tertiary)
+                            .font(.title3)
+                            .foregroundStyle(Design.ink3)
                     }
             }
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(folder.name)
-                    .font(.body)
-                    .fontWeight(.medium)
+                    .font(.system(size: 15.5, weight: .medium))
+                    .foregroundStyle(Design.ink)
                     .lineLimit(1)
-                HStack(spacing: 8) {
-                    Text("\(folder.photos.count) photos")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    if let dateRange = eventDateRange(folder) {
-                        Text(dateRange)
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                    }
+                Text("\(folder.photos.count) photos")
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(Design.ink2)
+                if let range = eventDateRange(folder) {
+                    Text(range)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Design.ink3)
                 }
             }
+
+            Spacer()
+
+            Image(systemName: "chevron.right")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Design.ink3)
         }
-        .padding(.vertical, 4)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
     }
 
     private func eventDateRange(_ folder: PhotoFolder) -> String? {
@@ -142,172 +313,178 @@ struct CollectionsView: View {
         }
         return "\(fmt.string(from: first)) – \(fmt.string(from: last))"
     }
+
+    // MARK: - Empty state
+
+    private var emptyState: some View {
+        VStack(spacing: 20) {
+            Image(systemName: "rectangle.stack")
+                .font(.system(size: 64, weight: .thin))
+                .foregroundStyle(Design.accentColor.opacity(0.7))
+            VStack(spacing: 8) {
+                Text("No Collections")
+                    .font(.title2)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(Design.ink)
+                Text("Choose a folder in Settings to get started.")
+                    .font(.subheadline)
+                    .foregroundStyle(Design.ink2)
+                    .multilineTextAlignment(.center)
+            }
+        }
+        .padding(32)
+    }
 }
 
-// MARK: - Tag Grid View (photos for a specific tag)
+// MARK: - Tag Grid View
 
 struct TagGridView: View {
     let tag: TagSuggestion
     @EnvironmentObject var manager: GalleryManager
-    @AppStorage("gridSizeTier") private var sizeTier: Int = 0
-    @State private var selectedPhoto: PhotoFile?
-    @State private var presentationID = UUID()
-    @State private var scrollToTopTrigger = false
 
     private var photos: [PhotoFile] {
         manager.search(query: "", requiredTags: [tag])
     }
 
-    private var grid: GridLayoutConfig { GridLayoutConfig(sizeTier: sizeTier) }
-
     var body: some View {
-        GeometryReader { geo in
-            let width = geo.size.width
-            let size = grid.cellSize(for: width)
-            ScrollViewReader { proxy in
-                ScrollView {
-                    Color.clear.frame(height: 0).id("__top__")
-                    LazyVGrid(columns: grid.columns(for: width), spacing: 2) {
-                        ForEach(photos) { photo in
-                            ThumbnailView(url: photo.url, size: size, isVideo: photo.isVideo, isLivePhoto: photo.livePhotoVideoURL != nil)
-                                .frame(width: size, height: size)
-                                .contentShape(Rectangle())
-                                .onTapGesture {
-                                    presentationID = UUID()
-                                    selectedPhoto = photo
-                                }
-                        }
-                    }
-                }
-                .onChange(of: scrollToTopTrigger) {
-                    withAnimation {
-                        proxy.scrollTo("__top__", anchor: .top)
-                    }
-                }
-            }
-        }
-        .navigationTitle(tag.displayName)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    scrollToTopTrigger.toggle()
-                } label: {
-                    Image(systemName: "arrow.up")
-                }
-            }
-        }
-        .fullScreenCover(item: $selectedPhoto) { photo in
-            PhotoViewerView(photos: photos, initialPhoto: photo)
-                .id(presentationID)
-        }
+        PhotoGridScreen(
+            title: tag.displayName,
+            subtitle: tag.fullPath.replacingOccurrences(of: "/", with: " › "),
+            photos: photos
+        )
     }
 }
 
-// MARK: - Person Card (2×2 thumbnail grid + name)
+// MARK: - Person Card (single featured photo, bottom-left name)
 
 struct PersonCard: View {
     let tag: TagSuggestion
+    let pinned: Bool
     @EnvironmentObject var manager: GalleryManager
 
-    private var coverPhotos: [PhotoFile] {
-        Array(manager.photos(forTag: tag).prefix(4))
+    private var featured: PhotoFile? {
+        manager.photos(forTag: tag).first
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            let photos = coverPhotos
-            GeometryReader { geo in
-                let size = (geo.size.width - 2) / 2
-                LazyVGrid(columns: [GridItem(.flexible(), spacing: 2), GridItem(.flexible(), spacing: 2)], spacing: 2) {
-                    ForEach(0..<4, id: \.self) { i in
-                        if i < photos.count {
-                            ThumbnailView(url: photos[i].url, size: size, cornerRadius: 0)
-                                .frame(width: size, height: size)
-                                .clipped()
-                        } else {
-                            Rectangle()
-                                .fill(Color(.systemGray5))
-                                .frame(width: size, height: size)
-                        }
+        ZStack(alignment: .bottomLeading) {
+            if let photo = featured {
+                ThumbnailView(url: photo.url, size: 128)
+                    .frame(width: 128, height: 128)
+                    .clipped()
+            } else {
+                Rectangle()
+                    .fill(Design.bgGrouped)
+                    .overlay {
+                        Image(systemName: "person.fill")
+                            .font(.system(size: 32))
+                            .foregroundStyle(Design.ink3)
                     }
-                }
             }
-            .aspectRatio(1, contentMode: .fit)
-            .clipShape(RoundedRectangle(cornerRadius: 10))
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(tag.displayName)
-                    .font(.subheadline)
-                    .fontWeight(.medium)
-                    .lineLimit(1)
-                Text("\(tag.count)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            LinearGradient(
+                colors: [.clear, .black.opacity(0.6)],
+                startPoint: UnitPoint(x: 0.5, y: 0.45),
+                endPoint: .bottom
+            )
+
+            if pinned {
+                Circle()
+                    .fill(Color.black.opacity(0.45))
+                    .frame(width: 20, height: 20)
+                    .overlay {
+                        Image(systemName: "pin.fill")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(.white)
+                    }
+                    .padding(8)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
             }
+
+            Text(tag.displayName)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white)
+                .shadow(color: .black.opacity(0.35), radius: 3, y: 1)
+                .lineLimit(1)
+                .padding(.horizontal, 9)
+                .padding(.bottom, 7)
         }
+        .frame(width: 128, height: 128)
+        .clipShape(RoundedRectangle(cornerRadius: Design.cardRadius))
+        .shadow(color: .black.opacity(0.06), radius: 4, y: 2)
     }
 }
 
-// MARK: - Memory Card View
+// MARK: - Memory Card (large, rounded, gradient caption)
 
 struct MemoryCardView: View {
     let memory: Memory
     @EnvironmentObject var manager: GalleryManager
 
-    private var coverURL: URL? {
-        manager.photo(byID: memory.coverPhotoID)?.url
-    }
+    private var coverURL: URL? { manager.photo(byID: memory.coverPhotoID)?.url }
 
     var body: some View {
         ZStack(alignment: .bottomLeading) {
             if let url = coverURL {
-                ThumbnailView(url: url, size: 240)
-                    .frame(width: 240, height: 200)
+                ThumbnailView(url: url, size: 328)
+                    .frame(width: 264, height: 328)
                     .clipped()
             } else {
-                RoundedRectangle(cornerRadius: 16)
-                    .fill(Color(.systemGray5))
-                    .frame(width: 240, height: 200)
+                Rectangle()
+                    .fill(Design.bgGrouped)
+                    .frame(width: 264, height: 328)
             }
 
             LinearGradient(
-                colors: [.clear, .black.opacity(0.6)],
-                startPoint: .center,
+                colors: [.clear, .black.opacity(0.55)],
+                startPoint: UnitPoint(x: 0.5, y: 0.4),
                 endPoint: .bottom
             )
-            .frame(width: 240, height: 200)
+            .frame(width: 264, height: 328)
 
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(memory.title)
-                    .font(.headline)
-                    .fontWeight(.bold)
+                    .font(Design.serifItalic(22, weight: .medium))
                     .foregroundStyle(.white)
                     .lineLimit(2)
                 if let subtitle = memory.subtitle {
                     Text(subtitle)
-                        .font(.caption)
+                        .font(.system(size: 11.5))
                         .foregroundStyle(.white.opacity(0.85))
                         .lineLimit(1)
                 }
                 Text("\(memory.photoIDs.count) photos")
-                    .font(.caption2)
-                    .foregroundStyle(.white.opacity(0.7))
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.white.opacity(0.65))
+                    .padding(.top, 1)
             }
             .padding(14)
         }
-        .frame(width: 240, height: 200)
-        .clipShape(RoundedRectangle(cornerRadius: 16))
-        .shadow(color: .black.opacity(0.15), radius: 8, y: 4)
+        .frame(width: 264, height: 328)
+        .clipShape(RoundedRectangle(cornerRadius: Design.memoryRadius))
+        .shadow(color: Color.black.opacity(0.08), radius: 8, x: 0, y: 4)
     }
 }
 
-// MARK: - Memory Detail View
+// MARK: - Memory grid mode (reachable via "See all" from slideshow)
 
-struct MemoryDetailView: View {
+struct MemoryGridView: View {
     let memory: Memory
     @EnvironmentObject var manager: GalleryManager
 
     var body: some View {
-        FolderGridView(title: memory.title, photos: manager.photos(for: memory))
+        PhotoGridScreen(
+            title: memory.title,
+            subtitle: memory.subtitle,
+            photos: manager.photos(for: memory),
+            playableMemory: memory
+        )
     }
+}
+
+// MARK: - Identifiable wrapper for sheet(item:) on a URL
+
+private struct RenderedVideo: Identifiable {
+    let id = UUID()
+    let url: URL
 }

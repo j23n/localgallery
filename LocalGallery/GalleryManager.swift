@@ -19,6 +19,16 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         didSet { UserDefaults.standard.set(folderSortOrder.rawValue, forKey: "folderSortOrder") }
     }
 
+    @Published var hiddenPeople: Set<String> = [] {
+        didSet { UserDefaults.standard.set(Array(hiddenPeople), forKey: "hiddenPeople") }
+    }
+    @Published var pinnedPeople: [String] = [] {
+        didSet { UserDefaults.standard.set(pinnedPeople, forKey: "pinnedPeople") }
+    }
+    @Published var hiddenMemories: Set<String> = [] {
+        didSet { UserDefaults.standard.set(Array(hiddenMemories), forKey: "hiddenMemories") }
+    }
+
     private var isEnriching = false
     private var memoriesGeneratedDate: Date?
     private let thumbnailCache = NSCache<NSURL, UIImage>()
@@ -46,6 +56,15 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         if let raw = UserDefaults.standard.string(forKey: "folderSortOrder"),
            let order = FolderSortOrder(rawValue: raw) {
             folderSortOrder = order
+        }
+        if let hidden = UserDefaults.standard.array(forKey: "hiddenPeople") as? [String] {
+            hiddenPeople = Set(hidden)
+        }
+        if let pinned = UserDefaults.standard.array(forKey: "pinnedPeople") as? [String] {
+            pinnedPeople = pinned
+        }
+        if let hiddenMem = UserDefaults.standard.array(forKey: "hiddenMemories") as? [String] {
+            hiddenMemories = Set(hiddenMem)
         }
 
         // Load cache + start security scope synchronously so cached
@@ -887,6 +906,44 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
     var peopleTags: [TagSuggestion] {
         allTags.filter { $0.namespace?.lowercased() == "people" }
     }
+
+    /// top people with hidden filtered out and pinned floated to the front (preserves pin order)
+    var visiblePeople: [TagSuggestion] {
+        let visible = topPeople.filter { !hiddenPeople.contains($0.fullPath) }
+        let pinnedSet = Set(pinnedPeople)
+        let pinnedFirst = pinnedPeople.compactMap { path in visible.first { $0.fullPath == path } }
+        let rest = visible.filter { !pinnedSet.contains($0.fullPath) }
+        return pinnedFirst + rest
+    }
+
+    var visibleMemories: [Memory] {
+        memories.filter { !hiddenMemories.contains($0.id) }
+    }
+
+    var hiddenPeopleTags: [TagSuggestion] {
+        hiddenPeople.compactMap { path in allTags.first { $0.fullPath == path } }
+            .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+    }
+
+    func hidePerson(_ path: String) {
+        hiddenPeople.insert(path)
+        pinnedPeople.removeAll { $0 == path }
+    }
+
+    func unhidePerson(_ path: String) {
+        hiddenPeople.remove(path)
+    }
+
+    func togglePinPerson(_ path: String) {
+        if let idx = pinnedPeople.firstIndex(of: path) {
+            pinnedPeople.remove(at: idx)
+        } else {
+            pinnedPeople.append(path)
+        }
+    }
+
+    func hideMemory(_ id: String) { hiddenMemories.insert(id) }
+    func unhideMemory(_ id: String) { hiddenMemories.remove(id) }
 
     var leafFolders: [PhotoFolder] { _cachedLeafFolders }
 

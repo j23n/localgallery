@@ -183,7 +183,7 @@ enum MemoryType: String, Sendable {
     case trip
 }
 
-struct Memory: Identifiable, Sendable {
+struct Memory: Identifiable, Hashable, Sendable {
     let id: String            // deterministic key, e.g. "onThisDay", "yearsAgo-5"
     let type: MemoryType
     let title: String
@@ -194,7 +194,12 @@ struct Memory: Identifiable, Sendable {
     let score: Double
     let yearsAgo: Int?
     let personName: String?
+
+    static func == (lhs: Memory, rhs: Memory) -> Bool { lhs.id == rhs.id }
+    func hash(into hasher: inout Hasher) { hasher.combine(id) }
 }
+
+extension MemoryType: Hashable {}
 
 // MARK: - Folder Sort
 

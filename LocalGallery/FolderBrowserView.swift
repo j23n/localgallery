@@ -19,6 +19,7 @@ struct FolderBrowserView: View {
             }
         }
         .navigationTitle(displayFolder?.name ?? "Folders")
+        .navigationBarTitleDisplayMode(folder == nil ? .large : .inline)
         .toolbar {
             if displayFolder != nil && !(displayFolder?.subfolders.isEmpty ?? true) {
                 ToolbarItem(placement: .topBarTrailing) {

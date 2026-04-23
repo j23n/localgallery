@@ -140,6 +140,7 @@ struct CollectionsView: View {
             }
             .padding(.bottom, 24)
         }
+        .softTopScrollEdge()
         .background(Design.bg)
     }
 

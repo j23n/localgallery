@@ -1628,7 +1628,6 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
             if let src = sourceModDate, let cache = cacheModDate, cache >= src,
                let data = try? Data(contentsOf: diskPath),
                let image = UIImage(data: data) {
-                Log.thumb.debug("Disk hit: \(url.lastPathComponent)")
                 return image
             }
         }
@@ -1645,11 +1644,10 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
                 return nil
             }
             try Task.checkCancellation()
-            let image = UIImage(cgImage: cgImage)
-            if let jpegData = image.jpegData(compressionQuality: 0.7) {
+            if let jpegData = opaqueJPEGData(from: cgImage, quality: 0.7) {
                 try? jpegData.write(to: diskPath, options: .atomic)
             }
-            return image
+            return UIImage(cgImage: cgImage)
         } else {
             let options: [CFString: Any] = [kCGImageSourceShouldCache: false]
             guard let source = CGImageSourceCreateWithURL(url as CFURL, options as CFDictionary) else {
@@ -1666,14 +1664,27 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
                 return nil
             }
             try Task.checkCancellation()
-            let image = UIImage(cgImage: cgImage)
 
             // Write to disk cache (fire-and-forget)
-            if let jpegData = image.jpegData(compressionQuality: 0.7) {
+            if let jpegData = opaqueJPEGData(from: cgImage, quality: 0.7) {
                 try? jpegData.write(to: diskPath, options: .atomic)
             }
-            return image
+            return UIImage(cgImage: cgImage)
         }
+    }
+
+    /// JPEG-encode a CGImage after flattening onto an opaque bitmap — avoids the
+    /// `writeImageAtIndex: trying to save an opaque image with AlphaPremulLast`
+    /// warning emitted by UIImage.jpegData when the source has an alpha channel.
+    private nonisolated static func opaqueJPEGData(from cgImage: CGImage, quality: CGFloat) -> Data? {
+        let size = CGSize(width: cgImage.width, height: cgImage.height)
+        let format = UIGraphicsImageRendererFormat()
+        format.opaque = true
+        format.scale = 1
+        let flattened = UIGraphicsImageRenderer(size: size, format: format).image { _ in
+            UIImage(cgImage: cgImage).draw(in: CGRect(origin: .zero, size: size))
+        }
+        return flattened.jpegData(compressionQuality: quality)
     }
 
     func clearThumbnailCache() {

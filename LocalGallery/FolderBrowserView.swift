@@ -17,14 +17,7 @@ struct FolderBrowserView: View {
             if manager.isScanning {
                 ProgressView("Scanning folder…")
             } else if let folder = displayFolder {
-                if isRoot {
-                    VStack(alignment: .leading, spacing: 0) {
-                        titleHeader(folder.name)
-                        folderContent(folder)
-                    }
-                } else {
-                    folderContent(folder)
-                }
+                folderContent(folder)
             } else {
                 emptyState
             }
@@ -56,17 +49,6 @@ struct FolderBrowserView: View {
         .sheet(isPresented: $showSettings) { SettingsView() }
     }
 
-    private func titleHeader(_ name: String) -> some View {
-        Text(name)
-            .font(.system(size: 30, weight: .semibold))
-            .tracking(-0.6)
-            .foregroundStyle(Design.ink)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 20)
-            .padding(.top, 8)
-            .padding(.bottom, 6)
-    }
-
     private var emptyState: some View {
         VStack(spacing: 20) {
             Image(systemName: "folder")
@@ -89,6 +71,17 @@ struct FolderBrowserView: View {
     private func folderContent(_ folder: PhotoFolder) -> some View {
         let sortedSubfolders = manager.sortFolders(folder.subfolders)
         List {
+            if isRoot {
+                Text(folder.name)
+                    .font(.system(size: 30, weight: .semibold))
+                    .tracking(-0.6)
+                    .foregroundStyle(Design.ink)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 4, trailing: 20))
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+            }
+
             if !folder.photos.isEmpty {
                 Section("Photos") {
                     NavigationLink {
@@ -129,6 +122,7 @@ struct FolderBrowserView: View {
                 )
             }
         }
+        .softTopScrollEdge()
         .refreshable {
             await manager.rescan()
         }

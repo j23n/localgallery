@@ -65,6 +65,11 @@ struct PhotoFile: Identifiable, Hashable, Codable, Sendable {
     var filename: String
     var fileSize: Int64
     var dateTaken: Date?
+    /// True when `dateTaken` came from embedded metadata (EXIF for images,
+    /// AVAsset creationDate for videos). False when it fell back to filesystem
+    /// creation/modification dates — which tend to cluster on bulk-import days
+    /// and pollute date-based memories.
+    var dateFromMetadata: Bool = false
     var isVideo: Bool = false
     var livePhotoVideoURL: URL? = nil
     var hierarchicalTags: [HierarchicalTag] = []
@@ -84,15 +89,16 @@ struct PhotoFile: Identifiable, Hashable, Codable, Sendable {
     var keywords: [String] { hierarchicalTags.map(\.displayName) }
 
     enum CodingKeys: String, CodingKey {
-        case id, url, filename, fileSize, dateTaken, isVideo, livePhotoVideoURL, hierarchicalTags, countryCode, enrichedFileDate, gpsLatitude, gpsLongitude
+        case id, url, filename, fileSize, dateTaken, dateFromMetadata, isVideo, livePhotoVideoURL, hierarchicalTags, countryCode, enrichedFileDate, gpsLatitude, gpsLongitude
     }
 
-    init(id: UUID, url: URL, filename: String, fileSize: Int64, dateTaken: Date?, isVideo: Bool = false, livePhotoVideoURL: URL? = nil, hierarchicalTags: [HierarchicalTag] = [], countryCode: String? = nil, enrichedFileDate: Date? = nil, gpsLatitude: Double? = nil, gpsLongitude: Double? = nil) {
+    init(id: UUID, url: URL, filename: String, fileSize: Int64, dateTaken: Date?, dateFromMetadata: Bool = false, isVideo: Bool = false, livePhotoVideoURL: URL? = nil, hierarchicalTags: [HierarchicalTag] = [], countryCode: String? = nil, enrichedFileDate: Date? = nil, gpsLatitude: Double? = nil, gpsLongitude: Double? = nil) {
         self.id = id
         self.url = url
         self.filename = filename
         self.fileSize = fileSize
         self.dateTaken = dateTaken
+        self.dateFromMetadata = dateFromMetadata
         self.isVideo = isVideo
         self.livePhotoVideoURL = livePhotoVideoURL
         self.hierarchicalTags = hierarchicalTags
@@ -109,6 +115,7 @@ struct PhotoFile: Identifiable, Hashable, Codable, Sendable {
         filename = try c.decode(String.self, forKey: .filename)
         fileSize = try c.decode(Int64.self, forKey: .fileSize)
         dateTaken = try c.decodeIfPresent(Date.self, forKey: .dateTaken)
+        dateFromMetadata = try c.decodeIfPresent(Bool.self, forKey: .dateFromMetadata) ?? false
         isVideo = try c.decodeIfPresent(Bool.self, forKey: .isVideo) ?? false
         livePhotoVideoURL = try c.decodeIfPresent(URL.self, forKey: .livePhotoVideoURL)
         hierarchicalTags = try c.decodeIfPresent([HierarchicalTag].self, forKey: .hierarchicalTags) ?? []

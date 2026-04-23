@@ -1,13 +1,15 @@
 import SwiftUI
 
-/// Full-bleed memory slideshow: crossfade between photos, segmented progress bar,
-/// tap-and-hold to pause, "thematic music" indicator, and "See all" → grid view.
+/// Full-bleed memory slideshow: crossfade between photos, single continuous
+/// progress bar, tap-left/tap-right to navigate (with timer reset), tap-and-hold
+/// to pause, "thematic music" indicator, and "See all" → grid view.
 struct MemorySlideshowView: View {
     let memory: Memory
     @EnvironmentObject var manager: GalleryManager
     @Environment(\.dismiss) private var dismiss
 
     private let slideDuration: Double = 3.8
+    private let pauseHoldDelay: Double = 0.2
 
     @State private var index: Int = 0
     @State private var progress: Double = 0
@@ -30,8 +32,8 @@ struct MemorySlideshowView: View {
                         let cur  = photos[index]
 
                         // Previous (underneath) + current (fades in) for crossfade
-                        SlideshowImage(url: prev.url, geo: geo)
-                        SlideshowImage(url: cur.url, geo: geo)
+                        SlideshowImage(url: prev.url, size: geo.size)
+                        SlideshowImage(url: cur.url, size: geo.size)
                             .id(cur.id)
                             .transition(.opacity)
                     }
@@ -39,16 +41,14 @@ struct MemorySlideshowView: View {
             }
             .ignoresSafeArea()
 
-            // Tap-and-hold pause surface — full bleed
-            Color.clear
-                .contentShape(Rectangle())
-                .ignoresSafeArea()
-                .gesture(
-                    LongPressGesture(minimumDuration: 0.001)
-                        .sequenced(before: DragGesture(minimumDistance: 0))
-                        .onChanged { _ in isPaused = true }
-                        .onEnded { _ in isPaused = false }
-                )
+            // Tap zones: left-third = prev, right-third = next, anywhere = hold-to-pause.
+            // Full-bleed so gestures reach the screen edges.
+            HStack(spacing: 0) {
+                tapZone { goPrev() }
+                tapZone { /* middle: no-op, still holdable */ }
+                tapZone { goNext() }
+            }
+            .ignoresSafeArea()
 
             // Chrome stays inside safe area so the x / "See all" clear the
             // dynamic island and the caption clears the home indicator.
@@ -60,11 +60,30 @@ struct MemorySlideshowView: View {
         }
         .navigationBarBackButtonHidden(true)
         .toolbar(.hidden, for: .navigationBar)
+        .toolbar(.hidden, for: .tabBar)
         .navigationDestination(isPresented: $goToGrid) {
             MemoryGridView(memory: memory)
         }
         .onAppear { startTimer() }
         .onDisappear { stopTimer() }
+    }
+
+    // MARK: - Tap + hold zone
+
+    @ViewBuilder
+    private func tapZone(onTap: @escaping () -> Void) -> some View {
+        Color.clear
+            .contentShape(Rectangle())
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .onTapGesture { onTap() }
+            .onLongPressGesture(
+                minimumDuration: pauseHoldDelay,
+                maximumDistance: 50
+            ) {
+                isPaused = true
+            } onPressingChanged: { pressing in
+                if !pressing { isPaused = false }
+            }
     }
 
     // MARK: - Chrome
@@ -120,7 +139,10 @@ struct MemorySlideshowView: View {
     }
 
     private var bottomChrome: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        let total = max(photos.count, 1)
+        let overall = (Double(index) + min(progress, 1)) / Double(total)
+
+        return VStack(alignment: .leading, spacing: 6) {
             Text(memory.title)
                 .font(Design.serifItalic(28, weight: .medium))
                 .foregroundStyle(.white)
@@ -133,19 +155,14 @@ struct MemorySlideshowView: View {
                     .padding(.bottom, 8)
             }
 
-            HStack(spacing: 3) {
-                ForEach(photos.indices, id: \.self) { i in
-                    let fill: Double = i < index ? 1 : (i == index ? progress : 0)
-                    GeometryReader { geo in
-                        ZStack(alignment: .leading) {
-                            Capsule().fill(Color.white.opacity(0.22))
-                            Capsule().fill(Color.white)
-                                .frame(width: max(0, geo.size.width * CGFloat(fill)))
-                        }
-                    }
-                    .frame(height: 2.5)
+            GeometryReader { pg in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.white.opacity(0.22))
+                    Capsule().fill(Color.white)
+                        .frame(width: max(0, pg.size.width * CGFloat(overall)))
                 }
             }
+            .frame(height: 3)
 
             if isPaused {
                 Text("PAUSED · RELEASE TO RESUME")
@@ -164,6 +181,25 @@ struct MemorySlideshowView: View {
                 .ignoresSafeArea(edges: .bottom)
                 .allowsHitTesting(false)
         )
+    }
+
+    // MARK: - Navigation
+
+    private func goPrev() {
+        guard !photos.isEmpty else { return }
+        index = (index - 1 + photos.count) % photos.count
+        resetSlide()
+    }
+
+    private func goNext() {
+        guard !photos.isEmpty else { return }
+        index = (index + 1) % photos.count
+        resetSlide()
+    }
+
+    private func resetSlide() {
+        progress = 0
+        slideStart = Date()
     }
 
     // MARK: - Timer
@@ -197,23 +233,25 @@ struct MemorySlideshowView: View {
 
 private struct SlideshowImage: View {
     let url: URL
-    let geo: GeometryProxy
+    let size: CGSize
     @EnvironmentObject var manager: GalleryManager
     @State private var image: UIImage?
 
     var body: some View {
-        Group {
+        ZStack {
             if let image {
                 Image(uiImage: image)
                     .resizable()
-                    .aspectRatio(contentMode: .fill)
+                    .scaledToFill()
+                    .frame(width: size.width, height: size.height)
+                    .clipped()
+                    .brightness(-0.08)
             } else {
                 Color.black
             }
         }
-        .frame(width: geo.size.width, height: geo.size.height)
+        .frame(width: size.width, height: size.height)
         .clipped()
-        .brightness(-0.08)
         .task(id: url) {
             image = await manager.loadFullImage(for: url)
         }

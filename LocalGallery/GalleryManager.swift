@@ -36,6 +36,10 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
     }
 
     private var isEnriching = false
+    /// In-flight scan, keyed by URL. Concurrent callers for the same URL await
+    /// the existing task instead of starting a second traversal (app launch +
+    /// willEnterForeground + pull-to-refresh can otherwise overlap).
+    private var activeScanTask: (url: URL, task: Task<Void, Never>)?
     private var memoriesGeneratedDay: Date? {
         didSet { persistMemoriesGeneratedDay() }
     }
@@ -164,7 +168,10 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
 
     // MARK: - Disk Cache
 
-    private static let cacheVersion = 12
+    // v13: force rescan so video dates read AVAsset.creationDate (videos used to
+    // skip enrichment and fall back to the filesystem date, which often equals
+    // the download time on this device).
+    private static let cacheVersion = 15
 
     private struct LibraryCache: Codable, Sendable {
         let version: Int
@@ -189,6 +196,7 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
     private struct EnrichedResult: Sendable {
         let index: Int
         let dateTaken: Date?
+        let dateFromMetadata: Bool
         let hierarchicalTags: [HierarchicalTag]
         let countryCode: String?
         let gpsLatitude: Double?
@@ -380,10 +388,49 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         return (captureDate, hierarchicalTags, countryCode, gpsLat, gpsLon)
     }
 
-    /// Coerce a CGImageMetadataTag value (array of strings, or single string) into [String].
+    /// Pick the earlier of creation/modification dates. Handles AirDrop and
+    /// chat-saved files where the original modDate is preserved but creationDate
+    /// reflects the download time on this volume.
+    nonisolated static func earliestFilesystemDate(creation: Date?, modification: Date?) -> Date? {
+        switch (creation, modification) {
+        case let (c?, m?): return min(c, m)
+        case let (c?, nil): return c
+        case let (nil, m?): return m
+        case (nil, nil): return nil
+        }
+    }
+
+    /// Coerce a `CGImageMetadataTag` value into `[String]`.
+    ///
+    /// rdf:Bag / rdf:Seq values come back as `CFArray` of `CGImageMetadataTag`
+    /// (one per `<rdf:li>`), not `CFArray` of `CFString` — so `as? [String]`
+    /// silently yields `nil` and we'd lose every embedded hierarchical tag.
+    /// Recurse on each child via `CGImageMetadataTagCopyValue`.
     private nonisolated static func xmpStringArray(_ value: CFTypeRef) -> [String] {
-        if let array = value as? [String] { return array }
-        if let str = value as? String { return [str] }
+        let tagTypeID = CGImageMetadataTagGetTypeID()
+        if CFGetTypeID(value) == tagTypeID {
+            let tag = value as! CGImageMetadataTag
+            if let nested = CGImageMetadataTagCopyValue(tag) {
+                return xmpStringArray(nested)
+            }
+            return []
+        }
+        if CFGetTypeID(value) == CFArrayGetTypeID() {
+            let array = value as! CFArray
+            let count = CFArrayGetCount(array)
+            var out: [String] = []
+            out.reserveCapacity(count)
+            for i in 0..<count {
+                guard let raw = CFArrayGetValueAtIndex(array, i) else { continue }
+                let item = unsafeBitCast(raw, to: CFTypeRef.self)
+                out.append(contentsOf: xmpStringArray(item))
+            }
+            return out
+        }
+        if let str = value as? String {
+            let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? [] : [trimmed]
+        }
         return []
     }
 
@@ -437,6 +484,20 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
     // MARK: - Folder Scanning (Iterative)
 
     func scanFolder(at url: URL, silent: Bool = false) async {
+        if let active = activeScanTask, active.url == url {
+            await active.task.value
+            return
+        }
+        let task: Task<Void, Never> = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.performScan(at: url, silent: silent)
+        }
+        activeScanTask = (url, task)
+        await task.value
+        if activeScanTask?.task == task { activeScanTask = nil }
+    }
+
+    private func performScan(at url: URL, silent: Bool) async {
         if !silent { isScanning = true }
 
         // Snapshot cached metadata so we can merge it into the fresh scan
@@ -525,9 +586,11 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
 
                         // Merge cached EXIF metadata if available
                         let cached = cachedMetadata[file.url]
-                        // Prefer cached EXIF date; fall back to file creation date (not modDate,
-                        // which changes when metadata is rewritten and would misplace photos)
-                        let dateTaken = cached?.date ?? file.creationDate
+                        // Prefer cached EXIF date; fall back to earliest filesystem date.
+                        // creationDate = when the file appeared on THIS volume (e.g. download time);
+                        // modDate = sometimes preserved from the original file (AirDrop, chat saves).
+                        // min() picks the one closer to the actual photo date.
+                        let dateTaken = cached?.date ?? GalleryManager.earliestFilesystemDate(creation: file.creationDate, modification: file.modDate)
                         let tags = cached?.tags ?? []
                         let cachedEnrichedDate = cached?.enrichedFileDate
                         // Re-enrich if never enriched or file was modified since last enrichment
@@ -557,7 +620,8 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
                             let cached = cachedMetadata[file.url]
                             photos.append(PhotoFile(
                                 id: PhotoFile.stableID(for: file.url), url: file.url, filename: stem,
-                                fileSize: file.fileSize, dateTaken: cached?.date ?? file.creationDate ?? file.modDate,
+                                fileSize: file.fileSize,
+                                dateTaken: cached?.date ?? GalleryManager.earliestFilesystemDate(creation: file.creationDate, modification: file.modDate),
                                 isVideo: true
                             ))
                         }
@@ -657,9 +721,14 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         isScanning = false
         lastSyncedAt = Date()
 
-        // Enrich with EXIF dates and tags in background (only if needed)
+        // Enrich with EXIF dates and tags in background (only if needed).
+        // Memory generation is deferred until after enrichment so memories reflect the
+        // freshest EXIF dates / tags / GPS data.
         if result.needsEnrichment && !allPhotos.isEmpty {
             await enrichMetadata()
+            generateMemoriesIfNeeded()
+        } else {
+            generateMemoriesIfNeeded()
         }
     }
 
@@ -671,7 +740,7 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         defer { isEnriching = false }
 
         let photos = allPhotos
-        let staleCount = photos.filter { $0.enrichedFileDate == nil && !$0.isVideo }.count
+        let staleCount = photos.filter { $0.enrichedFileDate == nil }.count
         let startTime = CFAbsoluteTimeGetCurrent()
         Log.enrich.info("Starting metadata enrichment: \(staleCount) new/changed of \(photos.count) total")
 
@@ -683,7 +752,7 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         let enrichedPhotos: [PhotoFile] = await Task.detached(priority: .background) {
             let fm = FileManager.default
             var result = photos
-            let staleIndices = result.indices.filter { !result[$0].isVideo && result[$0].enrichedFileDate == nil }
+            let staleIndices = result.indices.filter { result[$0].enrichedFileDate == nil }
 
             // Enrich stale photos in parallel using TaskGroup
             let batchResults: [EnrichedResult] = await withTaskGroup(of: EnrichedResult?.self) { group in
@@ -691,21 +760,56 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
                     group.addTask {
                         guard !Task.isCancelled else { return nil }
                         let photo = result[idx]
+                        let modDate = (try? fm.attributesOfItem(atPath: photo.url.path)[.modificationDate]) as? Date
+
+                        if photo.isVideo {
+                            // Videos: use AVAsset.creationDate (embedded capture date)
+                            // in preference to filesystem dates, which often reflect
+                            // the download/AirDrop time rather than when the video
+                            // was actually recorded.
+                            var dateTaken = photo.dateTaken
+                            var dateFromMetadata = false
+                            if let avDate = await GalleryManager.readVideoDate(url: photo.url) {
+                                dateTaken = avDate
+                                dateFromMetadata = true
+                            } else if dateTaken == nil {
+                                let attrs = try? photo.url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
+                                dateTaken = GalleryManager.earliestFilesystemDate(
+                                    creation: attrs?.creationDate,
+                                    modification: attrs?.contentModificationDate
+                                )
+                            }
+                            return EnrichedResult(
+                                index: idx,
+                                dateTaken: dateTaken,
+                                dateFromMetadata: dateFromMetadata,
+                                hierarchicalTags: photo.hierarchicalTags,
+                                countryCode: photo.countryCode,
+                                gpsLatitude: photo.gpsLatitude,
+                                gpsLongitude: photo.gpsLongitude,
+                                enrichedFileDate: modDate ?? Date()
+                            )
+                        }
+
                         let metadata = GalleryManager.readImageMetadata(url: photo.url)
 
                         var dateTaken = photo.dateTaken
+                        var dateFromMetadata = false
                         if let date = metadata.date {
                             dateTaken = date
+                            dateFromMetadata = true
                         } else if dateTaken == nil {
                             let attrs = try? photo.url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
-                            dateTaken = attrs?.creationDate ?? attrs?.contentModificationDate
+                            dateTaken = GalleryManager.earliestFilesystemDate(
+                                creation: attrs?.creationDate,
+                                modification: attrs?.contentModificationDate
+                            )
                         }
-
-                        let modDate = (try? fm.attributesOfItem(atPath: photo.url.path)[.modificationDate]) as? Date
 
                         return EnrichedResult(
                             index: idx,
                             dateTaken: dateTaken,
+                            dateFromMetadata: dateFromMetadata,
                             hierarchicalTags: metadata.hierarchicalTags.isEmpty ? photo.hierarchicalTags : metadata.hierarchicalTags,
                             countryCode: metadata.countryCode ?? photo.countryCode,
                             gpsLatitude: metadata.gpsLatitude ?? photo.gpsLatitude,
@@ -729,6 +833,7 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
             var uniquePaths = Set<String>()
             for enriched in batchResults {
                 result[enriched.index].dateTaken = enriched.dateTaken
+                result[enriched.index].dateFromMetadata = enriched.dateFromMetadata
                 result[enriched.index].hierarchicalTags = enriched.hierarchicalTags
                 result[enriched.index].countryCode = enriched.countryCode
                 result[enriched.index].gpsLatitude = enriched.gpsLatitude
@@ -900,15 +1005,19 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
             }
         }
 
+    }
+
+    /// Trigger memory generation once per day. Called after scan (if no enrichment needed)
+    /// or after enrichment completes, so memories always reflect the freshest EXIF/tag/GPS data.
+    private func generateMemoriesIfNeeded() {
         let today = Calendar.current.startOfDay(for: Date())
         let memoriesStale = memoriesGeneratedDay.map { !Calendar.current.isDate($0, inSameDayAs: today) } ?? true
         let memoriesEmpty = memories.isEmpty
-        if (memoriesStale || memoriesEmpty) && !allPhotos.isEmpty {
-            memoriesGeneratedDay = today
-            let snapshot = allPhotos
-            let leaves = _cachedLeafFolders
-            Task { await generateMemories(from: snapshot, leafFolders: leaves) }
-        }
+        guard (memoriesStale || memoriesEmpty), !allPhotos.isEmpty else { return }
+        memoriesGeneratedDay = today
+        let snapshot = allPhotos
+        let leaves = _cachedLeafFolders
+        Task { await generateMemories(from: snapshot, leafFolders: leaves) }
     }
 
     func sortFolders(_ folders: [PhotoFolder]) -> [PhotoFolder] {
@@ -1040,8 +1149,70 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         memory.photoIDs.compactMap { _photoByID[$0] }
     }
 
+    /// One-shot diagnostic dump covering the inputs `generateMemories` consumes:
+    /// date provenance (embedded vs filesystem fallback), GPS coverage, People/*
+    /// tag coverage, and the densest single-day clusters. Helps identify bulk-
+    /// import date pollution and missing metadata.
+    private nonisolated static func logMemoryInputSummary(allPhotos: [PhotoFile]) {
+        let total = allPhotos.count
+        guard total > 0 else { return }
+
+        let withDate       = allPhotos.filter { $0.dateTaken != nil }
+        let fromMetadata   = allPhotos.filter { $0.dateFromMetadata }.count
+        let fallbackDate   = withDate.count - fromMetadata
+        let withGPS        = allPhotos.filter { $0.gpsLatitude != nil && $0.gpsLongitude != nil }.count
+        let withAnyTag     = allPhotos.filter { !$0.hierarchicalTags.isEmpty }.count
+
+        let peoplePhotos = allPhotos.filter { photo in
+            photo.hierarchicalTags.contains { $0.namespace?.lowercased() == "people" }
+        }
+        let personNameCounts = Dictionary(
+            peoplePhotos.flatMap { photo in
+                photo.hierarchicalTags
+                    .filter { $0.namespace?.lowercased() == "people" }
+                    .map { ($0.displayName, 1) }
+            },
+            uniquingKeysWith: +
+        )
+        let topPeople = personNameCounts
+            .sorted { $0.value > $1.value }
+            .prefix(5)
+            .map { "\($0.key)=\($0.value)" }
+            .joined(separator: ", ")
+
+        Log.memory.info("""
+            Input summary: \(total) photos total
+              dates: \(fromMetadata) from metadata, \(fallbackDate) filesystem fallback, \(total - withDate.count) missing
+              GPS: \(withGPS) photos
+              tags: \(withAnyTag) tagged, \(peoplePhotos.count) with People/*, \(personNameCounts.count) unique names
+              top People: \(topPeople.isEmpty ? "(none)" : topPeople)
+            """)
+
+        // Top 5 densest single days — smoking gun for bulk-import clustering.
+        let cal = Calendar.current
+        struct DayStat { var total = 0; var fromMetadata = 0 }
+        var byDay: [DateComponents: DayStat] = [:]
+        for photo in withDate {
+            guard let date = photo.dateTaken else { continue }
+            let key = cal.dateComponents([.year, .month, .day], from: date)
+            var stat = byDay[key, default: DayStat()]
+            stat.total += 1
+            if photo.dateFromMetadata { stat.fromMetadata += 1 }
+            byDay[key] = stat
+        }
+        let densest = byDay.sorted { $0.value.total > $1.value.total }.prefix(5)
+        let dayLines = densest.map { (k, s) -> String in
+            let y = k.year ?? 0, m = k.month ?? 0, d = k.day ?? 0
+            return String(format: "%04d-%02d-%02d: %d photos (%d from metadata, %d fallback)",
+                          y, m, d, s.total, s.fromMetadata, s.total - s.fromMetadata)
+        }
+        Log.memory.info("Top 5 densest days:\n  \(dayLines.joined(separator: "\n  "))")
+    }
+
     private func generateMemories(from allPhotos: [PhotoFile], leafFolders: [PhotoFolder]) async {
         let t = CFAbsoluteTimeGetCurrent()
+
+        Self.logMemoryInputSummary(allPhotos: allPhotos)
 
         let results: [Memory] = await Task.detached(priority: .utility) {
             let calendar = Calendar.current
@@ -1192,6 +1363,21 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
 
             // === 6. Trip Detection ===
             Self.generateTripMemories(from: photosWithDates, calendar: calendar, today: today, into: &candidates)
+
+            // Cap per-memory photo count to keep slideshow/grid responsive.
+            // Sample evenly across the range to preserve temporal spread.
+            let maxPhotosPerMemory = 50
+            candidates = candidates.map { mem in
+                guard mem.photoIDs.count > maxPhotosPerMemory else { return mem }
+                let step = Double(mem.photoIDs.count) / Double(maxPhotosPerMemory)
+                let sampled = (0..<maxPhotosPerMemory).map { mem.photoIDs[Int(Double($0) * step)] }
+                return Memory(
+                    id: mem.id, type: mem.type, title: mem.title, subtitle: mem.subtitle,
+                    photoIDs: sampled, coverPhotoID: mem.coverPhotoID,
+                    dateRange: mem.dateRange, score: mem.score,
+                    yearsAgo: mem.yearsAgo, personName: mem.personName
+                )
+            }
 
             // Sort by score, then greedily select top 15 with overlap penalty
             candidates.sort { $0.score > $1.score }

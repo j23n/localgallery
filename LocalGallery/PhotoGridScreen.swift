@@ -23,6 +23,7 @@ struct PhotoGridScreen: View {
     @State private var query: String = ""
     @State private var activeTags: [TagSuggestion] = []
     @State private var scrollToTopTrigger = false
+    @FocusState private var searchFocused: Bool
 
     // Viewer
     @State private var viewerPhoto: PhotoFile?
@@ -44,39 +45,34 @@ struct PhotoGridScreen: View {
     // Slideshow navigation
     @State private var goToSlideshow = false
 
+    // Cached filter results — recomputed off-main when inputs change.
+    // Keeping these in @State (instead of computed properties) means body
+    // evaluations don't re-sort/re-filter 20k photos on every keystroke
+    // or focus change.
+    @State private var filtered: [PhotoFile] = []
+    @State private var sectionsCache: [PhotoSection] = []
+    @State private var yearsCache: [(year: String, sectionID: String)] = []
+
     private var grid: GridLayoutConfig { GridLayoutConfig(sizeTier: sizeTier) }
 
-    private var filteredPhotos: [PhotoFile] {
-        var list = photos
-        if !activeTags.isEmpty {
-            let required = Set(activeTags.map { $0.fullPath.lowercased() })
-            list = list.filter { photo in
-                let tags = Set(photo.hierarchicalTags.map { $0.fullPath.lowercased() })
-                return required.isSubset(of: tags)
-            }
-        }
-        if !query.trimmingCharacters(in: .whitespaces).isEmpty {
-            let q = query.lowercased()
-            list = list.filter { photo in
-                photo.filename.lowercased().contains(q) ||
-                photo.hierarchicalTags.contains { $0.fullPath.lowercased().contains(q) || $0.displayName.lowercased().contains(q) }
-            }
-        }
-        return list
+    // Cheap identity for the photos input: count + first/last date catches
+    // both re-scans (count changes) and enrichment (dates change).
+    private struct FilterKey: Equatable {
+        let count: Int
+        let firstDate: Date?
+        let lastDate: Date?
+        let query: String
+        let activeTagIDs: [String]
     }
 
-    private var sections: [PhotoSection] {
-        PhotoSection.group(filteredPhotos)
-    }
-
-    private var years: [(year: String, sectionID: String)] {
-        var out: [(String, String)] = []
-        var seen = Set<String>()
-        for s in sections where s.id != "unknown" {
-            let y = String(s.id.prefix(4))
-            if !seen.contains(y) { seen.insert(y); out.append((y, s.id)) }
-        }
-        return out
+    private var filterKey: FilterKey {
+        FilterKey(
+            count: photos.count,
+            firstDate: photos.first?.dateTaken,
+            lastDate: photos.last?.dateTaken,
+            query: query.trimmingCharacters(in: .whitespaces),
+            activeTagIDs: activeTags.map(\.id)
+        )
     }
 
     private var suggestions: [TagSuggestion] {
@@ -110,7 +106,7 @@ struct PhotoGridScreen: View {
                         }
                     }
 
-                    if filteredPhotos.isEmpty {
+                    if filtered.isEmpty {
                         ContentUnavailableView(
                             "No photos match.",
                             systemImage: "photo.stack"
@@ -118,7 +114,7 @@ struct PhotoGridScreen: View {
                         .padding(.top, 48)
                     } else {
                         LazyVGrid(columns: grid.columns(for: width), spacing: 2, pinnedViews: [.sectionHeaders]) {
-                            ForEach(sections) { section in
+                            ForEach(sectionsCache) { section in
                                 Section {
                                     ForEach(section.photos) { photo in
                                         gridCell(photo: photo, cellSize: cell)
@@ -144,10 +140,11 @@ struct PhotoGridScreen: View {
                         Color.clear.frame(height: 72)
                     }
                 }
+                .scrollDismissesKeyboard(.interactively)
                 .refreshable { await manager.rescan() }
                 .overlay(alignment: .trailing) {
-                    if years.count > 1 && !selectMode {
-                        YearScrubber(years: years) { sectionID in
+                    if yearsCache.count > 1 && !selectMode {
+                        YearScrubber(years: yearsCache) { sectionID in
                             withAnimation { proxy.scrollTo(sectionID, anchor: .top) }
                         }
                     }
@@ -163,8 +160,11 @@ struct PhotoGridScreen: View {
         .background(Design.bg)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { toolbarContent }
+        .task(id: filterKey) {
+            await recomputeFilter()
+        }
         .fullScreenCover(item: $viewerPhoto) { photo in
-            PhotoViewerView(photos: filteredPhotos, initialPhoto: photo)
+            PhotoViewerView(photos: filtered, initialPhoto: photo)
                 .id(viewerID)
         }
         .sheet(isPresented: $showSettings) { SettingsView() }
@@ -271,11 +271,23 @@ struct PhotoGridScreen: View {
                 .tint(Design.accentColor)
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.never)
+                .focused($searchFocused)
+                .submitLabel(.done)
+                .onSubmit { searchFocused = false }
             if !query.isEmpty {
-                Button { query = "" } label: {
+                Button {
+                    query = ""
+                    searchFocused = false
+                } label: {
                     Image(systemName: "xmark.circle.fill")
                         .foregroundStyle(Design.ink3)
                 }
+            } else if searchFocused {
+                Button("Done") {
+                    searchFocused = false
+                }
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Design.accentColor)
             }
         }
         .padding(.horizontal, 12)
@@ -435,7 +447,7 @@ struct PhotoGridScreen: View {
     private var selectBottomBar: some View {
         HStack {
             Button {
-                let urls = filteredPhotos.filter { selected.contains($0.id) }.map(\.url)
+                let urls = filtered.filter { selected.contains($0.id) }.map(\.url)
                 guard !urls.isEmpty else { return }
                 shareURLs = urls
             } label: {
@@ -459,13 +471,13 @@ struct PhotoGridScreen: View {
             Spacer()
 
             Button {
-                if selected.count == filteredPhotos.count {
+                if selected.count == filtered.count {
                     selected.removeAll()
                 } else {
-                    selected = Set(filteredPhotos.map(\.id))
+                    selected = Set(filtered.map(\.id))
                 }
             } label: {
-                Text(selected.count == filteredPhotos.count && !filteredPhotos.isEmpty ? "Deselect All" : "Select All")
+                Text(selected.count == filtered.count && !filtered.isEmpty ? "Deselect All" : "Select All")
                     .font(.system(size: 15, weight: .medium))
                     .foregroundStyle(Design.accentColor)
             }
@@ -481,6 +493,55 @@ struct PhotoGridScreen: View {
         }
     }
 
+    // MARK: - Filter & sort (off-main)
+
+    /// Sort + filter + group the photos input off the main thread, then publish
+    /// to @State. Called by `.task(id: filterKey)` — SwiftUI will cancel the
+    /// previous task when inputs change, so only the latest result is applied.
+    @MainActor
+    private func recomputeFilter() async {
+        let snapshotPhotos = photos
+        let snapshotQuery = query.trimmingCharacters(in: .whitespaces).lowercased()
+        let snapshotTagPaths = activeTags.map { $0.fullPath.lowercased() }
+
+        let result: (filtered: [PhotoFile], sections: [PhotoSection], years: [(String, String)]) =
+        await Task.detached(priority: .userInitiated) {
+            // Filter first (cheap), then sort (expensive — once per input change).
+            var list = snapshotPhotos
+            if !snapshotTagPaths.isEmpty {
+                let required = Set(snapshotTagPaths)
+                list = list.filter { photo in
+                    let tags = Set(photo.hierarchicalTags.map { $0.fullPath.lowercased() })
+                    return required.isSubset(of: tags)
+                }
+            }
+            if !snapshotQuery.isEmpty {
+                list = list.filter { photo in
+                    if photo.filename.lowercased().contains(snapshotQuery) { return true }
+                    for tag in photo.hierarchicalTags {
+                        if tag.fullPath.lowercased().contains(snapshotQuery) { return true }
+                        if tag.displayName.lowercased().contains(snapshotQuery) { return true }
+                    }
+                    return false
+                }
+            }
+            let sorted = list.sorted { ($0.dateTaken ?? .distantPast) > ($1.dateTaken ?? .distantPast) }
+            let secs = PhotoSection.group(presorted: sorted)
+            var years: [(String, String)] = []
+            var seen = Set<String>()
+            for s in secs where s.id != "unknown" {
+                let y = String(s.id.prefix(4))
+                if !seen.contains(y) { seen.insert(y); years.append((y, s.id)) }
+            }
+            return (sorted, secs, years)
+        }.value
+
+        // Drop the result if inputs have moved on since we started.
+        guard !Task.isCancelled else { return }
+        self.filtered = result.filtered
+        self.sectionsCache = result.sections
+        self.yearsCache = result.years
+    }
 }
 
 // MARK: - Section model
@@ -491,7 +552,12 @@ struct PhotoSection: Identifiable {
     let photos: [PhotoFile]
 
     static func group(_ photos: [PhotoFile]) -> [PhotoSection] {
-        let sorted = photos.sorted { ($0.dateTaken ?? .distantPast) > ($1.dateTaken ?? .distantPast) }
+        group(presorted: photos.sorted { ($0.dateTaken ?? .distantPast) > ($1.dateTaken ?? .distantPast) })
+    }
+
+    /// Group an array that is already sorted newest-first by dateTaken — skips
+    /// the sort pass so the caller can reuse a pre-sorted array.
+    static func group(presorted sorted: [PhotoFile]) -> [PhotoSection] {
         let cal = Calendar.current
         let fmt = DateFormatter()
         fmt.dateFormat = "MMMM yyyy"

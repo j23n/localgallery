@@ -302,12 +302,47 @@ struct PhotoViewerView: View {
 
 // MARK: - Zoomable Image (UIScrollView-based)
 
+/// Custom UIScrollView that re-fits its image subview whenever bounds change.
+/// Without this, the initial `makeUIView` call runs before the scrollView has
+/// been laid out, so bounds are zero and the imageView frame stays zero —
+/// the viewer comes up black until the user zooms or swipes. SwiftUI does
+/// not guarantee a follow-up `updateUIView` call purely from a layout pass,
+/// so we drive the re-fit from UIKit.
+final class ZoomingScrollView: UIScrollView {
+    weak var imageView: UIImageView?
+    private var lastLaidOutBounds: CGSize = .zero
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard let imageView, imageView.image != nil else { return }
+        // Only re-fit when bounds change AND the user hasn't zoomed in —
+        // otherwise a scroll/zoom gesture would fight with automatic fitting.
+        if bounds.size != lastLaidOutBounds, zoomScale == minimumZoomScale {
+            lastLaidOutBounds = bounds.size
+            fitImage()
+        }
+    }
+
+    func fitImage() {
+        guard let imageView, let image = imageView.image else { return }
+        let b = bounds
+        guard b.width > 0, b.height > 0 else { return }
+        let fit = min(b.width / image.size.width, b.height / image.size.height)
+        let size = CGSize(width: image.size.width * fit, height: image.size.height * fit)
+        imageView.frame = CGRect(origin: .zero, size: size)
+        contentSize = size
+        let xOffset = max(0, (b.width - size.width) / 2)
+        let yOffset = max(0, (b.height - size.height) / 2)
+        imageView.center = CGPoint(x: size.width / 2 + xOffset, y: size.height / 2 + yOffset)
+    }
+}
+
 struct ZoomableImageView: UIViewRepresentable {
     let image: UIImage
     var onSingleTap: () -> Void = {}
 
-    func makeUIView(context: Context) -> UIScrollView {
-        let scrollView = UIScrollView()
+    func makeUIView(context: Context) -> ZoomingScrollView {
+        let scrollView = ZoomingScrollView()
         scrollView.delegate = context.coordinator
         scrollView.minimumZoomScale = 1.0
         scrollView.maximumZoomScale = 5.0
@@ -322,6 +357,7 @@ struct ZoomableImageView: UIViewRepresentable {
         imageView.frame = .zero
         imageView.tag = 100
         scrollView.addSubview(imageView)
+        scrollView.imageView = imageView
 
         // Double-tap to zoom
         let doubleTap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleDoubleTap(_:)))
@@ -337,45 +373,18 @@ struct ZoomableImageView: UIViewRepresentable {
         return scrollView
     }
 
-    func updateUIView(_ scrollView: UIScrollView, context: Context) {
+    func updateUIView(_ scrollView: ZoomingScrollView, context: Context) {
         context.coordinator.onSingleTap = onSingleTap
-        guard let imageView = scrollView.viewWithTag(100) as? UIImageView else { return }
+        guard let imageView = scrollView.imageView else { return }
         if imageView.image !== image {
             imageView.image = image
             scrollView.zoomScale = 1.0
-            layoutImageView(imageView, in: scrollView)
-        } else if imageView.frame.size == .zero {
-            layoutImageView(imageView, in: scrollView)
+            scrollView.fitImage()
         }
     }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(onSingleTap: onSingleTap)
-    }
-
-    private func layoutImageView(_ imageView: UIImageView, in scrollView: UIScrollView) {
-        guard let image = imageView.image else { return }
-        let bounds = scrollView.bounds
-        guard bounds.width > 0, bounds.height > 0 else { return }
-        let imageSize = image.size
-        let widthScale = bounds.width / imageSize.width
-        let heightScale = bounds.height / imageSize.height
-        let fitScale = min(widthScale, heightScale)
-        let fittedSize = CGSize(width: imageSize.width * fitScale, height: imageSize.height * fitScale)
-        imageView.frame = CGRect(origin: .zero, size: fittedSize)
-        scrollView.contentSize = fittedSize
-        centerImageView(imageView, in: scrollView)
-    }
-
-    func centerImageView(_ imageView: UIView, in scrollView: UIScrollView) {
-        let boundsSize = scrollView.bounds.size
-        let contentSize = scrollView.contentSize
-        let xOffset = max(0, (boundsSize.width - contentSize.width) / 2)
-        let yOffset = max(0, (boundsSize.height - contentSize.height) / 2)
-        imageView.center = CGPoint(
-            x: contentSize.width / 2 + xOffset,
-            y: contentSize.height / 2 + yOffset
-        )
     }
 
     class Coordinator: NSObject, UIScrollViewDelegate {

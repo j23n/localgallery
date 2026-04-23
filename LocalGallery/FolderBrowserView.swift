@@ -3,6 +3,10 @@ import SwiftUI
 struct FolderBrowserView: View {
     @EnvironmentObject var manager: GalleryManager
     var folder: PhotoFolder? = nil
+    /// Only the root tab should show the gear. Child browsers leave it off.
+    var isRoot: Bool = true
+
+    @State private var showSettings = false
 
     private var displayFolder: PhotoFolder? {
         folder ?? manager.rootFolder
@@ -21,6 +25,13 @@ struct FolderBrowserView: View {
         .navigationTitle(displayFolder?.name ?? "Folders")
         .navigationBarTitleDisplayMode(folder == nil ? .large : .inline)
         .toolbar {
+            if isRoot {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button { showSettings = true } label: {
+                        Image(systemName: "gear")
+                    }
+                }
+            }
             if displayFolder != nil && !(displayFolder?.subfolders.isEmpty ?? true) {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
@@ -35,6 +46,7 @@ struct FolderBrowserView: View {
                 }
             }
         }
+        .sheet(isPresented: $showSettings) { SettingsView() }
     }
 
     private var emptyState: some View {
@@ -82,7 +94,7 @@ struct FolderBrowserView: View {
                                     photos: subfolder.photos
                                 )
                             } else {
-                                FolderBrowserView(folder: subfolder)
+                                FolderBrowserView(folder: subfolder, isRoot: false)
                             }
                         } label: {
                             folderRow(subfolder)

@@ -14,8 +14,8 @@ struct AllPhotosView: View {
             } else {
                 PhotoGridScreen(
                     title: "All Photos",
-                    subtitle: "\(manager.allPhotos.count) photos",
-                    photos: manager.allPhotos,
+                    subtitle: "\(manager.sortedPhotos.count) photos",
+                    photos: manager.sortedPhotos,
                     isRoot: true,
                     showSearch: true
                 )

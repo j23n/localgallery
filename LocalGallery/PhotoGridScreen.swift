@@ -33,9 +33,6 @@ struct PhotoGridScreen: View {
     @State private var selectMode = false
     @State private var selected: Set<UUID> = []
 
-    // Long-press menu
-    @State private var photoMenu: PhotoFile?
-
     // Share sheet (share an arbitrary list of URLs)
     @State private var shareURLs: [URL]?
 
@@ -177,26 +174,6 @@ struct PhotoGridScreen: View {
         .navigationDestination(isPresented: $goToSlideshow) {
             if let m = playableMemory {
                 MemorySlideshowView(memory: m)
-            }
-        }
-        .confirmationDialog(
-            photoMenu?.filename ?? "",
-            isPresented: Binding(get: { photoMenu != nil }, set: { if !$0 { photoMenu = nil } }),
-            titleVisibility: .visible
-        ) {
-            if let p = photoMenu {
-                Button("Open") {
-                    viewerID = UUID()
-                    viewerPhoto = p
-                }
-                Button("Share") {
-                    shareURLs = [p.url]
-                }
-                if let person = featureContextPerson {
-                    Button("Set as featured image") {
-                        manager.setFeaturedPhoto(personPath: person.fullPath, photoID: p.id)
-                    }
-                }
             }
         }
     }
@@ -379,8 +356,27 @@ struct PhotoGridScreen: View {
                 viewerPhoto = photo
             }
         }
-        .onLongPressGesture {
-            if !selectMode { photoMenu = photo }
+        .contextMenu {
+            if !selectMode {
+                Button {
+                    viewerID = UUID()
+                    viewerPhoto = photo
+                } label: {
+                    Label("Open", systemImage: "eye")
+                }
+                Button {
+                    shareURLs = [photo.url]
+                } label: {
+                    Label("Share", systemImage: "square.and.arrow.up")
+                }
+                if let person = featureContextPerson {
+                    Button {
+                        manager.setFeaturedPhoto(personPath: person.fullPath, photoID: photo.id)
+                    } label: {
+                        Label("Set as featured image", systemImage: "star")
+                    }
+                }
+            }
         }
     }
 

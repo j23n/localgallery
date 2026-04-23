@@ -17,13 +17,20 @@ struct FolderBrowserView: View {
             if manager.isScanning {
                 ProgressView("Scanning folder…")
             } else if let folder = displayFolder {
-                folderContent(folder)
+                if isRoot {
+                    VStack(alignment: .leading, spacing: 0) {
+                        titleHeader(folder.name)
+                        folderContent(folder)
+                    }
+                } else {
+                    folderContent(folder)
+                }
             } else {
                 emptyState
             }
         }
-        .navigationTitle(displayFolder?.name ?? "Folders")
-        .navigationBarTitleDisplayMode(folder == nil ? .large : .inline)
+        .navigationTitle(isRoot ? "" : (displayFolder?.name ?? ""))
+        .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if isRoot {
                 ToolbarItem(placement: .topBarLeading) {
@@ -47,6 +54,17 @@ struct FolderBrowserView: View {
             }
         }
         .sheet(isPresented: $showSettings) { SettingsView() }
+    }
+
+    private func titleHeader(_ name: String) -> some View {
+        Text(name)
+            .font(.system(size: 30, weight: .semibold))
+            .tracking(-0.6)
+            .foregroundStyle(Design.ink)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 20)
+            .padding(.top, 8)
+            .padding(.bottom, 6)
     }
 
     private var emptyState: some View {

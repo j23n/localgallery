@@ -3,11 +3,9 @@ import SwiftUI
 struct CollectionsView: View {
     @EnvironmentObject var manager: GalleryManager
     @State private var showSettings = false
-    @State private var personMenu: TagSuggestion?
-    @State private var memoryMenu: Memory?
 
-    // Navigation targets (state-driven, since NavigationLink inside confirmationDialog is unreliable)
-    @State private var navTag: TagSuggestion?
+    // Navigation target for "View photos" action — context menu dispatches via state
+    // because navigating from inside a menu button closure isn't reliable otherwise.
     @State private var navMemory: Memory?
 
     // Memory-to-video share state
@@ -29,8 +27,7 @@ struct CollectionsView: View {
             }
         }
         .background(Design.bg)
-        .navigationTitle("Collections")
-        .navigationBarTitleDisplayMode(.large)
+        .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
                 Button { showSettings = true } label: { Image(systemName: "gear") }
@@ -53,35 +50,6 @@ struct CollectionsView: View {
             Button("OK", role: .cancel) { }
         } message: {
             Text(renderError ?? "")
-        }
-        .confirmationDialog(
-            personMenu?.displayName ?? "",
-            isPresented: Binding(get: { personMenu != nil }, set: { if !$0 { personMenu = nil } }),
-            titleVisibility: .visible
-        ) {
-            if let p = personMenu {
-                let isFeatured = manager.isFeatured(p.fullPath)
-                Button(isFeatured ? "Unfeature" : "Feature") {
-                    manager.toggleFeaturePerson(p.fullPath)
-                }
-                Button("Hide", role: .destructive) {
-                    manager.hidePerson(p.fullPath)
-                }
-            }
-        }
-        .confirmationDialog(
-            memoryMenu?.title ?? "",
-            isPresented: Binding(get: { memoryMenu != nil }, set: { if !$0 { memoryMenu = nil } }),
-            titleVisibility: .visible
-        ) {
-            if let m = memoryMenu {
-                Button("View photos") { navMemory = m }
-                Button("Share slideshow video") { startRender(memory: m) }
-                Button("Hide memory", role: .destructive) { manager.hideMemory(m.id) }
-            }
-        }
-        .navigationDestination(item: $navTag) { tag in
-            TagGridView(tag: tag)
         }
         .navigationDestination(item: $navMemory) { memory in
             MemoryGridView(memory: memory)
@@ -149,6 +117,8 @@ struct CollectionsView: View {
     private var collectionsBody: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
+                titleHeader
+
                 let memories = manager.visibleMemories
                 if !memories.isEmpty {
                     sectionHeader("Memories", systemIcon: "sparkles", accent: true)
@@ -171,6 +141,17 @@ struct CollectionsView: View {
             .padding(.bottom, 24)
         }
         .background(Design.bg)
+    }
+
+    private var titleHeader: some View {
+        Text("Collections")
+            .font(.system(size: 30, weight: .semibold))
+            .tracking(-0.6)
+            .foregroundStyle(Design.ink)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 20)
+            .padding(.top, 8)
+            .padding(.bottom, 6)
     }
 
     // MARK: - Pieces
@@ -202,7 +183,23 @@ struct CollectionsView: View {
                         MemoryCardView(memory: memory)
                     }
                     .buttonStyle(.plain)
-                    .onLongPressGesture { memoryMenu = memory }
+                    .contextMenu {
+                        Button {
+                            navMemory = memory
+                        } label: {
+                            Label("View photos", systemImage: "square.grid.2x2")
+                        }
+                        Button {
+                            startRender(memory: memory)
+                        } label: {
+                            Label("Share slideshow video", systemImage: "square.and.arrow.up")
+                        }
+                        Button(role: .destructive) {
+                            manager.hideMemory(memory.id)
+                        } label: {
+                            Label("Hide memory", systemImage: "eye.slash")
+                        }
+                    }
                 }
             }
             .padding(.horizontal, 20)
@@ -227,7 +224,20 @@ struct CollectionsView: View {
                                 PersonCard(tag: person, featured: manager.isFeatured(person.fullPath))
                             }
                             .buttonStyle(.plain)
-                            .onLongPressGesture { personMenu = person }
+                            .contextMenu {
+                                let isFeatured = manager.isFeatured(person.fullPath)
+                                Button {
+                                    manager.toggleFeaturePerson(person.fullPath)
+                                } label: {
+                                    Label(isFeatured ? "Unfeature" : "Feature",
+                                          systemImage: isFeatured ? "star.slash" : "star")
+                                }
+                                Button(role: .destructive) {
+                                    manager.hidePerson(person.fullPath)
+                                } label: {
+                                    Label("Hide", systemImage: "eye.slash")
+                                }
+                            }
                         }
                         if pair.count == 1 {
                             Color.clear.frame(width: 128, height: 128)

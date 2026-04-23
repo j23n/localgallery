@@ -125,7 +125,7 @@ struct PhotoGridScreen: View {
                                         .padding(.horizontal, 20)
                                         .padding(.top, 14)
                                         .padding(.bottom, 6)
-                                        .background(Design.bg)
+                                        .background(.ultraThinMaterial)
                                         .id(section.id)
                                 }
                             }
@@ -138,6 +138,7 @@ struct PhotoGridScreen: View {
                     }
                 }
                 .scrollDismissesKeyboard(.interactively)
+                .softTopScrollEdge()
                 .refreshable { await manager.rescan() }
                 .overlay(alignment: .trailing) {
                     if yearsCache.count > 1 && !selectMode {

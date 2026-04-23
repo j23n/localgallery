@@ -29,6 +29,19 @@ enum Design {
     }
 }
 
+extension View {
+    /// Soft gradient fade at the top edge of the enclosing scroll view so
+    /// content dissolves into the nav bar (iOS 26+ — no-op on older OSes).
+    @ViewBuilder
+    func softTopScrollEdge() -> some View {
+        if #available(iOS 26.0, *) {
+            self.scrollEdgeEffectStyle(.soft, for: .top)
+        } else {
+            self
+        }
+    }
+}
+
 @main
 struct LocalGalleryApp: App {
     @StateObject private var galleryManager = GalleryManager()
@@ -49,21 +62,22 @@ struct LocalGalleryApp: App {
     private func configureAppearance() {
         let bg = UIColor(Design.bg)
 
-        // Nav bar: warm canvas, no hairline
-        let nav = UINavigationBarAppearance()
-        nav.configureWithOpaqueBackground()
-        nav.backgroundColor = bg
-        nav.shadowColor = .clear
-        nav.titleTextAttributes = [.foregroundColor: UIColor(Design.ink)]
-        nav.largeTitleTextAttributes = [
-            .foregroundColor: UIColor(Design.ink),
-            .font: UIFont.systemFont(ofSize: 34, weight: .semibold)
-        ]
-        UINavigationBar.appearance().standardAppearance = nav
-        UINavigationBar.appearance().scrollEdgeAppearance = nav
-        UINavigationBar.appearance().compactAppearance = nav
-        UINavigationBar.appearance().compactScrollEdgeAppearance = nav
-        UINavigationBar.appearance().prefersLargeTitles = true
+        // Nav bar: transparent at scroll edge, translucent blur when content scrolls under.
+        // Matches stock apps (Photos, Messages) — no opaque band.
+        let navStandard = UINavigationBarAppearance()
+        navStandard.configureWithDefaultBackground()
+        navStandard.shadowColor = .clear
+        navStandard.titleTextAttributes = [.foregroundColor: UIColor(Design.ink)]
+
+        let navEdge = UINavigationBarAppearance()
+        navEdge.configureWithTransparentBackground()
+        navEdge.shadowColor = .clear
+        navEdge.titleTextAttributes = [.foregroundColor: UIColor(Design.ink)]
+
+        UINavigationBar.appearance().standardAppearance = navStandard
+        UINavigationBar.appearance().scrollEdgeAppearance = navEdge
+        UINavigationBar.appearance().compactAppearance = navStandard
+        UINavigationBar.appearance().compactScrollEdgeAppearance = navEdge
 
         // Tab bar: warm translucent
         let tab = UITabBarAppearance()

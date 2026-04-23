@@ -174,7 +174,7 @@ struct PhotoFolder: Identifiable, Codable, Sendable {
 
 // MARK: - Memory
 
-enum MemoryType: String, Sendable {
+enum MemoryType: String, Codable, Sendable {
     case onThisDay
     case yearsAgo
     case personOverTime
@@ -183,7 +183,7 @@ enum MemoryType: String, Sendable {
     case trip
 }
 
-struct Memory: Identifiable, Hashable, Sendable {
+struct Memory: Identifiable, Hashable, Codable, Sendable {
     let id: String            // deterministic key, e.g. "onThisDay", "yearsAgo-5"
     let type: MemoryType
     let title: String

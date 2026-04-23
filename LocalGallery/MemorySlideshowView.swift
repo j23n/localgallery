@@ -19,40 +19,45 @@ struct MemorySlideshowView: View {
     private var photos: [PhotoFile] { manager.photos(for: memory) }
 
     var body: some View {
-        GeometryReader { geo in
-            ZStack {
-                Color.black.ignoresSafeArea()
+        ZStack {
+            // Full-bleed photo stage — sits behind safe area
+            GeometryReader { geo in
+                ZStack {
+                    Color.black
 
-                if !photos.isEmpty {
-                    let prev = photos[(index - 1 + photos.count) % photos.count]
-                    let cur  = photos[index]
+                    if !photos.isEmpty {
+                        let prev = photos[(index - 1 + photos.count) % photos.count]
+                        let cur  = photos[index]
 
-                    // Previous (underneath) + current (fades in) for crossfade
-                    SlideshowImage(url: prev.url, geo: geo)
-                    SlideshowImage(url: cur.url, geo: geo)
-                        .id(cur.id)
-                        .transition(.opacity)
+                        // Previous (underneath) + current (fades in) for crossfade
+                        SlideshowImage(url: prev.url, geo: geo)
+                        SlideshowImage(url: cur.url, geo: geo)
+                            .id(cur.id)
+                            .transition(.opacity)
+                    }
                 }
+            }
+            .ignoresSafeArea()
 
-                // Tap-and-hold pause surface
-                Color.clear
-                    .contentShape(Rectangle())
-                    .gesture(
-                        LongPressGesture(minimumDuration: 0.001)
-                            .sequenced(before: DragGesture(minimumDistance: 0))
-                            .onChanged { _ in isPaused = true }
-                            .onEnded { _ in isPaused = false }
-                    )
+            // Tap-and-hold pause surface — full bleed
+            Color.clear
+                .contentShape(Rectangle())
+                .ignoresSafeArea()
+                .gesture(
+                    LongPressGesture(minimumDuration: 0.001)
+                        .sequenced(before: DragGesture(minimumDistance: 0))
+                        .onChanged { _ in isPaused = true }
+                        .onEnded { _ in isPaused = false }
+                )
 
-                VStack {
-                    topBar
-                    Spacer()
-                    bottomChrome
-                }
-                .ignoresSafeArea(edges: .bottom)
+            // Chrome stays inside safe area so the x / "See all" clear the
+            // dynamic island and the caption clears the home indicator.
+            VStack {
+                topBar
+                Spacer()
+                bottomChrome
             }
         }
-        .statusBarHidden(true)
         .navigationBarBackButtonHidden(true)
         .toolbar(.hidden, for: .navigationBar)
         .navigationDestination(isPresented: $goToGrid) {
@@ -109,6 +114,7 @@ struct MemorySlideshowView: View {
         .background(
             LinearGradient(colors: [Color.black.opacity(0.55), .clear],
                            startPoint: .top, endPoint: .bottom)
+                .ignoresSafeArea(edges: .top)
                 .allowsHitTesting(false)
         )
     }
@@ -151,10 +157,11 @@ struct MemorySlideshowView: View {
         }
         .padding(.horizontal, 20)
         .padding(.top, 40)
-        .padding(.bottom, 30)
+        .padding(.bottom, 16)
         .background(
             LinearGradient(colors: [.clear, Color.black.opacity(0.72)],
                            startPoint: .top, endPoint: .bottom)
+                .ignoresSafeArea(edges: .bottom)
                 .allowsHitTesting(false)
         )
     }

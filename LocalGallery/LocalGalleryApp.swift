@@ -55,10 +55,15 @@ struct LocalGalleryApp: App {
         nav.backgroundColor = bg
         nav.shadowColor = .clear
         nav.titleTextAttributes = [.foregroundColor: UIColor(Design.ink)]
-        nav.largeTitleTextAttributes = [.foregroundColor: UIColor(Design.ink)]
+        nav.largeTitleTextAttributes = [
+            .foregroundColor: UIColor(Design.ink),
+            .font: UIFont.systemFont(ofSize: 34, weight: .semibold)
+        ]
         UINavigationBar.appearance().standardAppearance = nav
         UINavigationBar.appearance().scrollEdgeAppearance = nav
         UINavigationBar.appearance().compactAppearance = nav
+        UINavigationBar.appearance().compactScrollEdgeAppearance = nav
+        UINavigationBar.appearance().prefersLargeTitles = true
 
         // Tab bar: warm translucent
         let tab = UITabBarAppearance()

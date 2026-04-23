@@ -22,15 +22,23 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
     @Published var hiddenPeople: Set<String> = [] {
         didSet { UserDefaults.standard.set(Array(hiddenPeople), forKey: "hiddenPeople") }
     }
-    @Published var pinnedPeople: [String] = [] {
-        didSet { UserDefaults.standard.set(pinnedPeople, forKey: "pinnedPeople") }
+    /// Person tag paths that are "featured" — sorted to the front of the People rail
+    /// and decorated with a star. Stored under the legacy `pinnedPeople` key.
+    @Published var featuredPeople: [String] = [] {
+        didSet { UserDefaults.standard.set(featuredPeople, forKey: "pinnedPeople") }
     }
     @Published var hiddenMemories: Set<String> = [] {
         didSet { UserDefaults.standard.set(Array(hiddenMemories), forKey: "hiddenMemories") }
     }
+    /// Per-person featured photo ID. Keyed by person tag fullPath (case-sensitive).
+    @Published var featuredPhotoByPerson: [String: UUID] = [:] {
+        didSet { persistFeaturedPhotoByPerson() }
+    }
 
     private var isEnriching = false
-    private var memoriesGeneratedDate: Date?
+    private var memoriesGeneratedDay: Date? {
+        didSet { persistMemoriesGeneratedDay() }
+    }
     private let thumbnailCache = NSCache<NSURL, UIImage>()
     private let fullImageCache = NSCache<NSURL, UIImage>()
     private let bookmarkKey = "rootFolderBookmark"
@@ -49,6 +57,11 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
             .appendingPathComponent("library_cache.json")
     }
 
+    private var memoriesCacheURL: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("memories_cache.json")
+    }
+
     init() {
         thumbnailCache.totalCostLimit = 100 * 1024 * 1024
         fullImageCache.totalCostLimit = 200 * 1024 * 1024
@@ -61,11 +74,18 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
             hiddenPeople = Set(hidden)
         }
         if let pinned = UserDefaults.standard.array(forKey: "pinnedPeople") as? [String] {
-            pinnedPeople = pinned
+            featuredPeople = pinned
         }
         if let hiddenMem = UserDefaults.standard.array(forKey: "hiddenMemories") as? [String] {
             hiddenMemories = Set(hiddenMem)
         }
+        if let dict = UserDefaults.standard.dictionary(forKey: "featuredPhotoByPerson") as? [String: String] {
+            featuredPhotoByPerson = dict.compactMapValues { UUID(uuidString: $0) }
+        }
+        if let raw = UserDefaults.standard.object(forKey: "memoriesGeneratedDay") as? Date {
+            memoriesGeneratedDay = raw
+        }
+        loadMemoriesCache()
 
         // Load cache + start security scope synchronously so cached
         // URLs are accessible before the first SwiftUI render
@@ -188,6 +208,45 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
                 Log.cache.error("Failed to save cache: \(error.localizedDescription)")
             }
         }
+    }
+
+    private func saveMemoriesCache() {
+        let url = memoriesCacheURL
+        let snapshot = memories
+        Task.detached(priority: .utility) {
+            do {
+                let data = try JSONEncoder().encode(snapshot)
+                try data.write(to: url, options: .atomic)
+            } catch {
+                Log.cache.error("Failed to save memories cache: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func loadMemoriesCache() {
+        guard FileManager.default.fileExists(atPath: memoriesCacheURL.path) else { return }
+        do {
+            let data = try Data(contentsOf: memoriesCacheURL)
+            let cached = try JSONDecoder().decode([Memory].self, from: data)
+            self.memories = cached
+            Log.cache.info("Loaded \(cached.count) memories from cache")
+        } catch {
+            Log.cache.warning("Failed to load memories cache: \(error.localizedDescription)")
+            try? FileManager.default.removeItem(at: memoriesCacheURL)
+        }
+    }
+
+    private func persistMemoriesGeneratedDay() {
+        if let day = memoriesGeneratedDay {
+            UserDefaults.standard.set(day, forKey: "memoriesGeneratedDay")
+        } else {
+            UserDefaults.standard.removeObject(forKey: "memoriesGeneratedDay")
+        }
+    }
+
+    private func persistFeaturedPhotoByPerson() {
+        let stringDict = featuredPhotoByPerson.mapValues { $0.uuidString }
+        UserDefaults.standard.set(stringDict, forKey: "featuredPhotoByPerson")
     }
 
     @discardableResult
@@ -817,7 +876,8 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
                 .map { TagSuggestion(id: $0.tag.fullPath.lowercased(), displayName: $0.tag.displayName, fullPath: $0.tag.fullPath, namespace: $0.tag.namespace, count: $0.count) }
                 .sorted { $0.count > $1.count }
 
-            // Pre-compute top people
+            // Sort people by recent-activity then count. Show all people, not just 8 —
+            // pinning / featuring happens downstream in visiblePeople.
             let peopleTags = tags.filter { $0.namespace?.lowercased() == "people" }
             let oneYearAgo = Calendar.current.date(byAdding: .year, value: -1, to: Date()) ?? Date()
             let scoredPeople: [(tag: TagSuggestion, hasRecent: Bool)] = peopleTags.map { person in
@@ -825,25 +885,26 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
                 let hasRecent = photos.contains { ($0.dateTaken ?? .distantPast) > oneYearAgo }
                 return (person, hasRecent)
             }
-            let computedTopPeople = scoredPeople
+            let computedPeople = scoredPeople
                 .sorted { a, b in
                     if a.hasRecent != b.hasRecent { return a.hasRecent }
                     return a.tag.count > b.tag.count
                 }
-                .prefix(8)
                 .map(\.tag)
 
             await MainActor.run { [weak self] in
                 guard let self, self.tagBuildGeneration == generation else { return }
                 self.allTags = tags
-                self.topPeople = computedTopPeople
-                Log.index.info("Tags: \(tags.count) unique, \(computedTopPeople.count) top people")
+                self.topPeople = computedPeople
+                Log.index.info("Tags: \(tags.count) unique, \(computedPeople.count) people")
             }
         }
 
         let today = Calendar.current.startOfDay(for: Date())
-        if memoriesGeneratedDate != today && !allPhotos.isEmpty {
-            memoriesGeneratedDate = today
+        let memoriesStale = memoriesGeneratedDay.map { !Calendar.current.isDate($0, inSameDayAs: today) } ?? true
+        let memoriesEmpty = memories.isEmpty
+        if (memoriesStale || memoriesEmpty) && !allPhotos.isEmpty {
+            memoriesGeneratedDay = today
             let snapshot = allPhotos
             let leaves = _cachedLeafFolders
             Task { await generateMemories(from: snapshot, leafFolders: leaves) }
@@ -907,13 +968,14 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         allTags.filter { $0.namespace?.lowercased() == "people" }
     }
 
-    /// top people with hidden filtered out and pinned floated to the front (preserves pin order)
+    /// All people with hidden filtered out and featured floated to the front
+    /// (preserves feature order).
     var visiblePeople: [TagSuggestion] {
         let visible = topPeople.filter { !hiddenPeople.contains($0.fullPath) }
-        let pinnedSet = Set(pinnedPeople)
-        let pinnedFirst = pinnedPeople.compactMap { path in visible.first { $0.fullPath == path } }
-        let rest = visible.filter { !pinnedSet.contains($0.fullPath) }
-        return pinnedFirst + rest
+        let featuredSet = Set(featuredPeople)
+        let featuredFirst = featuredPeople.compactMap { path in visible.first { $0.fullPath == path } }
+        let rest = visible.filter { !featuredSet.contains($0.fullPath) }
+        return featuredFirst + rest
     }
 
     var visibleMemories: [Memory] {
@@ -927,19 +989,36 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
 
     func hidePerson(_ path: String) {
         hiddenPeople.insert(path)
-        pinnedPeople.removeAll { $0 == path }
+        featuredPeople.removeAll { $0 == path }
     }
 
     func unhidePerson(_ path: String) {
         hiddenPeople.remove(path)
     }
 
-    func togglePinPerson(_ path: String) {
-        if let idx = pinnedPeople.firstIndex(of: path) {
-            pinnedPeople.remove(at: idx)
+    func isFeatured(_ path: String) -> Bool {
+        featuredPeople.contains(path)
+    }
+
+    func toggleFeaturePerson(_ path: String) {
+        if let idx = featuredPeople.firstIndex(of: path) {
+            featuredPeople.remove(at: idx)
         } else {
-            pinnedPeople.append(path)
+            featuredPeople.append(path)
         }
+    }
+
+    /// The photo chosen as the card image for a person, or the most recent tagged
+    /// photo if none was explicitly set.
+    func featuredPhoto(for tag: TagSuggestion) -> PhotoFile? {
+        if let id = featuredPhotoByPerson[tag.fullPath], let photo = _photoByID[id] {
+            return photo
+        }
+        return photos(forTag: tag).first
+    }
+
+    func setFeaturedPhoto(personPath: String, photoID: UUID) {
+        featuredPhotoByPerson[personPath] = photoID
     }
 
     func hideMemory(_ id: String) { hiddenMemories.insert(id) }
@@ -1133,6 +1212,7 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
 
         let elapsed = (CFAbsoluteTimeGetCurrent() - t) * 1000
         self.memories = results
+        saveMemoriesCache()
         Log.memory.info("Generated \(results.count) memories in \(String(format: "%.0f", elapsed))ms")
     }
 

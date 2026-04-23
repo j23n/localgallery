@@ -14,6 +14,8 @@ struct PhotoGridScreen: View {
     var showSearch: Bool = false
     /// When present, shows a "Play" button in the toolbar to jump into slideshow.
     var playableMemory: Memory? = nil
+    /// When set, photo long-press offers "Set as featured image" for this person.
+    var featureContextPerson: TagSuggestion? = nil
 
     @EnvironmentObject var manager: GalleryManager
     @AppStorage("gridSizeTier") private var sizeTier: Int = 0
@@ -189,6 +191,11 @@ struct PhotoGridScreen: View {
                 }
                 Button("Share") {
                     shareURLs = [p.url]
+                }
+                if let person = featureContextPerson {
+                    Button("Set as featured image") {
+                        manager.setFeaturedPhoto(personPath: person.fullPath, photoID: p.id)
+                    }
                 }
             }
         }

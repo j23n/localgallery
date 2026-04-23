@@ -30,6 +30,7 @@ struct CollectionsView: View {
         }
         .background(Design.bg)
         .navigationTitle("Collections")
+        .navigationBarTitleDisplayMode(.large)
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
                 Button { showSettings = true } label: { Image(systemName: "gear") }
@@ -59,10 +60,9 @@ struct CollectionsView: View {
             titleVisibility: .visible
         ) {
             if let p = personMenu {
-                let isPinned = manager.pinnedPeople.contains(p.fullPath)
-                Button("View all photos") { navTag = p }
-                Button(isPinned ? "Unpin from top" : "Pin to top") {
-                    manager.togglePinPerson(p.fullPath)
+                let isFeatured = manager.isFeatured(p.fullPath)
+                Button(isFeatured ? "Unfeature" : "Feature") {
+                    manager.toggleFeaturePerson(p.fullPath)
                 }
                 Button("Hide", role: .destructive) {
                     manager.hidePerson(p.fullPath)
@@ -224,7 +224,7 @@ struct CollectionsView: View {
                             NavigationLink {
                                 TagGridView(tag: person)
                             } label: {
-                                PersonCard(tag: person, pinned: manager.pinnedPeople.contains(person.fullPath))
+                                PersonCard(tag: person, featured: manager.isFeatured(person.fullPath))
                             }
                             .buttonStyle(.plain)
                             .onLongPressGesture { personMenu = person }
@@ -346,11 +346,16 @@ struct TagGridView: View {
         manager.search(query: "", requiredTags: [tag])
     }
 
+    private var isPersonTag: Bool {
+        tag.namespace?.lowercased() == "people"
+    }
+
     var body: some View {
         PhotoGridScreen(
             title: tag.displayName,
             subtitle: tag.fullPath.replacingOccurrences(of: "/", with: " › "),
-            photos: photos
+            photos: photos,
+            featureContextPerson: isPersonTag ? tag : nil
         )
     }
 }
@@ -359,16 +364,16 @@ struct TagGridView: View {
 
 struct PersonCard: View {
     let tag: TagSuggestion
-    let pinned: Bool
+    let featured: Bool
     @EnvironmentObject var manager: GalleryManager
 
-    private var featured: PhotoFile? {
-        manager.photos(forTag: tag).first
+    private var coverPhoto: PhotoFile? {
+        manager.featuredPhoto(for: tag)
     }
 
     var body: some View {
         ZStack(alignment: .bottomLeading) {
-            if let photo = featured {
+            if let photo = coverPhoto {
                 ThumbnailView(url: photo.url, size: 128)
                     .frame(width: 128, height: 128)
                     .clipped()
@@ -388,12 +393,12 @@ struct PersonCard: View {
                 endPoint: .bottom
             )
 
-            if pinned {
+            if featured {
                 Circle()
                     .fill(Color.black.opacity(0.45))
                     .frame(width: 20, height: 20)
                     .overlay {
-                        Image(systemName: "pin.fill")
+                        Image(systemName: "star.fill")
                             .font(.system(size: 9, weight: .bold))
                             .foregroundStyle(.white)
                     }

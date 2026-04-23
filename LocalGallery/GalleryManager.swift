@@ -1007,6 +1007,16 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
 
     }
 
+    /// Clear the once-per-day gate + cached memories and immediately re-run detection.
+    /// Wired to a long-press on the "Memories" section header in CollectionsView.
+    func forceRegenerateMemories() {
+        memoriesGeneratedDay = nil
+        memories = []
+        try? FileManager.default.removeItem(at: memoriesCacheURL)
+        Log.memory.info("Force-regenerating memories")
+        generateMemoriesIfNeeded()
+    }
+
     /// Trigger memory generation once per day. Called after scan (if no enrichment needed)
     /// or after enrichment completes, so memories always reflect the freshest EXIF/tag/GPS data.
     private func generateMemoriesIfNeeded() {
@@ -1461,7 +1471,16 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         let ids = sorted.map(\.0.id)
         let tripKey = "\(calendar.component(.year, from: first))-\(calendar.component(.month, from: first))-\(calendar.component(.day, from: first))"
 
-        let title = tripLabel(for: sorted.map(\.0)) ?? "A trip \(relDate)"
+        let locationLabel = tripLabel(for: sorted.map(\.0))
+        let title: String
+        if let locationLabel {
+            title = "A trip to \(locationLabel) \(relDate)"
+        } else {
+            title = "A trip \(relDate)"
+            let sampleTags = sorted.prefix(3).flatMap { $0.0.hierarchicalTags.map(\.fullPath) }
+            let sampleCountries = sorted.prefix(3).compactMap { $0.0.countryCode }
+            Log.memory.debug("Trip \(tripKey): no location label. sampleTags=\(sampleTags) countryCodes=\(sampleCountries)")
+        }
 
         candidates.append(Memory(
             id: "trip-\(tripKey)", type: .trip,
@@ -1574,7 +1593,10 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         let years = calendar.dateComponents([.year], from: date, to: today).year ?? 0
         if years == 0 {
             let months = calendar.dateComponents([.month], from: date, to: today).month ?? 0
-            return months <= 1 ? "last month" : "\(months) months ago"
+            if months == 0 { return "earlier this month" }
+            let fmt = DateFormatter()
+            fmt.setLocalizedDateFormatFromTemplate("MMMM")
+            return "last \(fmt.string(from: date))"
         } else if years == 1 {
             return "a year ago"
         } else {

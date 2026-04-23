@@ -122,6 +122,10 @@ struct CollectionsView: View {
                 let memories = manager.visibleMemories
                 if !memories.isEmpty {
                     sectionHeader("Memories", systemIcon: "sparkles", accent: true)
+                        .contentShape(Rectangle())
+                        .onLongPressGesture(minimumDuration: 0.6) {
+                            manager.forceRegenerateMemories()
+                        }
                     memoriesRail(memories)
                 }
 

@@ -375,19 +375,15 @@ struct CollectionsView: View {
     }
 
     /// Label for the person → contact link context-menu entry. Reflects the
-    /// current state so the menu doubles as status.
+    /// current state so the menu doubles as status. Goes through
+    /// `manager.linkState` so we don't re-scan the contacts array per render.
     private func linkContextLabel(_ person: TagSuggestion) -> String {
-        if let id = manager.personContactLinks[person.fullPath] {
-            if id.isEmpty { return "Birthdays disabled" }
-            if let c = manager.contacts.first(where: { $0.id == id }) {
-                return "Linked: \(c.fullName)"
-            }
-            return "Link to Contact"
+        switch manager.linkState(forPersonPath: person.fullPath, displayName: person.displayName) {
+        case .unlinked:           return "Link to Contact"
+        case .disabled:           return "Birthdays disabled"
+        case .manual(let c):      return "Linked: \(c.fullName)"
+        case .auto(let c):        return "Auto: \(c.fullName)"
         }
-        if let auto = manager.contacts.first(where: { $0.fullName.lowercased() == person.displayName.lowercased() }) {
-            return "Auto: \(auto.fullName)"
-        }
-        return "Link to Contact"
     }
 
     private func eventDateRange(_ folder: PhotoFolder) -> String? {

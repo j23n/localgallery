@@ -21,8 +21,9 @@ struct ContactLinkSheet: View {
 
     private var auto: ContactInfo? {
         // Show what the auto-match would resolve to, even if a manual override
-        // is in place — useful for the "Reset to auto" footer.
-        manager.contacts.first { $0.fullName.lowercased() == person.displayName.lowercased() }
+        // is in place — useful for the "Reset to auto" footer. Goes through the
+        // pre-built lower-name index so this is O(1) per render.
+        manager.autoMatchedContact(displayName: person.displayName)
     }
 
     private var filteredContacts: [ContactInfo] {
@@ -334,17 +335,20 @@ struct LinkedContactsList: View {
     }
 
     private var rows: [Row] {
+        // Resolve every person tag through the manager's index-backed
+        // `linkState` accessor so this is O(people) rather than
+        // O(people × contacts).
         manager.peopleTags.map { person in
-            let path = person.fullPath
-            if let manual = manager.personContactLinks[path] {
-                if manual.isEmpty {
-                    return Row(person: person, contact: nil, isManual: true, isExplicitlyDisabled: true)
-                }
-                let contact = manager.contacts.first { $0.id == manual }
-                return Row(person: person, contact: contact, isManual: true, isExplicitlyDisabled: false)
+            switch manager.linkState(forPersonPath: person.fullPath, displayName: person.displayName) {
+            case .unlinked:
+                return Row(person: person, contact: nil, isManual: false, isExplicitlyDisabled: false)
+            case .disabled:
+                return Row(person: person, contact: nil, isManual: true, isExplicitlyDisabled: true)
+            case .manual(let c):
+                return Row(person: person, contact: c, isManual: true, isExplicitlyDisabled: false)
+            case .auto(let c):
+                return Row(person: person, contact: c, isManual: false, isExplicitlyDisabled: false)
             }
-            let auto = manager.contacts.first { $0.fullName.lowercased() == person.displayName.lowercased() }
-            return Row(person: person, contact: auto, isManual: false, isExplicitlyDisabled: false)
         }
         .sorted { lhs, rhs in
             // Linked-with-birthday-today first, then linked, then auto-matched, then unlinked

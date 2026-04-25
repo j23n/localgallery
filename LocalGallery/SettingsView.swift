@@ -103,18 +103,18 @@ struct SettingsView: View {
     }
 
     /// One-line summary of linked / auto-matched contacts for the Settings row.
+    /// Uses `linkState` so we don't linear-scan `manager.contacts` per person on
+    /// every body re-evaluation (which fires whenever any @Published on the
+    /// manager ticks).
     private var linkedContactsSummary: String {
-        let manualCount = manager.personContactLinks.values.filter { !$0.isEmpty }.count
-        let autoCount = manager.peopleTags.filter { person in
-            // Auto-match only — exclude any manual override (including the
-            // "" disabled sentinel).
-            guard manager.personContactLinks[person.fullPath] == nil else { return false }
-            let target = person.displayName.lowercased()
-            return manager.contacts.contains { $0.fullName.lowercased() == target }
-        }.count
-        let total = manualCount + autoCount
-        if total == 0 { return "None" }
-        return "\(total)"
+        var total = 0
+        for person in manager.peopleTags {
+            switch manager.linkState(forPersonPath: person.fullPath, displayName: person.displayName) {
+            case .manual, .auto: total += 1
+            case .disabled, .unlinked: break
+            }
+        }
+        return total == 0 ? "None" : "\(total)"
     }
 
     private var appVersion: String {

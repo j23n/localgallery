@@ -314,14 +314,20 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
     /// First-write wins so the address book's order determines which homonym
     /// auto-matches. Manual links via `personContactLinks` always override.
     private var _contactsByLowerName: [String: ContactInfo] = [:]
+    /// CNContact.identifier → contact. Avoids linear scans when resolving a
+    /// manual link to its target contact in `effectiveContact`.
+    private var _contactByID: [String: ContactInfo] = [:]
 
     private func rebuildContactsByLowerName() {
-        var idx: [String: ContactInfo] = [:]
+        var byName: [String: ContactInfo] = [:]
+        var byID: [String: ContactInfo] = [:]
         for c in contacts {
+            byID[c.id] = c
             let key = c.fullName.lowercased()
-            if idx[key] == nil { idx[key] = c }
+            if byName[key] == nil { byName[key] = c }
         }
-        _contactsByLowerName = idx
+        _contactsByLowerName = byName
+        _contactByID = byID
     }
 
     // MARK: - Contacts
@@ -373,12 +379,42 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
     /// Effective contact for a person tag: manual link if present, otherwise
     /// the auto-match by case-insensitive equality of `displayName` to
     /// `<given> <family>`. Returns `nil` when the user explicitly unlinked.
+    /// Both lookups go through hash-based indexes (`_contactByID`,
+    /// `_contactsByLowerName`) so this is O(1) — safe to call from view bodies.
     func effectiveContact(forPersonPath path: String, displayName: String) -> ContactInfo? {
         if let id = personContactLinks[path] {
             if id.isEmpty { return nil }
-            return contacts.first { $0.id == id }
+            return _contactByID[id]
         }
         return _contactsByLowerName[displayName.lowercased()]
+    }
+
+    /// Resolved link state for a person tag — what the UI should display.
+    /// Computed from `personContactLinks` + the contact indexes, so callers
+    /// don't reimplement the auto-match rule (and the linear scan that comes
+    /// with it) in their bodies.
+    enum PersonLinkState: Equatable {
+        case unlinked          // no manual link, no auto match
+        case disabled          // user explicitly disabled (no birthdays)
+        case manual(ContactInfo)
+        case auto(ContactInfo)
+    }
+
+    func linkState(forPersonPath path: String, displayName: String) -> PersonLinkState {
+        if let id = personContactLinks[path] {
+            if id.isEmpty { return .disabled }
+            if let c = _contactByID[id] { return .manual(c) }
+            return .unlinked  // dangling reference (contact deleted)
+        }
+        if let auto = _contactsByLowerName[displayName.lowercased()] { return .auto(auto) }
+        return .unlinked
+    }
+
+    /// The auto-match contact for a person tag, ignoring any manual override.
+    /// Used by the link sheet to surface "Reset to auto-match: <name>" even
+    /// when a manual link is currently set.
+    func autoMatchedContact(displayName: String) -> ContactInfo? {
+        _contactsByLowerName[displayName.lowercased()]
     }
 
     /// True when the user has explicitly unlinked this person (so the UI shows
@@ -1186,8 +1222,10 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
 
     /// Background-task entry point. Refreshes contacts (in case the user added
     /// or edited birthdays since the app last ran) and runs the once-a-day
-    /// memory regeneration. The day-gate inside `generateMemoriesIfNeeded`
-    /// short-circuits if the foreground app already generated today's batch.
+    /// memory regeneration if the foreground app hasn't already done so today.
+    /// We can't reuse `generateMemoriesIfNeeded` directly because it spawns an
+    /// unawaited Task — and we need to await completion so iOS knows when to
+    /// mark the BG task as finished.
     func runScheduledMemoryRefresh() async {
         await loadContacts()
         // We don't rescan the photo library in background — folder bookmarks
@@ -1198,9 +1236,17 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
             Log.bg.info("No photos in memory; skipping background memory generation")
             return
         }
-        // Force a regeneration so today's birthdays surface even if the day
-        // gate was set during a previous session.
-        memoriesGeneratedDay = nil
+        // Honor the same once-per-day gate the foreground path uses, AND set
+        // the gate after running so the next foreground entry doesn't re-do
+        // the same work. Without this we'd regenerate twice per day on any
+        // session where BG ran first.
+        let today = Calendar.current.startOfDay(for: Date())
+        let alreadyToday = memoriesGeneratedDay.map { Calendar.current.isDate($0, inSameDayAs: today) } ?? false
+        if alreadyToday {
+            Log.bg.info("Memories already generated today; skipping BG regeneration")
+            return
+        }
+        memoriesGeneratedDay = today
         let snapshot = allPhotos
         let leaves = _cachedLeafFolders
         await generateMemories(from: snapshot, leafFolders: leaves)

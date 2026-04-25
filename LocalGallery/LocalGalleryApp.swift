@@ -103,12 +103,15 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 
         let work = Task { @MainActor in
             // GalleryManager.shared is set inside `GalleryManager.init`, which
-            // SwiftUI runs once the App's StateObject is constructed at launch.
-            // That happens during didFinishLaunchingWithOptions, before any BG
-            // handler invocation — so the accessor resolves even when SwiftUI
-            // never gets around to rendering a scene.
+            // SwiftUI invokes lazily the first time the WindowGroup body
+            // evaluates. On a true background-only launch SwiftUI may never
+            // build a scene, in which case `shared` is nil and we no-op. That's
+            // acceptable: the next foreground entry runs the same generation
+            // via `generateMemoriesIfNeeded` (the foreground catch-up path).
+            // Constructing the manager from AppDelegate would fix this but
+            // would also tie the SwiftUI environment to an external instance.
             guard let manager = GalleryManager.shared else {
-                Log.bg.warning("No active GalleryManager; nothing to do")
+                Log.bg.warning("No active GalleryManager (background-only launch); nothing to do")
                 return
             }
             await manager.runScheduledMemoryRefresh()

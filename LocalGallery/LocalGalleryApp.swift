@@ -58,8 +58,8 @@ enum OrientationLock {
         current = mask
         guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene else { return }
         if let orientation, mask.contains(orientationMask(for: orientation)) {
-            let geo = UIWindowSceneGeometryPreferencesIOS(interfaceOrientations: orientationMask(for: orientation))
-            scene.requestGeometryUpdate(geo) { _ in }
+            let prefs = UIWindowScene.GeometryPreferences.iOS(interfaceOrientations: orientationMask(for: orientation))
+            scene.requestGeometryUpdate(prefs) { _ in }
         }
         scene.keyWindow?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
     }

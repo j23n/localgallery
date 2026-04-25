@@ -196,7 +196,7 @@ struct PhotoToolsMetadata: Equatable, Sendable {
     }
 }
 
-struct PhotoFolder: Identifiable, Codable, Sendable {
+struct PhotoFolder: Identifiable, Codable, Sendable, Hashable {
     let id: UUID
     let url: URL
     var name: String

@@ -221,7 +221,6 @@ private struct HierarchicalTagFlowView: View {
                     Text(tag.fullPath)
                         .font(.caption)
                         .fontWeight(.medium)
-                        .lineLimit(1)
                 } icon: {
                     Image(systemName: TagNamespace.icon(for: tag.namespace))
                         .font(.system(size: 9))

@@ -162,6 +162,7 @@ enum OrientationLock {
 struct LocalGalleryApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var galleryManager = GalleryManager()
+    @StateObject private var router = AppRouter()
 
     init() {
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
@@ -172,7 +173,11 @@ struct LocalGalleryApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(galleryManager)
+                .environmentObject(router)
                 .tint(Design.accentColor)
+                .onOpenURL { url in
+                    router.handle(url, manager: galleryManager)
+                }
         }
     }
 
@@ -208,26 +213,33 @@ struct LocalGalleryApp: App {
 
 struct ContentView: View {
     @EnvironmentObject var manager: GalleryManager
-    /// Path for the Collections tab. Lives at the tab root so CollectionsView
-    /// can replace the slideshow in the stack with the grid view (so back from
-    /// the grid skips the slideshow and returns to Collections).
-    @State private var collectionsPath: [CollectionsRoute] = []
+    @EnvironmentObject var router: AppRouter
 
     var body: some View {
-        TabView {
-            NavigationStack {
+        TabView(selection: $router.selectedTab) {
+            NavigationStack(path: $router.foldersPath) {
                 FolderBrowserView()
+                    .navigationDestination(for: FolderRoute.self) { route in
+                        switch route {
+                        case .browser(let folder):
+                            FolderBrowserView(folder: folder, isRoot: false)
+                        case .grid(let folder):
+                            FolderGridView(title: folder.name, photos: folder.photos)
+                        }
+                    }
             }
             .tabItem {
                 Label("Folders", systemImage: "folder")
             }
+            .tag(AppRouter.Tab.folders)
 
-            NavigationStack(path: $collectionsPath) {
-                CollectionsView(path: $collectionsPath)
+            NavigationStack(path: $router.collectionsPath) {
+                CollectionsView(path: $router.collectionsPath)
             }
             .tabItem {
                 Label("Collections", systemImage: "rectangle.stack")
             }
+            .tag(AppRouter.Tab.collections)
 
             NavigationStack {
                 AllPhotosView()
@@ -235,6 +247,7 @@ struct ContentView: View {
             .tabItem {
                 Label("Photos", systemImage: "square.stack.3d.up")
             }
+            .tag(AppRouter.Tab.photos)
         }
         .task {
             await manager.restoreFolder()

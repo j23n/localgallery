@@ -143,6 +143,13 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
             startAccessingFolder(url)
         }
 
+        // Republish the widget snapshot from whatever's in cache so widgets
+        // installed before today's first scan completes have something to render.
+        if !allPhotos.isEmpty {
+            lastWidgetExportDay = Calendar.current.startOfDay(for: Date())
+            exportWidgetSnapshot()
+        }
+
         // Rescan when app returns to foreground (e.g. user added files in Files app)
         foregroundObserver = NotificationCenter.default.addObserver(
             forName: UIApplication.willEnterForegroundNotification,
@@ -155,10 +162,32 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
                 if let url = self.activeSecurityScopedURL {
                     await self.scanFolder(at: url, silent: true)
                 }
+                // Day rolled over while the app was backgrounded? Re-export so
+                // the Memories widget gets fresh "On this day" content even if
+                // no scan happened.
+                self.refreshWidgetIfDayChanged()
             }
         }
 
         _isInitializing = false
+    }
+
+    /// Tracks the calendar day that produced the last widget export. When the
+    /// app re-foregrounds on a new day we rebuild the snapshot so birthdays /
+    /// "On this day" become valid without waiting for a scan.
+    private var lastWidgetExportDay: Date?
+
+    private func refreshWidgetIfDayChanged() {
+        let today = Calendar.current.startOfDay(for: Date())
+        if let last = lastWidgetExportDay, Calendar.current.isDate(last, inSameDayAs: today) {
+            return
+        }
+        lastWidgetExportDay = today
+        // Memories generation is gated to once per day; force a rebuild so
+        // today's onThisDay / yearsAgo / birthday content is current.
+        if !allPhotos.isEmpty {
+            forceRegenerateMemories()
+        }
     }
 
     deinit {
@@ -895,6 +924,9 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         } else {
             generateMemoriesIfNeeded()
         }
+
+        // Refresh the widget snapshot after the scan/enrichment pass settles.
+        exportWidgetSnapshot()
     }
 
     /// Read EXIF dates and hierarchical tags for all photos in the background.
@@ -1209,6 +1241,9 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
                 self.allTags = tags
                 self.topPeople = computedPeople
                 Log.index.info("Tags: \(tags.count) unique, \(computedPeople.count) people")
+                // Tag aggregation populates the widget Tags picker — re-export
+                // so the catalog reflects the latest set.
+                self.exportWidgetSnapshot()
             }
         }
 
@@ -1395,6 +1430,45 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
 
     func hideMemory(_ id: String) { hiddenMemories.insert(id) }
     func unhideMemory(_ id: String) { hiddenMemories.remove(id) }
+
+    // MARK: - Widget Snapshot
+
+    /// Build a widget snapshot from current state and hand it to the exporter.
+    /// Cheap to call: the exporter de-duplicates work and only re-encodes
+    /// thumbnails whose source files changed.
+    ///
+    /// Birthday resolution happens here on the main actor — we walk every
+    /// People/* tag through `effectiveContact(forPersonPath:displayName:)` so
+    /// both manual links and the auto-match-by-name fallback are honored, and
+    /// keep `Contacts.framework` out of the exporter.
+    func exportWidgetSnapshot() {
+        let cal = Calendar.current
+        let today = cal.dateComponents([.month, .day], from: Date())
+        var birthdays: [WidgetSnapshotExporter.BirthdayResolution] = []
+        if birthdayMemoriesEnabled {
+            for tag in allTags where tag.namespace?.lowercased() == "people" {
+                guard let contact = effectiveContact(forPersonPath: tag.fullPath, displayName: tag.displayName),
+                      let birthday = contact.birthday,
+                      birthday.month == today.month, birthday.day == today.day else { continue }
+                let displayName = contact.fullName == "(No name)" ? tag.displayName : contact.fullName
+                birthdays.append(WidgetSnapshotExporter.BirthdayResolution(
+                    tagFullPath: tag.fullPath,
+                    displayName: displayName
+                ))
+            }
+        }
+        let inputs = WidgetSnapshotExporter.Inputs(
+            allPhotos: allPhotos,
+            memories: memories,
+            allTags: allTags,
+            rootFolder: rootFolder,
+            leafFolders: _cachedLeafFolders,
+            todayBirthdays: birthdays
+        )
+        Task.detached(priority: .utility) {
+            await WidgetSnapshotExporter.shared.export(inputs)
+        }
+    }
 
     var leafFolders: [PhotoFolder] { _cachedLeafFolders }
 
@@ -1697,6 +1771,11 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         self.memories = results
         saveMemoriesCache()
         Log.memory.info("Generated \(results.count) memories in \(String(format: "%.0f", elapsed))ms")
+
+        // Memories changed → refresh the widget snapshot so the Memories widget
+        // picks up new "On this day" / "Years ago" content the same day they
+        // become valid.
+        exportWidgetSnapshot()
     }
 
     // MARK: Birthday Detection

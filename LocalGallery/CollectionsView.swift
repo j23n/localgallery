@@ -1,12 +1,17 @@
 import SwiftUI
 
+/// Typed nav stack values for the Collections tab. Hosting the path at the
+/// tab root lets the slideshow's "See all" replace itself with the grid view —
+/// so back-from-grid returns to Collections, not to the slideshow.
+enum CollectionsRoute: Hashable {
+    case slideshow(Memory)
+    case memoryGrid(Memory)
+}
+
 struct CollectionsView: View {
+    @Binding var path: [CollectionsRoute]
     @EnvironmentObject var manager: GalleryManager
     @State private var showSettings = false
-
-    // Navigation target for "View photos" action — context menu dispatches via state
-    // because navigating from inside a menu button closure isn't reliable otherwise.
-    @State private var navMemory: Memory?
 
     // Memory-to-video share state
     @State private var renderingMemory: Memory?
@@ -51,8 +56,20 @@ struct CollectionsView: View {
         } message: {
             Text(renderError ?? "")
         }
-        .navigationDestination(item: $navMemory) { memory in
-            MemoryGridView(memory: memory)
+        .navigationDestination(for: CollectionsRoute.self) { route in
+            switch route {
+            case .slideshow(let memory):
+                // "See all" tapped — replace the slideshow with the grid in
+                // the nav stack so back from the grid returns straight to
+                // Collections, not back to the slideshow.
+                MemorySlideshowView(memory: memory, onSeeAll: { mem in
+                    if let last = path.indices.last {
+                        path[last] = .memoryGrid(mem)
+                    }
+                })
+            case .memoryGrid(let memory):
+                MemoryGridView(memory: memory)
+            }
         }
     }
 
@@ -182,15 +199,13 @@ struct CollectionsView: View {
         ScrollView(.horizontal, showsIndicators: false) {
             LazyHStack(spacing: 12) {
                 ForEach(memories) { memory in
-                    NavigationLink {
-                        MemorySlideshowView(memory: memory)
-                    } label: {
+                    NavigationLink(value: CollectionsRoute.slideshow(memory)) {
                         MemoryCardView(memory: memory)
                     }
                     .buttonStyle(.plain)
                     .contextMenu {
                         Button {
-                            navMemory = memory
+                            path.append(.memoryGrid(memory))
                         } label: {
                             Label("View photos", systemImage: "square.grid.2x2")
                         }

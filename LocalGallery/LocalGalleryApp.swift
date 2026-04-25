@@ -42,8 +42,42 @@ extension View {
     }
 }
 
+/// AppDelegate exists solely so individual screens can lock orientation:
+/// `OrientationLock.lock(.portrait)` flips the static and we report it back to
+/// UIKit. SwiftUI has no native equivalent for per-screen orientation locking.
+final class AppDelegate: NSObject, UIApplicationDelegate {
+    func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
+        OrientationLock.current
+    }
+}
+
+enum OrientationLock {
+    static var current: UIInterfaceOrientationMask = .all
+
+    static func lock(_ mask: UIInterfaceOrientationMask, rotateTo orientation: UIInterfaceOrientation? = nil) {
+        current = mask
+        guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene else { return }
+        if let orientation, mask.contains(orientationMask(for: orientation)) {
+            let geo = UIWindowSceneGeometryPreferencesIOS(interfaceOrientations: orientationMask(for: orientation))
+            scene.requestGeometryUpdate(geo) { _ in }
+        }
+        scene.keyWindow?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+    }
+
+    private static func orientationMask(for orientation: UIInterfaceOrientation) -> UIInterfaceOrientationMask {
+        switch orientation {
+        case .portrait: return .portrait
+        case .portraitUpsideDown: return .portraitUpsideDown
+        case .landscapeLeft: return .landscapeLeft
+        case .landscapeRight: return .landscapeRight
+        default: return .all
+        }
+    }
+}
+
 @main
 struct LocalGalleryApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var galleryManager = GalleryManager()
 
     init() {
@@ -91,6 +125,10 @@ struct LocalGalleryApp: App {
 
 struct ContentView: View {
     @EnvironmentObject var manager: GalleryManager
+    /// Path for the Collections tab. Lives at the tab root so CollectionsView
+    /// can replace the slideshow in the stack with the grid view (so back from
+    /// the grid skips the slideshow and returns to Collections).
+    @State private var collectionsPath: [CollectionsRoute] = []
 
     var body: some View {
         TabView {
@@ -101,8 +139,8 @@ struct ContentView: View {
                 Label("Folders", systemImage: "folder")
             }
 
-            NavigationStack {
-                CollectionsView()
+            NavigationStack(path: $collectionsPath) {
+                CollectionsView(path: $collectionsPath)
             }
             .tabItem {
                 Label("Collections", systemImage: "rectangle.stack")

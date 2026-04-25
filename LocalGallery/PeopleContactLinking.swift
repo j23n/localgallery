@@ -17,14 +17,7 @@ struct ContactLinkSheet: View {
     @State private var requestingAccess = false
     @State private var showDeniedAlert = false
 
-    private var manualLink: String? { manager.personContactLinks[person.fullPath] }
-
-    private var auto: ContactInfo? {
-        // Show what the auto-match would resolve to, even if a manual override
-        // is in place — useful for the "Reset to auto" footer. Goes through the
-        // pre-built lower-name index so this is O(1) per render.
-        manager.autoMatchedContact(displayName: person.displayName)
-    }
+    private var manualLink: PersonLink? { manager.personContactLinks[person.fullPath] }
 
     private var filteredContacts: [ContactInfo] {
         let trimmed = search.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -167,14 +160,15 @@ struct ContactLinkSheet: View {
 
     @ViewBuilder
     private var statusRow: some View {
-        if let manualID = manualLink, manualID.isEmpty {
+        switch manager.linkState(forPersonPath: person.fullPath, displayName: person.displayName) {
+        case .disabled:
             Label {
                 Text("Skipped — no birthday memories")
             } icon: {
                 Image(systemName: "xmark.circle.fill").foregroundStyle(Design.destructive)
             }
             .font(.subheadline)
-        } else if let manualID = manualLink, let c = manager.contacts.first(where: { $0.id == manualID }) {
+        case .manual(let c):
             Label {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Manually linked: \(c.fullName)")
@@ -186,11 +180,11 @@ struct ContactLinkSheet: View {
                 Image(systemName: "link.circle.fill").foregroundStyle(Design.accentColor)
             }
             .font(.subheadline)
-        } else if let auto {
+        case .auto(let c):
             Label {
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("Auto-matched: \(auto.fullName)")
-                    if let line = birthdayLine(for: auto) {
+                    Text("Auto-matched: \(c.fullName)")
+                    if let line = birthdayLine(for: c) {
                         Text(line).font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -198,7 +192,7 @@ struct ContactLinkSheet: View {
                 Image(systemName: "wand.and.stars").foregroundStyle(Design.accentColor)
             }
             .font(.subheadline)
-        } else {
+        case .unlinked:
             Label("No matching contact", systemImage: "person.crop.circle.badge.questionmark")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
@@ -207,7 +201,7 @@ struct ContactLinkSheet: View {
 
     private func contactRow(_ contact: ContactInfo) -> some View {
         let isSelected: Bool = {
-            if let manual = manualLink { return !manual.isEmpty && manual == contact.id }
+            if case .manual(let id) = manualLink { return id == contact.id }
             return false
         }()
         return Button {

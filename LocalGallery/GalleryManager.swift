@@ -48,10 +48,11 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         didSet { rebuildContactsByLowerName() }
     }
 
-    /// Manual person-tag → CNContact.identifier links. Keyed by tag fullPath
-    /// (case-sensitive). The empty-string sentinel means the user explicitly
-    /// disabled the link (so the auto-match by name should not apply).
-    @Published var personContactLinks: [String: String] = [:] {
+    /// Explicit person-tag → contact decisions. Keyed by tag fullPath
+    /// (case-sensitive). Absence from the dictionary means "auto-match by
+    /// name"; entries record either a manual contact pick or an explicit
+    /// "no birthdays for this person" choice. See `PersonLink`.
+    @Published var personContactLinks: [String: PersonLink] = [:] {
         didSet { persistPersonContactLinks() }
     }
 
@@ -127,7 +128,8 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         if let raw = UserDefaults.standard.object(forKey: "memoriesGeneratedDay") as? Date {
             memoriesGeneratedDay = raw
         }
-        if let dict = UserDefaults.standard.dictionary(forKey: "personContactLinks") as? [String: String] {
+        if let data = UserDefaults.standard.data(forKey: "personContactLinks"),
+           let dict = try? JSONDecoder().decode([String: PersonLink].self, from: data) {
             personContactLinks = dict
         }
         if UserDefaults.standard.object(forKey: "birthdayMemoriesEnabled") != nil {
@@ -307,7 +309,10 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
     }
 
     private func persistPersonContactLinks() {
-        UserDefaults.standard.set(personContactLinks, forKey: "personContactLinks")
+        // PersonLink is an enum with associated values, so it round-trips
+        // through JSON rather than a flat UserDefaults dict.
+        guard let data = try? JSONEncoder().encode(personContactLinks) else { return }
+        UserDefaults.standard.set(data, forKey: "personContactLinks")
     }
 
     /// Lowercased "<given> <family>" → contact, used for birthday auto-matching.
@@ -356,15 +361,15 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
     /// the new link is reflected on the next launch (or right away if today is
     /// the contact's birthday).
     func linkPerson(_ personPath: String, toContactID contactID: String) {
-        personContactLinks[personPath] = contactID
+        personContactLinks[personPath] = .manual(contactID: contactID)
         Log.contacts.info("Linked '\(personPath, privacy: .public)' to contact \(contactID, privacy: .public)")
         forceRegenerateMemories()
     }
 
-    /// Disable any contact link for a person tag. Stores an empty-string sentinel
-    /// so the auto-match by name does not re-apply.
+    /// Disable any contact link for a person tag. Records `.disabled` so the
+    /// auto-match by name does not re-apply.
     func unlinkPerson(_ personPath: String) {
-        personContactLinks[personPath] = ""
+        personContactLinks[personPath] = .disabled
         Log.contacts.info("Unlinked '\(personPath, privacy: .public)' (auto-match disabled)")
         forceRegenerateMemories()
     }
@@ -374,19 +379,6 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         personContactLinks.removeValue(forKey: personPath)
         Log.contacts.info("Reset link for '\(personPath, privacy: .public)' (auto-match restored)")
         forceRegenerateMemories()
-    }
-
-    /// Effective contact for a person tag: manual link if present, otherwise
-    /// the auto-match by case-insensitive equality of `displayName` to
-    /// `<given> <family>`. Returns `nil` when the user explicitly unlinked.
-    /// Both lookups go through hash-based indexes (`_contactByID`,
-    /// `_contactsByLowerName`) so this is O(1) — safe to call from view bodies.
-    func effectiveContact(forPersonPath path: String, displayName: String) -> ContactInfo? {
-        if let id = personContactLinks[path] {
-            if id.isEmpty { return nil }
-            return _contactByID[id]
-        }
-        return _contactsByLowerName[displayName.lowercased()]
     }
 
     /// Resolved link state for a person tag — what the UI should display.
@@ -401,26 +393,28 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
     }
 
     func linkState(forPersonPath path: String, displayName: String) -> PersonLinkState {
-        if let id = personContactLinks[path] {
-            if id.isEmpty { return .disabled }
+        switch personContactLinks[path] {
+        case .disabled:
+            return .disabled
+        case .manual(let id):
             if let c = _contactByID[id] { return .manual(c) }
             return .unlinked  // dangling reference (contact deleted)
+        case nil:
+            if let auto = _contactsByLowerName[displayName.lowercased()] { return .auto(auto) }
+            return .unlinked
         }
-        if let auto = _contactsByLowerName[displayName.lowercased()] { return .auto(auto) }
-        return .unlinked
     }
 
-    /// The auto-match contact for a person tag, ignoring any manual override.
-    /// Used by the link sheet to surface "Reset to auto-match: <name>" even
-    /// when a manual link is currently set.
-    func autoMatchedContact(displayName: String) -> ContactInfo? {
-        _contactsByLowerName[displayName.lowercased()]
-    }
-
-    /// True when the user has explicitly unlinked this person (so the UI shows
-    /// "Linked: None" rather than "Auto: <name>").
-    func isPersonExplicitlyUnlinked(_ path: String) -> Bool {
-        personContactLinks[path] == ""
+    /// Effective contact for a person tag: manual link if present, otherwise
+    /// the auto-match by case-insensitive equality of `displayName` to
+    /// `<given> <family>`. Returns `nil` when the user explicitly disabled
+    /// the link or no contact matches. Both lookups go through hash-based
+    /// indexes so this is O(1) — safe to call from view bodies.
+    func effectiveContact(forPersonPath path: String, displayName: String) -> ContactInfo? {
+        switch linkState(forPersonPath: path, displayName: displayName) {
+        case .manual(let c), .auto(let c): return c
+        case .unlinked, .disabled: return nil
+        }
     }
 
     @discardableResult
@@ -1643,11 +1637,11 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
 
             // === 7. Birthdays ===
             // Surface a memory only when today (month + day) matches a contact's
-            // birthday and the person has at least 1 tagged photo. Manual links
-            // (linksSnapshot[fullPath]) override the auto-match by name; an
-            // empty-string sentinel means the user explicitly disabled the link.
-            // Skipped entirely when the user has disabled the master toggle in
-            // Settings (`birthdayMemoriesEnabled`).
+            // birthday and the person has at least 1 tagged photo. Explicit
+            // entries in `linksSnapshot` override the auto-match by name (or
+            // suppress it entirely when `.disabled`). Skipped entirely when
+            // the user has disabled the master toggle in Settings
+            // (`birthdayMemoriesEnabled`).
             if birthdaysEnabledSnapshot {
                 Self.generateBirthdayMemories(
                     from: allPhotos,
@@ -1714,7 +1708,7 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
     private nonisolated static func generateBirthdayMemories(
         from allPhotos: [PhotoFile],
         contacts: [ContactInfo],
-        links: [String: String],
+        links: [String: PersonLink],
         lowerNameIndex: [String: ContactInfo],
         calendar: Calendar,
         todayComponents: DateComponents,
@@ -1745,13 +1739,16 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         let contactByID = Dictionary(uniqueKeysWithValues: contacts.map { ($0.id, $0) })
 
         for (path, bundle) in byPath {
-            // Resolve effective contact: manual link wins, "" sentinel means
-            // the user explicitly opted out of birthday memories for this tag.
+            // Resolve effective contact: explicit `.disabled` skips this tag,
+            // a `.manual` link wins over name-based auto-match, and absence
+            // means "auto-match by displayName".
             let contact: ContactInfo?
-            if let manual = links[path] {
-                if manual.isEmpty { continue }
-                contact = contactByID[manual]
-            } else {
+            switch links[path] {
+            case .disabled:
+                continue
+            case .manual(let id):
+                contact = contactByID[id]
+            case nil:
                 contact = lowerNameIndex[bundle.displayName.lowercased()]
             }
             guard let contact,

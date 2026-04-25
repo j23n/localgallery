@@ -939,8 +939,18 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         // Build search index and tag-to-photos index in one pass.
         // Corpus = filename + every tag leaf + every tag full path, so substring
         // search matches both "rome" and "italy/lazio/rome".
+        //
+        // For Places/* we ALSO index every parent prefix as a virtual tag — a
+        // photo tagged Places/Argentina/.../Montserrat counts toward Argentina,
+        // the region, and the city. Lets the suggestion list surface "Argentina"
+        // (with the country icon) when the user types it, and the resulting
+        // tag-filter pulls up every photo nested under that prefix.
         var newSearchIndex: [UUID: String] = [:]
         var tagPhotos: [String: [PhotoFile]] = [:]
+        // Canonical-cased path keyed by lowercased path, so virtual prefix tags
+        // get nicely-cased displayName/fullPath even when no leaf photo carries
+        // that exact intermediate path.
+        var canonicalPath: [String: String] = [:]
         for photo in allPhotos {
             var terms: [String] = [photo.filename]
             for tag in photo.hierarchicalTags {
@@ -948,9 +958,34 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
                 terms.append(tag.fullPath)
             }
             newSearchIndex[photo.id] = terms.joined(separator: "\n").lowercased()
+            // Track which keys we've already credited this photo to so we
+            // don't double-count when a photo carries both a leaf tag and an
+            // explicit parent tag (e.g. Places/Italy AND Places/Italy/Lazio/Rome).
+            var keysCreditedForPhoto = Set<String>()
             for tag in photo.hierarchicalTags {
-                let key = tag.fullPath.lowercased()
-                tagPhotos[key, default: []].append(photo)
+                let segments = tag.fullPath.split(separator: "/").map(String.init)
+                let isPlaces = tag.namespace?.lowercased() == "places"
+                let isHierarchical = segments.count > 1
+                let leafKey = tag.fullPath.lowercased()
+                if keysCreditedForPhoto.insert(leafKey).inserted {
+                    tagPhotos[leafKey, default: []].append(photo)
+                }
+                canonicalPath[leafKey] = tag.fullPath
+                // For Places/* (and any other multi-level path), also index every
+                // proper prefix so parent levels become first-class tags.
+                if isPlaces && isHierarchical {
+                    for depth in 2..<segments.count {
+                        let prefixSegments = Array(segments.prefix(depth))
+                        let prefixPath = prefixSegments.joined(separator: "/")
+                        let key = prefixPath.lowercased()
+                        if keysCreditedForPhoto.insert(key).inserted {
+                            tagPhotos[key, default: []].append(photo)
+                        }
+                        if canonicalPath[key] == nil {
+                            canonicalPath[key] = prefixPath
+                        }
+                    }
+                }
             }
         }
         searchIndex = newSearchIndex
@@ -970,16 +1005,23 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         tagBuildGeneration += 1
         let generation = tagBuildGeneration
         let tagPhotosSnapshot = tagPhotos
+        let canonicalPathSnapshot = canonicalPath
         Task.detached(priority: .utility) {
-            var tagCounts: [String: (tag: HierarchicalTag, count: Int)] = [:]
-            for (key, photos) in tagPhotosSnapshot {
-                if let first = photos.first?.hierarchicalTags.first(where: { $0.fullPath.lowercased() == key }) {
-                    tagCounts[key] = (first, photos.count)
-                }
+            // Build a TagSuggestion for every key in tagPhotos — including the
+            // virtual Places/* prefixes that no photo carries exactly. We can
+            // construct a HierarchicalTag from the canonical path for each key.
+            let tags: [TagSuggestion] = tagPhotosSnapshot.compactMap { entry -> TagSuggestion? in
+                guard let path = canonicalPathSnapshot[entry.key] else { return nil }
+                let tag = HierarchicalTag(raw: path)
+                return TagSuggestion(
+                    id: tag.fullPath.lowercased(),
+                    displayName: tag.displayName,
+                    fullPath: tag.fullPath,
+                    namespace: tag.namespace,
+                    count: entry.value.count
+                )
             }
-            let tags = tagCounts.values
-                .map { TagSuggestion(id: $0.tag.fullPath.lowercased(), displayName: $0.tag.displayName, fullPath: $0.tag.fullPath, namespace: $0.tag.namespace, count: $0.count) }
-                .sorted { $0.count > $1.count }
+            .sorted { $0.count > $1.count }
 
             // Sort people by recent-activity then count. Show all people, not just 8 —
             // pinning / featuring happens downstream in visiblePeople.
@@ -1050,11 +1092,19 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
     func search(query: String, requiredTags: [TagSuggestion] = []) -> [PhotoFile] {
         var results = _sortedPhotos
 
-        // Apply AND filter for each required tag
+        // Apply AND filter for each required tag. Places/* matches as a path
+        // prefix so filtering by "Places/Argentina" surfaces every photo nested
+        // under Argentina, not just ones tagged exactly at country level.
         for tag in requiredTags {
             let tagPath = tag.fullPath.lowercased()
+            let isPlaces = tag.namespace?.lowercased() == "places"
             results = results.filter { photo in
-                photo.hierarchicalTags.contains { $0.fullPath.lowercased() == tagPath }
+                photo.hierarchicalTags.contains { ht in
+                    let hp = ht.fullPath.lowercased()
+                    if hp == tagPath { return true }
+                    if isPlaces, hp.hasPrefix(tagPath + "/") { return true }
+                    return false
+                }
             }
         }
 
@@ -1066,18 +1116,24 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         }
 
         let q = query.lowercased()
-        // If query matches a known tag path exactly, filter by that tag
-        let isTagQuery = allTags.contains { $0.fullPath.lowercased() == q }
-        if isTagQuery {
+        // If query matches a known tag path exactly, filter by that tag.
+        let matchedTag = allTags.first { $0.fullPath.lowercased() == q }
+        if let matchedTag {
+            let isPlaces = matchedTag.namespace?.lowercased() == "places"
             results = results.filter { photo in
-                photo.hierarchicalTags.contains { $0.fullPath.lowercased() == q }
+                photo.hierarchicalTags.contains { ht in
+                    let hp = ht.fullPath.lowercased()
+                    if hp == q { return true }
+                    if isPlaces, hp.hasPrefix(q + "/") { return true }
+                    return false
+                }
             }
         } else {
             results = results.filter { photo in
                 searchIndex[photo.id]?.contains(q) ?? false
             }
         }
-        Log.search.debug("\"\(query)\" tags:\(requiredTags.map(\.displayName)) → \(results.count) matches\(isTagQuery ? " (exact tag)" : "")")
+        Log.search.debug("\"\(query)\" tags:\(requiredTags.map(\.displayName)) → \(results.count) matches\(matchedTag != nil ? " (exact tag)" : "")")
         return results
     }
 
@@ -1376,7 +1432,7 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
 
             // Cap per-memory photo count to keep slideshow/grid responsive.
             // Sample evenly across the range to preserve temporal spread.
-            let maxPhotosPerMemory = 50
+            let maxPhotosPerMemory = 75
             candidates = candidates.map { mem in
                 guard mem.photoIDs.count > maxPhotosPerMemory else { return mem }
                 let step = Double(mem.photoIDs.count) / Double(maxPhotosPerMemory)
@@ -1389,18 +1445,24 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
                 )
             }
 
-            // Sort by score, then greedily select top 15 with overlap penalty
+            // Sort by score, then greedily select top 20 with overlap penalty.
+            // Sub-trips are intentionally inside their parent trip's photo set,
+            // so they bypass the overlap filter — losing them defeats the goal
+            // of surfacing finer-grained legs of long journeys.
             candidates.sort { $0.score > $1.score }
             var selected: [Memory] = []
             var usedPhotoIDs = Set<UUID>()
             for candidate in candidates {
+                let isSubtrip = candidate.id.hasPrefix("subtrip-")
                 let candidateSet = Set(candidate.photoIDs)
-                let overlapCount = candidateSet.intersection(usedPhotoIDs).count
-                let overlapRatio = candidateSet.isEmpty ? 0.0 : Double(overlapCount) / Double(candidateSet.count)
-                if overlapRatio > 0.7 { continue }
+                if !isSubtrip {
+                    let overlapCount = candidateSet.intersection(usedPhotoIDs).count
+                    let overlapRatio = candidateSet.isEmpty ? 0.0 : Double(overlapCount) / Double(candidateSet.count)
+                    if overlapRatio > 0.7 { continue }
+                }
                 selected.append(candidate)
                 usedPhotoIDs.formUnion(candidateSet)
-                if selected.count >= 15 { break }
+                if selected.count >= 20 { break }
             }
 
             return selected
@@ -1492,6 +1554,119 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
             score: Double(ids.count) * 1.5 + Double(days) * 2.0 + 8.0,
             yearsAgo: nil, personName: nil
         ))
+
+        // Surface meaningful sub-trips inside long parent trips — e.g. the
+        // Buenos Aires leg of a 3-month South America journey. We split the
+        // sorted photos by country code first, then by city-level Places path
+        // when only one country is present. A segment qualifies if it spans at
+        // least 2 days, has 5+ photos, and is meaningfully smaller than the
+        // parent (so we don't duplicate the parent as a sub-trip).
+        guard days >= 5 else { return }
+        let parentSet = Set(ids)
+        let segments: [(label: String, key: String, entries: [(PhotoFile, Date)])]
+        let countriesPresent = Set(sorted.compactMap { $0.0.countryCode?.uppercased() })
+        if countriesPresent.count >= 2 {
+            segments = consecutiveCountrySegments(in: sorted)
+        } else {
+            segments = consecutivePlacesSegments(in: sorted)
+        }
+        for seg in segments {
+            guard seg.entries.count >= 5,
+                  let segFirst = seg.entries.first?.1,
+                  let segLast = seg.entries.last?.1 else { continue }
+            let segDays = max(1, calendar.dateComponents([.day], from: segFirst, to: segLast).day ?? 1)
+            guard segDays >= 2 else { continue }
+            // Sub-trip must be a strict subset of the parent and noticeably
+            // smaller — otherwise it's just the trip again.
+            let segIDs = seg.entries.map(\.0.id)
+            let segSet = Set(segIDs)
+            guard segSet != parentSet,
+                  Double(segSet.count) <= Double(parentSet.count) * 0.85 else { continue }
+
+            let segRel = relativeDescription(for: segFirst, calendar: calendar, today: today)
+            let subTitle = "A trip to \(seg.label) \(segRel)"
+            candidates.append(Memory(
+                id: "subtrip-\(tripKey)-\(seg.key)", type: .trip,
+                title: subTitle,
+                subtitle: "\(segDays) \(segDays == 1 ? "day" : "days") · part of \(locationLabel ?? "this trip")",
+                photoIDs: segIDs,
+                coverPhotoID: segIDs[segIDs.count / 3],
+                dateRange: segFirst...segLast,
+                // Slightly under the parent so the parent floats first when
+                // both surface, but high enough that ranks above generic items.
+                score: Double(segIDs.count) * 1.4 + Double(segDays) * 1.8 + 6.0,
+                yearsAgo: nil, personName: nil
+            ))
+        }
+    }
+
+    /// Group a sorted-by-date photo run into consecutive-country segments.
+    private nonisolated static func consecutiveCountrySegments(
+        in entries: [(PhotoFile, Date)]
+    ) -> [(label: String, key: String, entries: [(PhotoFile, Date)])] {
+        var out: [(label: String, key: String, entries: [(PhotoFile, Date)])] = []
+        var current: [(PhotoFile, Date)] = []
+        var currentCode: String? = nil
+        func flush() {
+            guard let code = currentCode, !current.isEmpty else { return }
+            let label = countryName(from: code) ?? code
+            out.append((label, code.lowercased(), current))
+        }
+        for e in entries {
+            let code = e.0.countryCode?.uppercased()
+            if code != currentCode {
+                flush()
+                current = []
+                currentCode = code
+            }
+            if currentCode != nil { current.append(e) }
+        }
+        flush()
+        return out
+    }
+
+    /// Group a sorted-by-date photo run by deepest Places leaf (city or below).
+    /// Used when the trip stays in one country — surfaces city-level legs.
+    private nonisolated static func consecutivePlacesSegments(
+        in entries: [(PhotoFile, Date)]
+    ) -> [(label: String, key: String, entries: [(PhotoFile, Date)])] {
+        func cityKey(for photo: PhotoFile) -> (label: String, key: String)? {
+            // Pick the longest Places path on the photo and use the city-level
+            // segment (depth 3 = country/region/city). Fall back to the deepest
+            // available.
+            let placesPaths = photo.hierarchicalTags
+                .filter { $0.namespace?.lowercased() == "places" }
+                .map { $0.fullPath.split(separator: "/").map(String.init) }
+            guard let longest = placesPaths.max(by: { $0.count < $1.count }), longest.count > 1 else { return nil }
+            // segments without "Places"
+            let segs = Array(longest.dropFirst())
+            let cityIdx = min(2, segs.count - 1) // 0=country, 1=region, 2=city
+            let label = segs[cityIdx]
+            let key = segs.prefix(cityIdx + 1).joined(separator: "-").lowercased()
+            return (label, key)
+        }
+        var out: [(label: String, key: String, entries: [(PhotoFile, Date)])] = []
+        var current: [(PhotoFile, Date)] = []
+        var currentLabel: String? = nil
+        var currentKey: String? = nil
+        func flush() {
+            guard let label = currentLabel, let key = currentKey, !current.isEmpty else { return }
+            out.append((label, key, current))
+        }
+        for e in entries {
+            let info = cityKey(for: e.0)
+            let label = info?.label
+            let key = info?.key
+            if key != currentKey {
+                flush()
+                current = []
+                currentLabel = label
+                currentKey = key
+            }
+            if currentKey != nil { current.append(e) }
+        }
+        flush()
+        return out
     }
 
     // MARK: Trip Labeling

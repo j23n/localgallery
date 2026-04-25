@@ -1,14 +1,27 @@
 import SwiftUI
+import UIKit
 
 /// Full-bleed memory slideshow: crossfade between photos, single continuous
 /// progress bar, tap-left/tap-right to navigate (with timer reset), tap-and-hold
-/// to pause, "thematic music" indicator, and "See all" → grid view.
+/// to pause, "thematic music" indicator that opens a theme picker, and
+/// "See all" → grid view.
+///
+/// Locked to portrait while presented (regardless of device rotation) so the
+/// chrome layout stays consistent and landscape photos can pan without the
+/// scaffolding rotating around them.
 struct MemorySlideshowView: View {
     let memory: Memory
+    /// Called when the user taps "See all". When non-nil, the view defers
+    /// navigation to the parent (so the parent can replace the slideshow in
+    /// the nav stack with the grid). When nil, falls back to pushing the
+    /// grid as a child of this view.
+    var onSeeAll: ((Memory) -> Void)? = nil
+
     @EnvironmentObject var manager: GalleryManager
     @Environment(\.dismiss) private var dismiss
 
-    private let slideDuration: Double = 3.8
+    private let baseSlideDuration: Double = 5.0
+    private let slideJitter: Double = 0.6 // ± seconds, picked per slide
     private let pauseHoldDelay: Double = 0.2
 
     @State private var index: Int = 0
@@ -17,8 +30,15 @@ struct MemorySlideshowView: View {
     @State private var slideStart: Date = Date()
     @State private var timer: Timer?
     @State private var goToGrid: Bool = false
+    @State private var slideDuration: Double = 5.0
+    @State private var showThemePicker: Bool = false
+    @StateObject private var audio = SlideshowAudioController()
+    @AppStorage("slideshowMusicTheme") private var storedTheme: String = SlideshowMusicTheme.wistful.rawValue
 
     private var photos: [PhotoFile] { manager.photos(for: memory) }
+    private var theme: SlideshowMusicTheme {
+        SlideshowMusicTheme(rawValue: storedTheme) ?? .wistful
+    }
 
     var body: some View {
         ZStack {
@@ -31,11 +51,13 @@ struct MemorySlideshowView: View {
                         let prev = photos[(index - 1 + photos.count) % photos.count]
                         let cur  = photos[index]
 
-                        // Previous (underneath) + current (fades in) for crossfade
-                        SlideshowImage(url: prev.url, size: geo.size)
-                        SlideshowImage(url: cur.url, size: geo.size)
+                        // Underneath = prev (held centered) so we always have
+                        // something showing during the cross-fade. The current
+                        // photo fades in via .opacity transition keyed on id.
+                        SlideshowImage(url: prev.url, size: geo.size, panProgress: 0.5)
+                        SlideshowImage(url: cur.url, size: geo.size, panProgress: progress)
                             .id(cur.id)
-                            .transition(.opacity)
+                            .transition(.opacity.animation(.easeInOut(duration: 0.55)))
                     }
                 }
             }
@@ -64,8 +86,23 @@ struct MemorySlideshowView: View {
         .navigationDestination(isPresented: $goToGrid) {
             MemoryGridView(memory: memory)
         }
-        .onAppear { startTimer() }
-        .onDisappear { stopTimer() }
+        .sheet(isPresented: $showThemePicker) {
+            MusicThemePicker(selected: Binding(
+                get: { theme },
+                set: { storedTheme = $0.rawValue; audio.play(theme: $0) }
+            ))
+            .presentationDetents([.medium])
+        }
+        .onAppear {
+            OrientationLock.lock(.portrait, rotateTo: .portrait)
+            audio.play(theme: theme)
+            startTimer()
+        }
+        .onDisappear {
+            OrientationLock.lock(.all)
+            audio.stop()
+            stopTimer()
+        }
     }
 
     // MARK: - Tap + hold zone
@@ -102,22 +139,34 @@ struct MemorySlideshowView: View {
 
             Spacer()
 
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(Color(red: 0.561, green: 0.769, blue: 0.608))
-                    .frame(width: 6, height: 6)
-                Text("Playing · thematic")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.white)
+            Button {
+                showThemePicker = true
+            } label: {
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(Color(red: 0.561, green: 0.769, blue: 0.608))
+                        .frame(width: 6, height: 6)
+                    Text("Playing · \(theme.displayName.lowercased())")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.white)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.7))
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Color.white.opacity(0.14), in: Capsule())
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(Color.white.opacity(0.14), in: Capsule())
+            .buttonStyle(.plain)
 
             Spacer()
 
             Button {
-                goToGrid = true
+                if let onSeeAll {
+                    onSeeAll(memory)
+                } else {
+                    goToGrid = true
+                }
             } label: {
                 Text("See all")
                     .font(.system(size: 12, weight: .semibold))
@@ -143,6 +192,20 @@ struct MemorySlideshowView: View {
         let overall = (Double(index) + min(progress, 1)) / Double(total)
 
         return VStack(alignment: .leading, spacing: 6) {
+            // Reserve a fixed slot above the title so the caption block doesn't
+            // jump when the paused chip appears/disappears.
+            ZStack(alignment: .leading) {
+                Text(" ")
+                    .font(.system(size: 11, weight: .medium))
+                if isPaused {
+                    Text("PAUSED · RELEASE TO RESUME")
+                        .font(.system(size: 11, weight: .medium))
+                        .tracking(0.5)
+                        .foregroundStyle(.white.opacity(0.8))
+                        .transition(.opacity)
+                }
+            }
+
             Text(memory.title)
                 .font(Design.serifItalic(28, weight: .medium))
                 .foregroundStyle(.white)
@@ -163,15 +226,8 @@ struct MemorySlideshowView: View {
                 }
             }
             .frame(height: 3)
-
-            if isPaused {
-                Text("PAUSED · RELEASE TO RESUME")
-                    .font(.system(size: 11, weight: .medium))
-                    .tracking(0.5)
-                    .foregroundStyle(.white.opacity(0.7))
-                    .padding(.top, 8)
-            }
         }
+        .animation(.easeInOut(duration: 0.18), value: isPaused)
         .padding(.horizontal, 20)
         .padding(.top, 40)
         .padding(.bottom, 16)
@@ -187,25 +243,36 @@ struct MemorySlideshowView: View {
 
     private func goPrev() {
         guard !photos.isEmpty else { return }
-        index = (index - 1 + photos.count) % photos.count
+        withAnimation(.easeInOut(duration: 0.55)) {
+            index = (index - 1 + photos.count) % photos.count
+        }
         resetSlide()
     }
 
     private func goNext() {
         guard !photos.isEmpty else { return }
-        index = (index + 1) % photos.count
+        withAnimation(.easeInOut(duration: 0.55)) {
+            index = (index + 1) % photos.count
+        }
         resetSlide()
     }
 
     private func resetSlide() {
         progress = 0
+        slideDuration = nextDuration()
         slideStart = Date()
+    }
+
+    private func nextDuration() -> Double {
+        let jitter = Double.random(in: -slideJitter...slideJitter)
+        return max(2.5, baseSlideDuration + jitter)
     }
 
     // MARK: - Timer
 
     private func startTimer() {
         stopTimer()
+        slideDuration = nextDuration()
         slideStart = Date().addingTimeInterval(-progress * slideDuration)
         let t = Timer.scheduledTimer(withTimeInterval: 0.04, repeats: true) { _ in
             Task { @MainActor in
@@ -217,7 +284,10 @@ struct MemorySlideshowView: View {
                 progress = p
                 if p >= 1 {
                     progress = 0
-                    index = (index + 1) % photos.count
+                    withAnimation(.easeInOut(duration: 0.55)) {
+                        index = (index + 1) % photos.count
+                    }
+                    slideDuration = nextDuration()
                     slideStart = Date()
                 }
             }
@@ -231,21 +301,20 @@ struct MemorySlideshowView: View {
     }
 }
 
+// MARK: - Slideshow image with optional Ken Burns pan for landscapes
+
 private struct SlideshowImage: View {
     let url: URL
     let size: CGSize
+    /// 0…1 — used as the pan progress when the loaded image is landscape.
+    let panProgress: Double
     @EnvironmentObject var manager: GalleryManager
     @State private var image: UIImage?
 
     var body: some View {
         ZStack {
             if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: size.width, height: size.height)
-                    .clipped()
-                    .brightness(-0.08)
+                renderedImage(image)
             } else {
                 Color.black
             }
@@ -255,5 +324,105 @@ private struct SlideshowImage: View {
         .task(id: url) {
             image = await manager.loadFullImage(for: url)
         }
+    }
+
+    @ViewBuilder
+    private func renderedImage(_ image: UIImage) -> some View {
+        let isLandscape = image.size.width > image.size.height * 1.15
+        if isLandscape {
+            // Aspect-fill the canvas so the image fully covers it vertically,
+            // then translate horizontally over the slide's lifetime — a Ken
+            // Burns style pan that reveals the wide frame on a portrait canvas.
+            let scale = max(size.width / image.size.width, size.height / image.size.height)
+            let drawnW = image.size.width * scale
+            let slack = max(0, drawnW - size.width)
+            // Alternate direction per image so the eye doesn't expect a fixed
+            // sweep — derived from the pixel width so it's stable per photo.
+            let direction: CGFloat = (Int(image.size.width.rounded()) % 2 == 0) ? 1 : -1
+            let offset = CGFloat(panProgress - 0.5) * slack * direction
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFill()
+                .frame(width: size.width, height: size.height)
+                .offset(x: offset)
+                .clipped()
+                .brightness(-0.08)
+        } else {
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFill()
+                .frame(width: size.width, height: size.height)
+                .clipped()
+                .brightness(-0.08)
+        }
+    }
+}
+
+// MARK: - Music theme picker
+
+private struct MusicThemePicker: View {
+    @Binding var selected: SlideshowMusicTheme
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    ForEach(SlideshowMusicTheme.allCases) { theme in
+                        Button {
+                            selected = theme
+                            dismiss()
+                        } label: {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(theme.displayName)
+                                        .font(.system(size: 15.5, weight: .medium))
+                                        .foregroundStyle(Design.ink)
+                                    Text(theme.blurb)
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(Design.ink3)
+                                }
+                                Spacer()
+                                if theme == selected {
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundStyle(Design.accentColor)
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                } header: {
+                    Text("Thematic music")
+                } footer: {
+                    Text("Played softly behind the slideshow. Your choice is remembered for next time.")
+                }
+            }
+            .navigationTitle("Music")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                        .fontWeight(.semibold)
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Audio controller wrapper
+
+/// `ObservableObject` wrapper so the SwiftUI view owns the player's lifetime
+/// via `@StateObject`. The player itself is a plain main-actor class.
+@MainActor
+final class SlideshowAudioController: ObservableObject {
+    private let player = SlideshowMusicPlayer()
+
+    func play(theme: SlideshowMusicTheme) {
+        player.play(theme: theme)
+    }
+
+    func stop() {
+        player.stop()
     }
 }

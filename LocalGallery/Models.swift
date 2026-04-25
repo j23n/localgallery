@@ -44,6 +44,19 @@ enum TagNamespace {
         default:        return "tag.fill"
         }
     }
+
+    /// Depth-aware icon for `Places/*` tags so the suggestion list communicates
+    /// what scale the user is filtering at. depth counts the segments under
+    /// "Places" — depth 1 = country, 2 = region, 3 = city, 4+ = neighborhood.
+    static func placesIcon(depth: Int) -> String {
+        switch depth {
+        case ...0: return "mappin.and.ellipse"
+        case 1:    return "flag.fill"
+        case 2:    return "map.fill"
+        case 3:    return "building.2.fill"
+        default:   return "house.fill"
+        }
+    }
 }
 
 // MARK: - Tag Suggestion
@@ -54,7 +67,14 @@ struct TagSuggestion: Identifiable, Hashable, Sendable {
     let fullPath: String    // original hierarchical path
     let namespace: String?  // first segment or nil
     let count: Int          // number of photos with this tag
-    var icon: String { TagNamespace.icon(for: namespace) }
+    var icon: String {
+        if namespace?.lowercased() == "places" {
+            // Depth = segments after the "Places" root.
+            let depth = fullPath.split(separator: "/").count - 1
+            return TagNamespace.placesIcon(depth: depth)
+        }
+        return TagNamespace.icon(for: namespace)
+    }
 }
 
 // MARK: - Photo File

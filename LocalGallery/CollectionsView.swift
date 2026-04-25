@@ -13,6 +13,9 @@ struct CollectionsView: View {
     @EnvironmentObject var manager: GalleryManager
     @State private var showSettings = false
 
+    // Person → contact linking sheet
+    @State private var linkingPerson: TagSuggestion?
+
     // Memory-to-video share state
     @State private var renderingMemory: Memory?
     @State private var renderProgress: Double = 0
@@ -39,6 +42,9 @@ struct CollectionsView: View {
             }
         }
         .sheet(isPresented: $showSettings) { SettingsView() }
+        .sheet(item: $linkingPerson) { person in
+            ContactLinkSheet(person: person)
+        }
         .sheet(item: Binding<RenderedVideo?>(
             get: { renderedVideoURL.map { RenderedVideo(url: $0) } },
             set: { renderedVideoURL = $0?.url }
@@ -252,6 +258,11 @@ struct CollectionsView: View {
                                     Label(isFeatured ? "Unfeature" : "Feature",
                                           systemImage: isFeatured ? "star.slash" : "star")
                                 }
+                                Button {
+                                    linkingPerson = person
+                                } label: {
+                                    Label(linkContextLabel(person), systemImage: "person.text.rectangle")
+                                }
                                 Button(role: .destructive) {
                                     manager.hidePerson(person.fullPath)
                                 } label: {
@@ -330,6 +341,22 @@ struct CollectionsView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
+    }
+
+    /// Label for the person → contact link context-menu entry. Reflects the
+    /// current state so the menu doubles as status.
+    private func linkContextLabel(_ person: TagSuggestion) -> String {
+        if let id = manager.personContactLinks[person.fullPath] {
+            if id.isEmpty { return "Birthdays disabled" }
+            if let c = manager.contacts.first(where: { $0.id == id }) {
+                return "Linked: \(c.fullName)"
+            }
+            return "Link to Contact"
+        }
+        if let auto = manager.contacts.first(where: { $0.fullName.lowercased() == person.displayName.lowercased() }) {
+            return "Auto: \(auto.fullName)"
+        }
+        return "Link to Contact"
     }
 
     private func eventDateRange(_ folder: PhotoFolder) -> String? {

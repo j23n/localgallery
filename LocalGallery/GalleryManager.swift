@@ -3,6 +3,7 @@ import UIKit
 import ImageIO
 import UniformTypeIdentifiers
 import AVFoundation
+import Contacts
 import os
 
 @MainActor
@@ -33,6 +34,20 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
     /// Per-person featured photo ID. Keyed by person tag fullPath (case-sensitive).
     @Published var featuredPhotoByPerson: [String: UUID] = [:] {
         didSet { persistFeaturedPhotoByPerson() }
+    }
+
+    /// Contacts loaded from the system address book. Empty until the user grants
+    /// Contacts access. Populated by `loadContacts()` and refreshed when the app
+    /// re-enters the foreground.
+    @Published private(set) var contacts: [ContactInfo] = [] {
+        didSet { rebuildContactsByLowerName() }
+    }
+
+    /// Manual person-tag → CNContact.identifier links. Keyed by tag fullPath
+    /// (case-sensitive). The empty-string sentinel means the user explicitly
+    /// disabled the link (so the auto-match by name should not apply).
+    @Published var personContactLinks: [String: String] = [:] {
+        didSet { persistPersonContactLinks() }
     }
 
     private var isEnriching = false
@@ -89,6 +104,9 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         if let raw = UserDefaults.standard.object(forKey: "memoriesGeneratedDay") as? Date {
             memoriesGeneratedDay = raw
         }
+        if let dict = UserDefaults.standard.dictionary(forKey: "personContactLinks") as? [String: String] {
+            personContactLinks = dict
+        }
         loadMemoriesCache()
 
         // Load cache + start security scope synchronously so cached
@@ -104,8 +122,11 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self, let url = self.activeSecurityScopedURL else { return }
-                await self.scanFolder(at: url, silent: true)
+                guard let self else { return }
+                await self.loadContacts()
+                if let url = self.activeSecurityScopedURL {
+                    await self.scanFolder(at: url, silent: true)
+                }
             }
         }
     }
@@ -257,6 +278,87 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         UserDefaults.standard.set(stringDict, forKey: "featuredPhotoByPerson")
     }
 
+    private func persistPersonContactLinks() {
+        UserDefaults.standard.set(personContactLinks, forKey: "personContactLinks")
+    }
+
+    /// Lowercased "<given> <family>" → contact, used for birthday auto-matching.
+    /// First-write wins so the address book's order determines which homonym
+    /// auto-matches. Manual links via `personContactLinks` always override.
+    private var _contactsByLowerName: [String: ContactInfo] = [:]
+
+    private func rebuildContactsByLowerName() {
+        var idx: [String: ContactInfo] = [:]
+        for c in contacts {
+            let key = c.fullName.lowercased()
+            if idx[key] == nil { idx[key] = c }
+        }
+        _contactsByLowerName = idx
+    }
+
+    // MARK: - Contacts
+
+    /// Prompt for Contacts access and load on grant. Safe to call repeatedly.
+    @discardableResult
+    func requestContactsAccess() async -> Bool {
+        let granted = await ContactsService.requestAccess()
+        if granted { await loadContacts() }
+        return granted
+    }
+
+    /// Load contacts if access is already granted. No-op when denied.
+    func loadContacts() async {
+        let wasEmpty = contacts.isEmpty
+        let loaded = await ContactsService.loadContacts()
+        contacts = loaded
+        // First successful load — surface birthday memories without waiting
+        // for the daily gate to expire.
+        if wasEmpty && !loaded.isEmpty {
+            forceRegenerateMemories()
+        }
+    }
+
+    /// Manually link a person tag to a contact. Triggers a memory rebuild so
+    /// the new link is reflected on the next launch (or right away if today is
+    /// the contact's birthday).
+    func linkPerson(_ personPath: String, toContactID contactID: String) {
+        personContactLinks[personPath] = contactID
+        Log.contacts.info("Linked '\(personPath, privacy: .public)' to contact \(contactID, privacy: .public)")
+        forceRegenerateMemories()
+    }
+
+    /// Disable any contact link for a person tag. Stores an empty-string sentinel
+    /// so the auto-match by name does not re-apply.
+    func unlinkPerson(_ personPath: String) {
+        personContactLinks[personPath] = ""
+        Log.contacts.info("Unlinked '\(personPath, privacy: .public)' (auto-match disabled)")
+        forceRegenerateMemories()
+    }
+
+    /// Forget any manual override — auto-match by name resumes for this person.
+    func resetPersonLink(_ personPath: String) {
+        personContactLinks.removeValue(forKey: personPath)
+        Log.contacts.info("Reset link for '\(personPath, privacy: .public)' (auto-match restored)")
+        forceRegenerateMemories()
+    }
+
+    /// Effective contact for a person tag: manual link if present, otherwise
+    /// the auto-match by case-insensitive equality of `displayName` to
+    /// `<given> <family>`. Returns `nil` when the user explicitly unlinked.
+    func effectiveContact(forPersonPath path: String, displayName: String) -> ContactInfo? {
+        if let id = personContactLinks[path] {
+            if id.isEmpty { return nil }
+            return contacts.first { $0.id == id }
+        }
+        return _contactsByLowerName[displayName.lowercased()]
+    }
+
+    /// True when the user has explicitly unlinked this person (so the UI shows
+    /// "Linked: None" rather than "Auto: <name>").
+    func isPersonExplicitlyUnlinked(_ path: String) -> Bool {
+        personContactLinks[path] == ""
+    }
+
     @discardableResult
     private func loadCache() -> Bool {
         guard FileManager.default.fileExists(atPath: cacheURL.path) else { return false }
@@ -283,6 +385,11 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
 
     func restoreFolder() async {
         let hadCache = rootFolder != nil
+
+        // Refresh contacts if access is already granted. No-op (and no prompt)
+        // when access hasn't been granted — birthday memories simply won't
+        // appear until the user grants access from Settings.
+        await loadContacts()
 
         // Security scope may already be active from init()
         let url: URL
@@ -1280,6 +1387,13 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
 
         Self.logMemoryInputSummary(allPhotos: allPhotos)
 
+        // Capture contact-related state from the main actor before crossing into
+        // the detached task. Birthday memory generation runs alongside the other
+        // categories so the once-per-day gate covers it too.
+        let contactsSnapshot = self.contacts
+        let linksSnapshot = self.personContactLinks
+        let lowerNameIndexSnapshot = self._contactsByLowerName
+
         let results: [Memory] = await Task.detached(priority: .utility) {
             let calendar = Calendar.current
             let today = Date()
@@ -1430,6 +1544,22 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
             // === 6. Trip Detection ===
             Self.generateTripMemories(from: photosWithDates, calendar: calendar, today: today, into: &candidates)
 
+            // === 7. Birthdays ===
+            // Surface a memory only when today (month + day) matches a contact's
+            // birthday and the person has at least 1 tagged photo. Manual links
+            // (linksSnapshot[fullPath]) override the auto-match by name; an
+            // empty-string sentinel means the user explicitly disabled the link.
+            Self.generateBirthdayMemories(
+                from: allPhotos,
+                contacts: contactsSnapshot,
+                links: linksSnapshot,
+                lowerNameIndex: lowerNameIndexSnapshot,
+                calendar: calendar,
+                todayComponents: todayComponents,
+                currentYear: currentYear,
+                into: &candidates
+            )
+
             // Cap per-memory photo count to keep slideshow/grid responsive.
             // Sample evenly across the range to preserve temporal spread.
             let maxPhotosPerMemory = 75
@@ -1472,6 +1602,99 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         self.memories = results
         saveMemoriesCache()
         Log.memory.info("Generated \(results.count) memories in \(String(format: "%.0f", elapsed))ms")
+    }
+
+    // MARK: Birthday Detection
+
+    /// Build "Happy birthday, <name>" memories for every person whose linked
+    /// (manual or auto-matched) contact has a birthday equal to today's
+    /// month/day. Photo set = every photo carrying the People/* tag for that
+    /// person, sorted oldest → newest so the slideshow tells a story.
+    private nonisolated static func generateBirthdayMemories(
+        from allPhotos: [PhotoFile],
+        contacts: [ContactInfo],
+        links: [String: String],
+        lowerNameIndex: [String: ContactInfo],
+        calendar: Calendar,
+        todayComponents: DateComponents,
+        currentYear: Int,
+        into candidates: inout [Memory]
+    ) {
+        guard let todayMonth = todayComponents.month,
+              let todayDay = todayComponents.day else { return }
+
+        // Group photos by person tag fullPath, retaining the original casing.
+        struct PersonBundle { let fullPath: String; let displayName: String; var photos: [PhotoFile] }
+        var byPath: [String: PersonBundle] = [:]
+        for photo in allPhotos {
+            for tag in photo.hierarchicalTags where tag.namespace?.lowercased() == "people" {
+                if var existing = byPath[tag.fullPath] {
+                    existing.photos.append(photo)
+                    byPath[tag.fullPath] = existing
+                } else {
+                    byPath[tag.fullPath] = PersonBundle(
+                        fullPath: tag.fullPath,
+                        displayName: tag.displayName,
+                        photos: [photo]
+                    )
+                }
+            }
+        }
+
+        let contactByID = Dictionary(uniqueKeysWithValues: contacts.map { ($0.id, $0) })
+
+        for (path, bundle) in byPath {
+            // Resolve effective contact: manual link wins, "" sentinel means
+            // the user explicitly opted out of birthday memories for this tag.
+            let contact: ContactInfo?
+            if let manual = links[path] {
+                if manual.isEmpty { continue }
+                contact = contactByID[manual]
+            } else {
+                contact = lowerNameIndex[bundle.displayName.lowercased()]
+            }
+            guard let contact,
+                  let bMonth = contact.birthday?.month,
+                  let bDay = contact.birthday?.day,
+                  bMonth == todayMonth, bDay == todayDay else { continue }
+
+            // Sort by date when available; undated photos go to the end so the
+            // cover (most recent) prefers a real timestamp.
+            let sorted = bundle.photos.sorted { a, b in
+                (a.dateTaken ?? .distantPast) < (b.dateTaken ?? .distantPast)
+            }
+            let ids = sorted.map(\.id)
+            guard let coverID = ids.last else { continue }
+
+            let dateRange: ClosedRange<Date>?
+            if let first = sorted.first?.dateTaken, let last = sorted.last?.dateTaken {
+                dateRange = first...last
+            } else {
+                dateRange = nil
+            }
+
+            let subtitle: String
+            if let bYear = contact.birthday?.year, bYear > 0, currentYear > bYear {
+                subtitle = "Turning \(currentYear - bYear) today"
+            } else {
+                subtitle = "Birthday today"
+            }
+
+            // Score sits well above on-this-day / years-ago so birthdays float
+            // to the front of the rail on the matching day.
+            candidates.append(Memory(
+                id: "birthday-\(path)",
+                type: .birthday,
+                title: "Happy birthday, \(bundle.displayName)",
+                subtitle: subtitle,
+                photoIDs: ids,
+                coverPhotoID: coverID,
+                dateRange: dateRange,
+                score: 100.0 + Double(min(ids.count, 50)) * 0.5,
+                yearsAgo: nil,
+                personName: bundle.displayName
+            ))
+        }
     }
 
     // MARK: Trip Detection

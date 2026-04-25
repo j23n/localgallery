@@ -226,6 +226,9 @@ enum MemoryType: String, Codable, Sendable {
     case folderEvent
     case photoDensity
     case trip
+    /// "It's <name>'s birthday" — surfaced only on the matching calendar day.
+    /// Source: system address book linked to a People/* tag.
+    case birthday
 }
 
 struct Memory: Identifiable, Hashable, Codable, Sendable {

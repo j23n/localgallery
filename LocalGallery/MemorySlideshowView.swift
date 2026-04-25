@@ -7,8 +7,9 @@ import UIKit
 /// "See all" → grid view.
 ///
 /// Locked to portrait while presented (regardless of device rotation) so the
-/// chrome layout stays consistent and landscape photos can pan without the
-/// scaffolding rotating around them.
+/// chrome layout stays consistent. Each photo is fit (not cropped) on a
+/// soft blurred copy of itself, so landscapes letterbox onto their own
+/// extended frame instead of getting panned across the canvas.
 struct MemorySlideshowView: View {
     let memory: Memory
     /// Called when the user taps "See all". When non-nil, the view defers
@@ -54,8 +55,8 @@ struct MemorySlideshowView: View {
                         // Underneath = prev (held centered) so we always have
                         // something showing during the cross-fade. The current
                         // photo fades in via .opacity transition keyed on id.
-                        SlideshowImage(url: prev.url, size: geo.size, panProgress: 0.5)
-                        SlideshowImage(url: cur.url, size: geo.size, panProgress: progress)
+                        SlideshowImage(url: prev.url, size: geo.size)
+                        SlideshowImage(url: cur.url, size: geo.size)
                             .id(cur.id)
                             .transition(.opacity.animation(.easeInOut(duration: 0.55)))
                     }
@@ -301,13 +302,11 @@ struct MemorySlideshowView: View {
     }
 }
 
-// MARK: - Slideshow image with optional Ken Burns pan for landscapes
+// MARK: - Slideshow image: fit foreground on a blurred extension of itself
 
 private struct SlideshowImage: View {
     let url: URL
     let size: CGSize
-    /// 0…1 — used as the pan progress when the loaded image is landscape.
-    let panProgress: Double
     @EnvironmentObject var manager: GalleryManager
     @State private var image: UIImage?
 
@@ -328,33 +327,22 @@ private struct SlideshowImage: View {
 
     @ViewBuilder
     private func renderedImage(_ image: UIImage) -> some View {
-        let isLandscape = image.size.width > image.size.height * 1.15
-        if isLandscape {
-            // Aspect-fill the canvas so the image fully covers it vertically,
-            // then translate horizontally over the slide's lifetime — a Ken
-            // Burns style pan that reveals the wide frame on a portrait canvas.
-            let scale = max(size.width / image.size.width, size.height / image.size.height)
-            let drawnW = image.size.width * scale
-            let slack = max(0, drawnW - size.width)
-            // Alternate direction per image so the eye doesn't expect a fixed
-            // sweep — derived from the pixel width so it's stable per photo.
-            let direction: CGFloat = (Int(image.size.width.rounded()) % 2 == 0) ? 1 : -1
-            let offset = CGFloat(panProgress - 0.5) * slack * direction
-            Image(uiImage: image)
-                .resizable()
-                .scaledToFill()
-                .frame(width: size.width, height: size.height)
-                .offset(x: offset)
-                .clipped()
-                .brightness(-0.08)
-        } else {
+        ZStack {
             Image(uiImage: image)
                 .resizable()
                 .scaledToFill()
                 .frame(width: size.width, height: size.height)
                 .clipped()
-                .brightness(-0.08)
+                .blur(radius: 60, opaque: true)
+                .overlay(Color.black.opacity(0.35))
+
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFit()
+                .frame(width: size.width, height: size.height)
         }
+        .frame(width: size.width, height: size.height)
+        .brightness(-0.08)
     }
 }
 

@@ -36,13 +36,23 @@ enum ContactsService {
         CNContactStore.authorizationStatus(for: .contacts)
     }
 
+    /// Whether the current status grants enough access to enumerate contacts.
+    /// Wraps the iOS 18+ `.limited` case behind a runtime availability check
+    /// so the iOS-17 deployment target still compiles.
+    static func isAuthorized(_ status: CNAuthorizationStatus) -> Bool {
+        if status == .authorized { return true }
+        if #available(iOS 18.0, *) {
+            return status == .limited
+        }
+        return false
+    }
+
     /// Prompt the user for Contacts access if not already determined. Returns
     /// `true` when the app has full or limited authorization afterwards.
     static func requestAccess() async -> Bool {
         let status = CNContactStore.authorizationStatus(for: .contacts)
+        if isAuthorized(status) { return true }
         switch status {
-        case .authorized, .limited:
-            return true
         case .denied, .restricted:
             return false
         case .notDetermined:
@@ -53,7 +63,7 @@ enum ContactsService {
                 Log.contacts.error("Contacts access request failed: \(error.localizedDescription)")
                 return false
             }
-        @unknown default:
+        default:
             return false
         }
     }
@@ -62,7 +72,7 @@ enum ContactsService {
     /// or restricted so callers can no-op silently.
     static func loadContacts() async -> [ContactInfo] {
         let status = CNContactStore.authorizationStatus(for: .contacts)
-        guard status == .authorized || status == .limited else { return [] }
+        guard isAuthorized(status) else { return [] }
 
         return await Task.detached(priority: .userInitiated) {
             let store = CNContactStore()

@@ -29,3 +29,9 @@ targets:
         INFOPLIST_KEY_UILaunchScreen_Generation: true
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        INFOPLIST_KEY_NSContactsUsageDescription: "LocalGallery uses your contacts to surface birthday memories for the people in your photos. Names are matched only against your photo tags — nothing leaves the device."
+        INFOPLIST_KEY_UIBackgroundModes: "fetch"
+        # Hand-rolled plist supplement — there's no INFOPLIST_KEY_* shorthand
+        # for BGTaskSchedulerPermittedIdentifiers, and Xcode merges INFOPLIST_KEY_*
+        # over the file's contents so the simple keys above still apply.
+        INFOPLIST_FILE: LocalGallery/Info.plist

@@ -36,6 +36,21 @@ struct SettingsView: View {
                 }
 
                 Section("People") {
+                    Toggle(isOn: $manager.birthdayMemoriesEnabled) {
+                        Label("Birthday Memories", systemImage: "birthday.cake")
+                    }
+
+                    NavigationLink {
+                        LinkedContactsList()
+                    } label: {
+                        LabeledContent {
+                            Text(linkedContactsSummary)
+                                .foregroundStyle(.secondary)
+                        } label: {
+                            Label("Linked Contacts", systemImage: "person.text.rectangle")
+                        }
+                    }
+
                     NavigationLink {
                         HiddenPeopleList()
                     } label: {
@@ -85,6 +100,21 @@ struct SettingsView: View {
                 }
             }
         }
+    }
+
+    /// One-line summary of linked / auto-matched contacts for the Settings row.
+    private var linkedContactsSummary: String {
+        let manualCount = manager.personContactLinks.values.filter { !$0.isEmpty }.count
+        let autoCount = manager.peopleTags.filter { person in
+            // Auto-match only — exclude any manual override (including the
+            // "" disabled sentinel).
+            guard manager.personContactLinks[person.fullPath] == nil else { return false }
+            let target = person.displayName.lowercased()
+            return manager.contacts.contains { $0.fullName.lowercased() == target }
+        }.count
+        let total = manualCount + autoCount
+        if total == 0 { return "None" }
+        return "\(total)"
     }
 
     private var appVersion: String {

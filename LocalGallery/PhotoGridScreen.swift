@@ -502,17 +502,27 @@ struct PhotoGridScreen: View {
     private func recomputeFilter() async {
         let snapshotPhotos = photos
         let snapshotQuery = query.trimmingCharacters(in: .whitespaces).lowercased()
-        let snapshotTagPaths = activeTags.map { $0.fullPath.lowercased() }
+        // Places/* are virtual parent tags — no photo carries them exactly,
+        // but every nested leaf (Places/Argentina/Buenos Aires/...) should
+        // match. Match by prefix for Places, exact otherwise.
+        let snapshotRequiredTags: [(path: String, isPlaces: Bool)] = activeTags.map {
+            ($0.fullPath.lowercased(), $0.namespace?.lowercased() == "places")
+        }
 
         let result: (filtered: [PhotoFile], sections: [PhotoSection], years: [(String, String)]) =
         await Task.detached(priority: .userInitiated) {
             // Filter first (cheap), then sort (expensive — once per input change).
             var list = snapshotPhotos
-            if !snapshotTagPaths.isEmpty {
-                let required = Set(snapshotTagPaths)
+            if !snapshotRequiredTags.isEmpty {
                 list = list.filter { photo in
-                    let tags = Set(photo.hierarchicalTags.map { $0.fullPath.lowercased() })
-                    return required.isSubset(of: tags)
+                    let photoPaths = photo.hierarchicalTags.map { $0.fullPath.lowercased() }
+                    return snapshotRequiredTags.allSatisfy { required in
+                        photoPaths.contains { hp in
+                            if hp == required.path { return true }
+                            if required.isPlaces, hp.hasPrefix(required.path + "/") { return true }
+                            return false
+                        }
+                    }
                 }
             }
             if !snapshotQuery.isEmpty {

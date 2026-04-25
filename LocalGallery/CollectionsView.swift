@@ -13,6 +13,14 @@ struct CollectionsView: View {
     @EnvironmentObject var manager: GalleryManager
     @State private var showSettings = false
 
+    // Person → contact linking sheet
+    @State private var linkingPerson: TagSuggestion?
+
+    // First-time Contacts permission primer. Tracked in UserDefaults so the
+    // prompt only appears once per install — declining doesn't re-prompt.
+    @AppStorage("hasShownContactsPrimer") private var hasShownContactsPrimer = false
+    @State private var showContactsPrimer = false
+
     // Memory-to-video share state
     @State private var renderingMemory: Memory?
     @State private var renderProgress: Double = 0
@@ -39,6 +47,35 @@ struct CollectionsView: View {
             }
         }
         .sheet(isPresented: $showSettings) { SettingsView() }
+        .sheet(item: $linkingPerson) { person in
+            ContactLinkSheet(person: person)
+        }
+        .sheet(isPresented: $showContactsPrimer) {
+            ContactsPermissionPrimer(
+                onAllow: {
+                    showContactsPrimer = false
+                    Task { await manager.requestContactsAccess() }
+                },
+                onSkip: { showContactsPrimer = false }
+            )
+            .presentationDetents([.medium])
+        }
+        // Show the Contacts primer once, the first time the user lands on
+        // Collections with photos loaded. Re-evaluates when allPhotos goes from
+        // empty → populated (initial scan) so it doesn't miss the moment.
+        // Skips silently when access is already determined (granted or denied) —
+        // we don't re-prompt; the user can grant access from Settings.
+        .task(id: manager.allPhotos.isEmpty) {
+            guard !hasShownContactsPrimer,
+                  !manager.allPhotos.isEmpty,
+                  ContactsService.authorizationStatus() == .notDetermined
+            else { return }
+            // Tiny pause so the sheet doesn't fight the appear animation.
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            guard ContactsService.authorizationStatus() == .notDetermined else { return }
+            hasShownContactsPrimer = true
+            showContactsPrimer = true
+        }
         .sheet(item: Binding<RenderedVideo?>(
             get: { renderedVideoURL.map { RenderedVideo(url: $0) } },
             set: { renderedVideoURL = $0?.url }
@@ -252,6 +289,11 @@ struct CollectionsView: View {
                                     Label(isFeatured ? "Unfeature" : "Feature",
                                           systemImage: isFeatured ? "star.slash" : "star")
                                 }
+                                Button {
+                                    linkingPerson = person
+                                } label: {
+                                    Label(linkContextLabel(person), systemImage: "person.text.rectangle")
+                                }
                                 Button(role: .destructive) {
                                     manager.hidePerson(person.fullPath)
                                 } label: {
@@ -332,6 +374,18 @@ struct CollectionsView: View {
         .padding(.vertical, 10)
     }
 
+    /// Label for the person → contact link context-menu entry. Reflects the
+    /// current state so the menu doubles as status. Goes through
+    /// `manager.linkState` so we don't re-scan the contacts array per render.
+    private func linkContextLabel(_ person: TagSuggestion) -> String {
+        switch manager.linkState(forPersonPath: person.fullPath, displayName: person.displayName) {
+        case .unlinked:           return "Link to Contact"
+        case .disabled:           return "Birthdays disabled"
+        case .manual(let c):      return "Linked: \(c.fullName)"
+        case .auto(let c):        return "Auto: \(c.fullName)"
+        }
+    }
+
     private func eventDateRange(_ folder: PhotoFolder) -> String? {
         let dates = folder.photos.compactMap(\.dateTaken).sorted()
         guard let first = dates.first, let last = dates.last else { return nil }
@@ -401,6 +455,12 @@ struct PersonCard: View {
         manager.featuredPhoto(for: tag)
     }
 
+    /// True when this person resolves to a contact (manual link or auto-match
+    /// by name). False when explicitly unlinked or no contact matches.
+    private var isLinkedToContact: Bool {
+        manager.effectiveContact(forPersonPath: tag.fullPath, displayName: tag.displayName) != nil
+    }
+
     var body: some View {
         ZStack(alignment: .bottomLeading) {
             if let photo = coverPhoto {
@@ -423,18 +483,19 @@ struct PersonCard: View {
                 endPoint: .bottom
             )
 
-            if featured {
-                Circle()
-                    .fill(Color.black.opacity(0.45))
-                    .frame(width: 20, height: 20)
-                    .overlay {
-                        Image(systemName: "star.fill")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(.white)
-                    }
-                    .padding(8)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+            // Top-right badges. Featured stays rightmost (matches existing
+            // muscle memory); the contact-link badge sits to its left when
+            // both apply.
+            HStack(spacing: 4) {
+                if isLinkedToContact {
+                    badgeCircle(systemName: "person.text.rectangle.fill")
+                }
+                if featured {
+                    badgeCircle(systemName: "star.fill")
+                }
             }
+            .padding(8)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
 
             Text(tag.displayName)
                 .font(.system(size: 13, weight: .semibold))
@@ -447,6 +508,17 @@ struct PersonCard: View {
         .frame(width: 128, height: 128)
         .clipShape(RoundedRectangle(cornerRadius: Design.cardRadius))
         .shadow(color: .black.opacity(0.06), radius: 4, y: 2)
+    }
+
+    private func badgeCircle(systemName: String) -> some View {
+        Circle()
+            .fill(Color.black.opacity(0.45))
+            .frame(width: 20, height: 20)
+            .overlay {
+                Image(systemName: systemName)
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.white)
+            }
     }
 }
 

@@ -39,14 +39,11 @@ struct ContactLinkSheet: View {
     var body: some View {
         NavigationStack {
             Group {
-                switch status {
-                case .notDetermined:
-                    permissionPrompt
-                case .denied, .restricted:
-                    permissionDenied
-                case .authorized, .limited:
+                if ContactsService.isAuthorized(status) {
                     contactsList
-                @unknown default:
+                } else if status == .notDetermined {
+                    permissionPrompt
+                } else {
                     permissionDenied
                 }
             }
@@ -261,6 +258,65 @@ struct ContactLinkSheet: View {
     }
 }
 
+// MARK: - Contacts Permission Primer
+
+/// First-launch sheet shown the first time the user opens the Collections tab.
+/// Soft-asks for Contacts access so birthday memories can light up. Skipping
+/// records the choice in `hasShownContactsPrimer` so we don't nag again — the
+/// user can grant access later from Settings → People → Linked Contacts.
+struct ContactsPermissionPrimer: View {
+    let onAllow: () -> Void
+    let onSkip: () -> Void
+
+    var body: some View {
+        VStack(spacing: 18) {
+            ZStack {
+                Circle()
+                    .fill(Design.accentSoft)
+                    .frame(width: 84, height: 84)
+                Image(systemName: "birthday.cake")
+                    .font(.system(size: 36, weight: .light))
+                    .foregroundStyle(Design.accentColor)
+            }
+            .padding(.top, 8)
+
+            VStack(spacing: 6) {
+                Text("Birthday memories")
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(Design.ink)
+                Text("Allow Contacts access so LocalGallery can surface a memory for the people in your photos on their birthday. Names are matched only against your photo tags — nothing leaves the device.")
+                    .font(.subheadline)
+                    .foregroundStyle(Design.ink2)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 28)
+            }
+
+            Spacer(minLength: 8)
+
+            VStack(spacing: 10) {
+                Button(action: onAllow) {
+                    Text("Allow Contacts")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(Design.accentColor, in: Capsule())
+                }
+                Button(action: onSkip) {
+                    Text("Not now")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(Design.ink2)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 20)
+        }
+        .background(Design.bg)
+    }
+}
+
 // MARK: - Linked Contacts (Settings sub-screen)
 
 /// Lists every person tag that currently has a manual contact link or an
@@ -344,8 +400,7 @@ struct LinkedContactsList: View {
     @ViewBuilder
     private var statusFooter: some View {
         let status = ContactsService.authorizationStatus()
-        switch status {
-        case .authorized, .limited:
+        if ContactsService.isAuthorized(status) {
             HStack {
                 Label("Granted", systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.green)
@@ -354,13 +409,13 @@ struct LinkedContactsList: View {
                     .foregroundStyle(.secondary)
                     .font(.footnote)
             }
-        case .notDetermined:
+        } else if status == .notDetermined {
             Button {
                 Task { await manager.requestContactsAccess() }
             } label: {
                 Label("Allow Contacts access", systemImage: "person.crop.circle.badge.plus")
             }
-        case .denied, .restricted:
+        } else {
             Button {
                 if let url = URL(string: UIApplication.openSettingsURLString) {
                     UIApplication.shared.open(url)
@@ -369,8 +424,6 @@ struct LinkedContactsList: View {
                 Label("Open iOS Settings", systemImage: "gear")
             }
             .foregroundStyle(Design.destructive)
-        @unknown default:
-            EmptyView()
         }
     }
 

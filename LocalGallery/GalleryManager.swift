@@ -8,6 +8,11 @@ import os
 
 @MainActor
 final class GalleryManager: ObservableObject, @unchecked Sendable {
+    /// Weak shared accessor used by the static `BGAppRefreshTask` handler in
+    /// AppDelegate. Set from `init()` so it resolves even during a background-
+    /// only launch where the SwiftUI scene's `.onAppear` may not fire.
+    static weak var shared: GalleryManager?
+
     @Published var rootFolder: PhotoFolder?
     @Published var allPhotos: [PhotoFile] = []
     @Published var isScanning: Bool = false
@@ -50,6 +55,23 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         didSet { persistPersonContactLinks() }
     }
 
+    /// Master toggle for birthday memories. When `false`, `generateMemories`
+    /// skips the birthday category entirely. Default `true` so the feature
+    /// surfaces automatically once Contacts access is granted.
+    @Published var birthdayMemoriesEnabled: Bool = true {
+        didSet {
+            guard oldValue != birthdayMemoriesEnabled, !_isInitializing else { return }
+            UserDefaults.standard.set(birthdayMemoriesEnabled, forKey: "birthdayMemoriesEnabled")
+            // Force a regenerate so today's rail reflects the toggle change
+            // immediately rather than waiting for the daily gate.
+            forceRegenerateMemories()
+        }
+    }
+    /// Set to `false` at the end of `init()` so didSet observers can skip
+    /// expensive side-effects (like cache clears) while restoring persisted
+    /// state.
+    private var _isInitializing = true
+
     private var isEnriching = false
     /// In-flight scan, keyed by URL. Concurrent callers for the same URL await
     /// the existing task instead of starting a second traversal (app launch +
@@ -82,6 +104,7 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
     }
 
     init() {
+        Self.shared = self
         thumbnailCache.totalCostLimit = 100 * 1024 * 1024
         fullImageCache.totalCostLimit = 200 * 1024 * 1024
 
@@ -107,6 +130,9 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         if let dict = UserDefaults.standard.dictionary(forKey: "personContactLinks") as? [String: String] {
             personContactLinks = dict
         }
+        if UserDefaults.standard.object(forKey: "birthdayMemoriesEnabled") != nil {
+            birthdayMemoriesEnabled = UserDefaults.standard.bool(forKey: "birthdayMemoriesEnabled")
+        }
         loadMemoriesCache()
 
         // Load cache + start security scope synchronously so cached
@@ -129,6 +155,8 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
                 }
             }
         }
+
+        _isInitializing = false
     }
 
     deinit {
@@ -1156,6 +1184,28 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
 
     }
 
+    /// Background-task entry point. Refreshes contacts (in case the user added
+    /// or edited birthdays since the app last ran) and runs the once-a-day
+    /// memory regeneration. The day-gate inside `generateMemoriesIfNeeded`
+    /// short-circuits if the foreground app already generated today's batch.
+    func runScheduledMemoryRefresh() async {
+        await loadContacts()
+        // We don't rescan the photo library in background — folder bookmarks
+        // require an active security scope which the system may not honor for
+        // a BGAppRefreshTask. Birthday detection only needs `allPhotos` (already
+        // in memory from the last foreground scan) plus `contacts`.
+        guard !allPhotos.isEmpty else {
+            Log.bg.info("No photos in memory; skipping background memory generation")
+            return
+        }
+        // Force a regeneration so today's birthdays surface even if the day
+        // gate was set during a previous session.
+        memoriesGeneratedDay = nil
+        let snapshot = allPhotos
+        let leaves = _cachedLeafFolders
+        await generateMemories(from: snapshot, leafFolders: leaves)
+    }
+
     /// Clear the once-per-day gate + cached memories and immediately re-run detection.
     /// Wired to a long-press on the "Memories" section header in CollectionsView.
     func forceRegenerateMemories() {
@@ -1393,6 +1443,7 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         let contactsSnapshot = self.contacts
         let linksSnapshot = self.personContactLinks
         let lowerNameIndexSnapshot = self._contactsByLowerName
+        let birthdaysEnabledSnapshot = self.birthdayMemoriesEnabled
 
         let results: [Memory] = await Task.detached(priority: .utility) {
             let calendar = Calendar.current
@@ -1549,16 +1600,20 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
             // birthday and the person has at least 1 tagged photo. Manual links
             // (linksSnapshot[fullPath]) override the auto-match by name; an
             // empty-string sentinel means the user explicitly disabled the link.
-            Self.generateBirthdayMemories(
-                from: allPhotos,
-                contacts: contactsSnapshot,
-                links: linksSnapshot,
-                lowerNameIndex: lowerNameIndexSnapshot,
-                calendar: calendar,
-                todayComponents: todayComponents,
-                currentYear: currentYear,
-                into: &candidates
-            )
+            // Skipped entirely when the user has disabled the master toggle in
+            // Settings (`birthdayMemoriesEnabled`).
+            if birthdaysEnabledSnapshot {
+                Self.generateBirthdayMemories(
+                    from: allPhotos,
+                    contacts: contactsSnapshot,
+                    links: linksSnapshot,
+                    lowerNameIndex: lowerNameIndexSnapshot,
+                    calendar: calendar,
+                    todayComponents: todayComponents,
+                    currentYear: currentYear,
+                    into: &candidates
+                )
+            }
 
             // Cap per-memory photo count to keep slideshow/grid responsive.
             // Sample evenly across the range to preserve temporal spread.

@@ -1,6 +1,7 @@
 import SwiftUI
 import AVFoundation
 import UIKit
+import BackgroundTasks
 
 // MARK: - Design Tokens (Quiet direction)
 
@@ -42,12 +43,94 @@ extension View {
     }
 }
 
-/// AppDelegate exists solely so individual screens can lock orientation:
-/// `OrientationLock.lock(.portrait)` flips the static and we report it back to
-/// UIKit. SwiftUI has no native equivalent for per-screen orientation locking.
+/// AppDelegate handles two things: per-screen orientation locking (used by
+/// `OrientationLock`) and registration of the once-a-day background refresh
+/// task that re-runs memory generation when the app isn't open. Registration
+/// must happen synchronously in `didFinishLaunchingWithOptions`, before the
+/// scene is connected — that's why this lives here and not on `GalleryManager`.
 final class AppDelegate: NSObject, UIApplicationDelegate {
+    /// `BGTaskSchedulerPermittedIdentifiers` whitelists this exact string in
+    /// the Info.plist; both must stay in sync.
+    static let backgroundRefreshIdentifier = "com.localgallery.app.dailyMemories"
+
+    func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        BGTaskScheduler.shared.register(
+            forTaskWithIdentifier: Self.backgroundRefreshIdentifier,
+            using: nil
+        ) { task in
+            Self.handleBackgroundRefresh(task: task as! BGAppRefreshTask)
+        }
+
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            Self.scheduleBackgroundRefresh()
+        }
+
+        return true
+    }
+
     func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
         OrientationLock.current
+    }
+
+    /// Schedule the next background refresh ~24h out. iOS treats this as an
+    /// earliest-bound — the actual run is opportunistic and may be skipped.
+    /// The foreground catch-up in `GalleryManager.generateMemoriesIfNeeded` is
+    /// the safety net for days iOS skips.
+    static func scheduleBackgroundRefresh() {
+        let request = BGAppRefreshTaskRequest(identifier: backgroundRefreshIdentifier)
+        request.earliestBeginDate = Date(timeIntervalSinceNow: 24 * 60 * 60)
+        do {
+            try BGTaskScheduler.shared.submit(request)
+            Log.bg.info("Scheduled background refresh for ~24h from now")
+        } catch {
+            // Common reasons: simulator (where BG tasks aren't supported) or
+            // user disabled "Background App Refresh". Not actionable from code.
+            Log.bg.warning("Failed to schedule background refresh: \(error.localizedDescription)")
+        }
+    }
+
+    /// Handler for the background refresh. Asks `GalleryManager` to run the
+    /// once-a-day memory regeneration (skipped if already done today). Always
+    /// re-schedules the next run so a single skipped day doesn't kill the
+    /// recurring schedule.
+    private static func handleBackgroundRefresh(task: BGAppRefreshTask) {
+        Log.bg.info("Background refresh started")
+        scheduleBackgroundRefresh()
+
+        let work = Task { @MainActor in
+            // GalleryManager.shared is set inside `GalleryManager.init`, which
+            // SwiftUI invokes lazily the first time the WindowGroup body
+            // evaluates. On a true background-only launch SwiftUI may never
+            // build a scene, in which case `shared` is nil and we no-op. That's
+            // acceptable: the next foreground entry runs the same generation
+            // via `generateMemoriesIfNeeded` (the foreground catch-up path).
+            // Constructing the manager from AppDelegate would fix this but
+            // would also tie the SwiftUI environment to an external instance.
+            guard let manager = GalleryManager.shared else {
+                Log.bg.warning("No active GalleryManager (background-only launch); nothing to do")
+                return
+            }
+            await manager.runScheduledMemoryRefresh()
+        }
+
+        // Expiration just cancels — completion is reported once below after
+        // `work` finishes (or finishes-via-cancellation), so we never call
+        // `setTaskCompleted` twice.
+        task.expirationHandler = {
+            Log.bg.warning("Background refresh expired before completion")
+            work.cancel()
+        }
+
+        Task {
+            await work.value
+            let success = !work.isCancelled
+            task.setTaskCompleted(success: success)
+            Log.bg.info("Background refresh finished (success: \(success))")
+        }
     }
 }
 

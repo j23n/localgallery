@@ -36,6 +36,21 @@ struct SettingsView: View {
                 }
 
                 Section("People") {
+                    Toggle(isOn: $manager.birthdayMemoriesEnabled) {
+                        Label("Birthday Memories", systemImage: "birthday.cake")
+                    }
+
+                    NavigationLink {
+                        LinkedContactsList()
+                    } label: {
+                        LabeledContent {
+                            Text(linkedContactsSummary)
+                                .foregroundStyle(.secondary)
+                        } label: {
+                            Label("Linked Contacts", systemImage: "person.text.rectangle")
+                        }
+                    }
+
                     NavigationLink {
                         HiddenPeopleList()
                     } label: {
@@ -85,6 +100,21 @@ struct SettingsView: View {
                 }
             }
         }
+    }
+
+    /// One-line summary of linked / auto-matched contacts for the Settings row.
+    /// Uses `linkState` so we don't linear-scan `manager.contacts` per person on
+    /// every body re-evaluation (which fires whenever any @Published on the
+    /// manager ticks).
+    private var linkedContactsSummary: String {
+        var total = 0
+        for person in manager.peopleTags {
+            switch manager.linkState(forPersonPath: person.fullPath, displayName: person.displayName) {
+            case .manual, .auto: total += 1
+            case .disabled, .unlinked: break
+            }
+        }
+        return total == 0 ? "None" : "\(total)"
     }
 
     private var appVersion: String {

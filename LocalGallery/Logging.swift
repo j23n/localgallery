@@ -11,4 +11,6 @@ enum Log {
     static let memory  = Logger(subsystem: subsystem, category: "memory")
     static let index   = Logger(subsystem: subsystem, category: "index")
     static let ui      = Logger(subsystem: subsystem, category: "ui")
+    static let contacts = Logger(subsystem: subsystem, category: "contacts")
+    static let bg      = Logger(subsystem: subsystem, category: "background")
 }

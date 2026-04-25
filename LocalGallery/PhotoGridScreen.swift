@@ -50,7 +50,9 @@ struct PhotoGridScreen: View {
     @State private var sectionsCache: [PhotoSection] = []
     @State private var yearsCache: [(year: String, sectionID: String)] = []
 
-    private var grid: GridLayoutConfig { GridLayoutConfig(sizeTier: sizeTier) }
+    private func grid(isLandscape: Bool) -> GridLayoutConfig {
+        GridLayoutConfig(sizeTier: sizeTier, isLandscape: isLandscape)
+    }
 
     // Cheap identity for the photos input: count + first/last date catches
     // both re-scans (count changes) and enrichment (dates change).
@@ -85,6 +87,8 @@ struct PhotoGridScreen: View {
     var body: some View {
         GeometryReader { geo in
             let width = geo.size.width
+            let isLandscape = geo.size.width > geo.size.height
+            let grid = grid(isLandscape: isLandscape)
             let cell = grid.cellSize(for: width)
 
             ScrollViewReader { proxy in
@@ -110,7 +114,7 @@ struct PhotoGridScreen: View {
                         )
                         .padding(.top, 48)
                     } else {
-                        LazyVGrid(columns: grid.columns(for: width), spacing: 2, pinnedViews: [.sectionHeaders]) {
+                        LazyVGrid(columns: grid.columns(for: width), spacing: 2) {
                             ForEach(sectionsCache) { section in
                                 Section {
                                     ForEach(section.photos) { photo in
@@ -125,7 +129,6 @@ struct PhotoGridScreen: View {
                                         .padding(.horizontal, 20)
                                         .padding(.top, 14)
                                         .padding(.bottom, 6)
-                                        .background(.ultraThinMaterial)
                                         .id(section.id)
                                 }
                             }
@@ -431,9 +434,9 @@ struct PhotoGridScreen: View {
                 }
 
                 Button {
-                    sizeTier = (sizeTier + 1) % 3
+                    sizeTier = (sizeTier + 1) % GridLayoutConfig.tierCount
                 } label: {
-                    Image(systemName: grid.gridIconName)
+                    Image(systemName: GridLayoutConfig(sizeTier: sizeTier, isLandscape: false).gridIconName)
                 }
             }
         }

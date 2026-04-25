@@ -5,12 +5,18 @@ struct EXIFSheetView: View {
     let photo: PhotoFile
     @EnvironmentObject var manager: GalleryManager
     @State private var exifData: EXIFData?
+    @State private var photoToolsData: PhotoToolsMetadata = PhotoToolsMetadata()
     @State private var isLoading = true
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                EXIFContentView(photo: photo, exifData: exifData, isLoading: isLoading)
+                EXIFContentView(
+                    photo: photo,
+                    exifData: exifData,
+                    photoToolsData: photoToolsData,
+                    isLoading: isLoading
+                )
             }
             .background(Color(.systemGroupedBackground))
             .navigationTitle("Info")
@@ -18,7 +24,10 @@ struct EXIFSheetView: View {
         }
         .presentationDetents([.medium, .large])
         .task {
-            exifData = await manager.loadEXIF(for: photo)
+            async let exif = manager.loadEXIF(for: photo)
+            async let pt = manager.loadPhotoToolsMetadata(for: photo)
+            exifData = await exif
+            photoToolsData = await pt
             isLoading = false
         }
     }
@@ -27,6 +36,7 @@ struct EXIFSheetView: View {
 struct EXIFContentView: View {
     let photo: PhotoFile
     let exifData: EXIFData?
+    let photoToolsData: PhotoToolsMetadata
     let isLoading: Bool
 
     var body: some View {
@@ -66,6 +76,16 @@ struct EXIFContentView: View {
                             infoRow("Coordinates", value: nil)
                         }
                     }
+
+                    if !photoToolsData.isEmpty {
+                        section("photo-tools") {
+                            infoRow("Tagger Version", value: photoToolsData.taggerVersion)
+                            infoRow("Tagged At", value: photoToolsData.taggedAt)
+                            infoRow("Country Code", value: photoToolsData.countryCode)
+                            infoRow("CLIP Model", value: photoToolsData.clipModel)
+                            infoRow("CLIP Timestamp", value: photoToolsData.clipTimestamp)
+                        }
+                    }
                 }
                 .padding(.horizontal, 16)
             }
@@ -85,6 +105,7 @@ struct EXIFContentView: View {
                 .foregroundStyle(.secondary)
                 .textCase(.uppercase)
                 .tracking(0.8)
+                .padding(.leading, 14)
             VStack(spacing: 0) {
                 content()
             }
@@ -197,9 +218,10 @@ private struct HierarchicalTagFlowView: View {
         FlowLayout(spacing: 6) {
             ForEach(tags, id: \.fullPath) { tag in
                 Label {
-                    Text(tag.displayName)
+                    Text(tag.fullPath)
                         .font(.caption)
                         .fontWeight(.medium)
+                        .lineLimit(1)
                 } icon: {
                     Image(systemName: TagNamespace.icon(for: tag.namespace))
                         .font(.system(size: 9))

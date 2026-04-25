@@ -33,15 +33,17 @@ struct HierarchicalTag: Hashable, Codable, Sendable {
 // MARK: - Tag Namespace Icons
 
 enum TagNamespace {
-    /// SF Symbol for one of the four photo-tools taxonomy roots.
+    /// SF Symbol for one of the six photo-tools taxonomy roots.
     /// See photo-tools xmp-schema.md §2.
     static func icon(for namespace: String?) -> String {
         switch namespace?.lowercased() {
-        case "people":  return "person.fill"
-        case "places":  return "mappin.and.ellipse"
-        case "objects": return "cube.fill"
-        case "scenes":  return "photo.fill"
-        default:        return "tag.fill"
+        case "people":    return "person.fill"
+        case "places":    return "mappin.and.ellipse"
+        case "landmarks": return "building.columns.fill"
+        case "objects":   return "cube.fill"
+        case "scenes":    return "mountain.2.fill"
+        case "text":      return "textformat"
+        default:          return "tag.fill"
         }
     }
 
@@ -176,6 +178,22 @@ struct EXIFData: Equatable, Sendable {
     var dateTimeOriginal: Date?
     var pixelWidth: Int?
     var pixelHeight: Int?
+}
+
+/// Internal fields written by the `photo-tools` custom XMP namespace.
+/// See photo-tools xmp-schema.md §1.2. `CLIPEmbedding` is intentionally
+/// excluded — it's a large base64 blob with no display value.
+struct PhotoToolsMetadata: Equatable, Sendable {
+    var taggerVersion: String?
+    var taggedAt: String?
+    var countryCode: String?
+    var clipModel: String?
+    var clipTimestamp: String?
+
+    var isEmpty: Bool {
+        taggerVersion == nil && taggedAt == nil && countryCode == nil
+            && clipModel == nil && clipTimestamp == nil
+    }
 }
 
 struct PhotoFolder: Identifiable, Codable, Sendable {

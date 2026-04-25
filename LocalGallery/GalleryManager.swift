@@ -1010,15 +1010,15 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
             // Build a TagSuggestion for every key in tagPhotos — including the
             // virtual Places/* prefixes that no photo carries exactly. We can
             // construct a HierarchicalTag from the canonical path for each key.
-            let tags: [TagSuggestion] = tagPhotosSnapshot.compactMap { key, photos in
-                guard let path = canonicalPathSnapshot[key] else { return nil }
+            let tags: [TagSuggestion] = tagPhotosSnapshot.compactMap { entry -> TagSuggestion? in
+                guard let path = canonicalPathSnapshot[entry.key] else { return nil }
                 let tag = HierarchicalTag(raw: path)
                 return TagSuggestion(
                     id: tag.fullPath.lowercased(),
                     displayName: tag.displayName,
                     fullPath: tag.fullPath,
                     namespace: tag.namespace,
-                    count: photos.count
+                    count: entry.value.count
                 )
             }
             .sorted { $0.count > $1.count }

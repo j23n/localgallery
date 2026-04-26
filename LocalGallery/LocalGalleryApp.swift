@@ -178,6 +178,15 @@ struct LocalGalleryApp: App {
                 .onOpenURL { url in
                     router.handle(url, manager: galleryManager)
                 }
+                // Cold-launch deep links (folder/memory) queue an id when the
+                // backing data isn't ready; consume them as soon as the data
+                // appears so the user lands on the right screen.
+                .onChange(of: galleryManager.rootFolder?.id) { _, _ in
+                    router.consumePendingIfReady(manager: galleryManager)
+                }
+                .onChange(of: galleryManager.memories.count) { _, _ in
+                    router.consumePendingIfReady(manager: galleryManager)
+                }
         }
     }
 

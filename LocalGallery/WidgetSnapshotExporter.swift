@@ -2,6 +2,7 @@ import Foundation
 import UIKit
 import ImageIO
 import WidgetKit
+import CryptoKit
 import os
 
 /// Publishes a compact snapshot of the library into the App Group container so
@@ -19,6 +20,19 @@ actor WidgetSnapshotExporter {
     /// is ~1180px wide @3x, so 1024 keeps headroom without bloating storage.
     private static let thumbMaxPixel: CGFloat = 1024
     private static let thumbQuality: CGFloat = 0.85
+    /// Cap parallel `CGImageSourceCreateThumbnailAtIndex` decodes during thumb
+    /// generation. With 500 photos in the index pool a first-run could otherwise
+    /// spawn 500 simultaneous decoders and pin a phone's CPU.
+    private static let thumbnailConcurrency = 8
+
+    /// Day-only formatter reused across exports — `ISO8601DateFormatter()` is
+    /// expensive to allocate, and we only need a stable date string for the
+    /// content fingerprint.
+    private static let dayKeyFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withFullDate]
+        return f
+    }()
 
     /// One person whose linked contact's birthday is today. Pre-computed on
     /// the main actor by `GalleryManager.exportWidgetSnapshot`, so the
@@ -50,19 +64,19 @@ actor WidgetSnapshotExporter {
 
     func export(_ inputs: Inputs) async {
         let t = CFAbsoluteTimeGetCurrent()
+        SharedContainer.prepareDirectories()
         guard SharedContainer.widgetDataDir != nil,
               let thumbsDir = SharedContainer.thumbsDir else {
             Log.widget.warning("App Group container unavailable; skipping export")
             return
         }
 
-        // Cheap dedup: skip re-export when the input shape hasn't changed.
-        // Signature includes the calendar day so day rollovers always rebuild
-        // even when the library is idle (today's onThisDay/birthday memories
-        // become valid for one day).
-        let dayKey = ISO8601DateFormatter().string(from: Calendar.current.startOfDay(for: Date()))
-        let preSig = "\(dayKey)|\(inputs.allPhotos.count)|\(inputs.memories.count)|\(inputs.allTags.count)|\(inputs.leafFolders.count)|\(inputs.todayBirthdays.count)"
-        if preSig == lastExportSignature {
+        // Content-aware dedup: skip re-export when the inputs that actually
+        // affect the snapshot haven't changed. Mixes in the calendar day so
+        // a midnight rollover always rebuilds (today's onThisDay/birthday
+        // memories become valid for one day at a time).
+        let signature = Self.contentFingerprint(inputs: inputs)
+        if signature == lastExportSignature {
             Log.widget.debug("Snapshot signature unchanged — skipping export")
             return
         }
@@ -84,8 +98,6 @@ actor WidgetSnapshotExporter {
         let tagPaths = inputs.allTags
             .map(\.fullPath)
             .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
-
-        let signature = preSig
 
         // Collect referenced photos: index pool ∪ memory items.
         var referencedPhotos: [String: (PhotoFile, WidgetPhotoRef)] = [:]
@@ -119,6 +131,57 @@ actor WidgetSnapshotExporter {
 
         lastExportSignature = signature
         WidgetCenter.shared.reloadAllTimelines()
+    }
+
+    // MARK: - Content fingerprint
+
+    /// Hex-encoded MD5 of every input that affects the published snapshot —
+    /// photo identity *and* mutable fields (date, tags, folder), plus tag/
+    /// memory/folder/birthday inventories and the calendar day. Catches
+    /// equal-count edits (delete-one-add-one, retag, mtime bump) that the
+    /// previous count-only signature missed.
+    private static func contentFingerprint(inputs: Inputs) -> String {
+        var hasher = Insecure.MD5()
+
+        let dayKey = dayKeyFormatter.string(from: Calendar.current.startOfDay(for: Date()))
+        hasher.update(data: Data("day:\(dayKey)\n".utf8))
+
+        // Photos: stable identity + everything the widget displays. Sort by id
+        // so reordered allPhotos arrays produce the same hash.
+        hasher.update(data: Data("photos:\n".utf8))
+        let recent = inputs.allPhotos
+            .filter { !$0.isVideo }
+            .sorted { ($0.dateTaken ?? .distantPast) > ($1.dateTaken ?? .distantPast) }
+            .prefix(maxIndexPhotos)
+            .sorted { $0.id.uuidString < $1.id.uuidString }
+        for p in recent {
+            let date = p.dateTaken.map { String($0.timeIntervalSince1970) } ?? "nil"
+            let tags = p.hierarchicalTags.map(\.fullPath).sorted().joined(separator: ",")
+            hasher.update(data: Data("\(p.id.uuidString)|\(date)|\(tags)\n".utf8))
+        }
+
+        hasher.update(data: Data("tags:\n".utf8))
+        for path in inputs.allTags.map(\.fullPath).sorted() {
+            hasher.update(data: Data("\(path)\n".utf8))
+        }
+
+        hasher.update(data: Data("memories:\n".utf8))
+        for m in inputs.memories.sorted(by: { $0.id < $1.id }) {
+            hasher.update(data: Data("\(m.id)|\(m.coverPhotoID.uuidString)|\(m.photoIDs.count)\n".utf8))
+        }
+
+        hasher.update(data: Data("folders:\n".utf8))
+        for f in inputs.leafFolders.sorted(by: { $0.id.uuidString < $1.id.uuidString }) {
+            let mod = f.dateModified.map { String($0.timeIntervalSince1970) } ?? "nil"
+            hasher.update(data: Data("\(f.id.uuidString)|\(f.name)|\(mod)|\(f.photos.count)\n".utf8))
+        }
+
+        hasher.update(data: Data("birthdays:\n".utf8))
+        for b in inputs.todayBirthdays.sorted(by: { $0.tagFullPath < $1.tagFullPath }) {
+            hasher.update(data: Data("\(b.tagFullPath)|\(b.displayName)\n".utf8))
+        }
+
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     // MARK: - Photo / Folder maps
@@ -213,24 +276,35 @@ actor WidgetSnapshotExporter {
 
         // 2. Birthdays — synthesize a memory for every pre-resolved entry.
         //    The main app filtered out unlinked / disabled / non-matching
-        //    people already, so we just emit one item per resolution.
-        for resolution in todayBirthdays {
-            let photos = allPhotos.filter { photo in
-                photo.hierarchicalTags.contains { $0.fullPath == resolution.tagFullPath }
+        //    people already, so we just emit one item per resolution. We
+        //    build the tag→photos index once and key it on lowercased
+        //    fullPath, matching the convention used elsewhere in the app
+        //    (`GalleryManager._photosForTag`) — so case-only differences
+        //    between the canonical tag list and a photo's raw XMP entry
+        //    don't drop photos.
+        if !todayBirthdays.isEmpty {
+            var photosByTag: [String: [PhotoFile]] = [:]
+            for photo in allPhotos {
+                for tag in photo.hierarchicalTags {
+                    photosByTag[tag.fullPath.lowercased(), default: []].append(photo)
+                }
             }
-            guard !photos.isEmpty else { continue }
-            let sorted = photos.sorted { ($0.dateTaken ?? .distantPast) > ($1.dateTaken ?? .distantPast) }
-            let refs = Array(sorted.prefix(12)).map { makeRef(photo: $0, folderIdByURL: folderIdByURL) }
-            items.append(MemorySnapshotItem(
-                id: "birthday-" + resolution.tagFullPath,
-                kind: .birthday,
-                title: "\(resolution.displayName)'s birthday",
-                subtitle: "\(photos.count) photos",
-                photoRefs: refs,
-                validFrom: startOfToday,
-                validTo: startOfTomorrow,
-                priority: 100
-            ))
+            for resolution in todayBirthdays {
+                let photos = photosByTag[resolution.tagFullPath.lowercased()] ?? []
+                guard !photos.isEmpty else { continue }
+                let sorted = photos.sorted { ($0.dateTaken ?? .distantPast) > ($1.dateTaken ?? .distantPast) }
+                let refs = Array(sorted.prefix(12)).map { makeRef(photo: $0, folderIdByURL: folderIdByURL) }
+                items.append(MemorySnapshotItem(
+                    id: "birthday-" + resolution.tagFullPath,
+                    kind: .birthday,
+                    title: "\(resolution.displayName)'s birthday",
+                    subtitle: "\(photos.count) photos",
+                    photoRefs: refs,
+                    validFrom: startOfToday,
+                    validTo: startOfTomorrow,
+                    priority: 100
+                ))
+            }
         }
 
         // 3. Fallback: if nothing applies today, surface a "Recent" item so the
@@ -278,12 +352,25 @@ actor WidgetSnapshotExporter {
     // MARK: - Thumbnails
 
     private func generateThumbnails(_ pairs: [(PhotoFile, WidgetPhotoRef)], thumbsDir: URL) async {
+        // Cap concurrency: a first-run with the full 500-photo pool would
+        // otherwise spawn 500 simultaneous CGImageSource decoders and pin
+        // the device's CPU. Sliding window via the in-flight counter keeps
+        // exactly `thumbnailConcurrency` decodes inflight at any moment.
+        let limit = Self.thumbnailConcurrency
         await withTaskGroup(of: Void.self) { group in
-            for (photo, ref) in pairs {
+            var inflight = 0
+            var iter = pairs.makeIterator()
+            while let (photo, ref) = iter.next() {
+                if inflight >= limit {
+                    await group.next()
+                    inflight -= 1
+                }
                 group.addTask {
                     await Self.writeThumbIfNeeded(photo: photo, ref: ref, thumbsDir: thumbsDir)
                 }
+                inflight += 1
             }
+            await group.waitForAll()
         }
     }
 

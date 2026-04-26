@@ -25,7 +25,6 @@ struct PhotoGridScreen: View {
 
     @State private var query: String = ""
     @State private var activeTags: [TagSuggestion] = []
-    @State private var didSeedTags = false
     @State private var scrollToTopTrigger = false
     @FocusState private var searchFocused: Bool
 
@@ -166,16 +165,14 @@ struct PhotoGridScreen: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { toolbarContent }
         .task(id: filterKey) {
-            // Seed tags exactly once on first appearance so widget deep-links
-            // land with the requested filter applied. Mutating activeTags here
-            // re-triggers .task(id:) — didSeedTags prevents the second pass
-            // from clobbering user edits.
-            if !didSeedTags && !initialTags.isEmpty && activeTags.isEmpty {
-                didSeedTags = true
+            // Seed tags on first appearance when a deep link supplied them.
+            // Re-mounts (via the parent's `.id(...)` whenever seedTags
+            // changes) reset @State, so the `activeTags.isEmpty` check is
+            // the only guard we need against re-seeding over user edits.
+            if !initialTags.isEmpty && activeTags.isEmpty {
                 activeTags = initialTags
                 return
             }
-            didSeedTags = true
             await recomputeFilter()
         }
         .fullScreenCover(item: $viewerPhoto) { photo in

@@ -3,33 +3,36 @@ import Foundation
 /// Paths inside the App Group container that both the app and the widget
 /// extension access. Anything under `widgetDataDir` is published by the main
 /// app and read by widgets.
+///
+/// URLs are computed once and cached. Directory creation runs in
+/// `prepareDirectories()` rather than on every property read — call it from
+/// the export site before writing.
 enum SharedContainer {
     static let appGroupID = "group.com.localgallery.shared"
 
-    static var rootURL: URL? {
-        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupID)
-    }
+    static let rootURL: URL? = FileManager.default.containerURL(
+        forSecurityApplicationGroupIdentifier: appGroupID
+    )
 
-    static var widgetDataDir: URL? {
-        guard let root = rootURL else { return nil }
-        let dir = root.appendingPathComponent("WidgetData", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
-    }
+    static let widgetDataDir: URL? = rootURL?.appendingPathComponent("WidgetData", isDirectory: true)
+    static let thumbsDir: URL? = widgetDataDir?.appendingPathComponent("thumbs", isDirectory: true)
 
-    static var thumbsDir: URL? {
-        guard let dir = widgetDataDir else { return nil }
-        let t = dir.appendingPathComponent("thumbs", isDirectory: true)
-        try? FileManager.default.createDirectory(at: t, withIntermediateDirectories: true)
-        return t
-    }
+    static let indexURL: URL? = widgetDataDir?.appendingPathComponent("index.json")
+    static let foldersURL: URL? = widgetDataDir?.appendingPathComponent("folders.json")
+    static let tagsURL: URL? = widgetDataDir?.appendingPathComponent("tags.json")
+    static let memoriesURL: URL? = widgetDataDir?.appendingPathComponent("memories.json")
 
-    static var indexURL: URL? { widgetDataDir?.appendingPathComponent("index.json") }
-    static var foldersURL: URL? { widgetDataDir?.appendingPathComponent("folders.json") }
-    static var tagsURL: URL? { widgetDataDir?.appendingPathComponent("tags.json") }
-    static var memoriesURL: URL? { widgetDataDir?.appendingPathComponent("memories.json") }
+    static let defaults: UserDefaults? = UserDefaults(suiteName: appGroupID)
 
-    static var defaults: UserDefaults? {
-        UserDefaults(suiteName: appGroupID)
+    /// Idempotent — call before writing files. Widgets only read, so they
+    /// don't need to invoke this.
+    static func prepareDirectories() {
+        let fm = FileManager.default
+        if let dir = widgetDataDir {
+            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        if let dir = thumbsDir {
+            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
     }
 }

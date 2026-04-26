@@ -86,6 +86,7 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
     private let bookmarkKey = "rootFolderBookmark"
     private var activeSecurityScopedURL: URL?
     private var foregroundObserver: Any?
+    private var significantTimeChangeObserver: Any?
 
     private let thumbnailDiskCacheDir: URL = {
         let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
@@ -142,13 +143,11 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         if loadCache(), let url = resolveBookmark() {
             startAccessingFolder(url)
         }
-
-        // Republish the widget snapshot from whatever's in cache so widgets
-        // installed before today's first scan completes have something to render.
-        if !allPhotos.isEmpty {
-            lastWidgetExportDay = Calendar.current.startOfDay(for: Date())
-            exportWidgetSnapshot()
-        }
+        // Note: no eager exportWidgetSnapshot() here. Tag aggregation runs in
+        // a Task.detached off rebuildSortAndIndex() and triggers its own
+        // export once the tag catalog is populated, which gives the widget a
+        // complete first snapshot rather than an empty-tags one we'd
+        // immediately replace.
 
         // Rescan when app returns to foreground (e.g. user added files in Files app)
         foregroundObserver = NotificationCenter.default.addObserver(
@@ -169,17 +168,32 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
             }
         }
 
+        // Catches the day-rollover case where the app stays foregrounded past
+        // midnight. iOS posts `significantTimeChangeNotification` for both
+        // midnight and timezone shifts; either case wants a memory rebuild.
+        significantTimeChangeObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.significantTimeChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refreshWidgetIfDayChanged()
+            }
+        }
+
         _isInitializing = false
     }
 
-    /// Tracks the calendar day that produced the last widget export. When the
-    /// app re-foregrounds on a new day we rebuild the snapshot so birthdays /
-    /// "On this day" become valid without waiting for a scan.
+    /// Tracks the calendar day that produced the last widget export. Seeded
+    /// from `memoriesGeneratedDay` (persisted on disk) so the very first
+    /// foreground entry of a new day rebuilds the snapshot — without
+    /// pessimistically forcing a regeneration on every cold launch.
     private var lastWidgetExportDay: Date?
 
     private func refreshWidgetIfDayChanged() {
         let today = Calendar.current.startOfDay(for: Date())
-        if let last = lastWidgetExportDay, Calendar.current.isDate(last, inSameDayAs: today) {
+        let reference = lastWidgetExportDay ?? memoriesGeneratedDay
+        if let reference, Calendar.current.isDate(reference, inSameDayAs: today) {
             return
         }
         lastWidgetExportDay = today
@@ -192,6 +206,9 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
 
     deinit {
         if let observer = foregroundObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        if let observer = significantTimeChangeObserver {
             NotificationCenter.default.removeObserver(observer)
         }
         let url = activeSecurityScopedURL
@@ -1441,6 +1458,11 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
     /// People/* tag through `effectiveContact(forPersonPath:displayName:)` so
     /// both manual links and the auto-match-by-name fallback are honored, and
     /// keep `Contacts.framework` out of the exporter.
+    /// In-flight debounced export. Successive calls within the coalesce window
+    /// cancel the previous task so only the newest snapshot (with the latest
+    /// `allPhotos` / `allTags` / `memories`) actually runs.
+    private var pendingWidgetExport: Task<Void, Never>?
+
     func exportWidgetSnapshot() {
         let cal = Calendar.current
         let today = cal.dateComponents([.month, .day], from: Date())
@@ -1465,7 +1487,13 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
             leafFolders: _cachedLeafFolders,
             todayBirthdays: birthdays
         )
-        Task.detached(priority: .utility) {
+        // 200ms coalesce: a single scan often fires this 3× in quick
+        // succession (post-scan + post-tag-aggregation + post-memory-regen).
+        // Cancel the prior task so we run once with the freshest state.
+        pendingWidgetExport?.cancel()
+        pendingWidgetExport = Task.detached(priority: .utility) {
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            guard !Task.isCancelled else { return }
             await WidgetSnapshotExporter.shared.export(inputs)
         }
     }

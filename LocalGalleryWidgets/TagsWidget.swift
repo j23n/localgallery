@@ -111,7 +111,11 @@ struct TagsProvider: AppIntentTimelineProvider {
         guard !candidates.isEmpty else {
             return [TagsEntry(date: now, tagPaths: paths, label: label, ref: nil, image: nil)]
         }
-        let pickIndices = pickRotation(count: candidates.count, slots: slots, seed: paths.joined(separator: "|"))
+        let pickIndices = pickRotation(
+            count: candidates.count,
+            slots: slots,
+            seed: "\(WidgetDayKey.string())|tags|\(paths.joined(separator: "\u{1F}"))"
+        )
         return pickIndices.enumerated().map { (slot, idx) in
             let date = now.addingTimeInterval(Double(slot) * 2 * 60 * 60)
             let ref = candidates[idx]
@@ -145,20 +149,16 @@ struct TagsWidgetEntryView: View {
                 subtitle: "No photos match"
             )
         } else {
-            Link(destination: WidgetDeepLink.tags(paths: entry.tagPaths).url) {
-                WidgetHeroView(
-                    image: entry.image,
-                    title: entry.label,
-                    subtitle: entry.ref?.date.map(formatted)
-                )
+            let hero = WidgetHeroView(
+                image: entry.image,
+                title: entry.label,
+                subtitle: entry.ref?.date.map(WidgetDateFormat.shared.string(from:))
+            )
+            if let url = WidgetDeepLink.tags(paths: entry.tagPaths).url {
+                Link(destination: url) { hero }
+            } else {
+                hero
             }
         }
-    }
-
-    private func formatted(_ date: Date) -> String {
-        let f = DateFormatter()
-        f.dateStyle = .medium
-        f.timeStyle = .none
-        return f.string(from: date)
     }
 }

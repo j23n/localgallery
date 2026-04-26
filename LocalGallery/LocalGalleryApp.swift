@@ -193,6 +193,13 @@ struct LocalGalleryApp: App {
     private func configureAppearance() {
         let bg = UIColor(Design.bg)
 
+        // SwiftUI's `.tint()` is the primary tint, but during heavy re-renders
+        // (e.g. a `manager.rescan()` flipping several @Published properties at
+        // once) List rows can briefly fall back to the underlying window tint —
+        // which is system blue by default. Pinning the UIKit window tint to our
+        // accent makes that fallback invisible.
+        UIWindow.appearance().tintColor = UIColor(Design.accentColor)
+
         // Nav bar: transparent at scroll edge, translucent blur when content scrolls under.
         // Matches stock apps (Photos, Messages) — no opaque band.
         let navStandard = UINavigationBarAppearance()

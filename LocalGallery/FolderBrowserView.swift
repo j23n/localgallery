@@ -22,18 +22,11 @@ struct FolderBrowserView: View {
                 emptyState
             }
         }
-        .navigationTitle(isRoot ? "" : (displayFolder?.name ?? ""))
-        .navigationBarTitleDisplayMode(.inline)
+        .navigationTitle(displayFolder?.name ?? "")
+        .navigationBarTitleDisplayMode(isRoot ? .large : .inline)
         .toolbar {
-            if isRoot {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button { showSettings = true } label: {
-                        Image(systemName: "gear")
-                    }
-                }
-            }
-            if displayFolder != nil && !(displayFolder?.subfolders.isEmpty ?? true) {
-                ToolbarItem(placement: .topBarTrailing) {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                if displayFolder != nil && !(displayFolder?.subfolders.isEmpty ?? true) {
                     Menu {
                         Picker("Sort Folders", selection: $manager.folderSortOrder) {
                             ForEach(FolderSortOrder.allCases, id: \.self) { order in
@@ -42,6 +35,11 @@ struct FolderBrowserView: View {
                         }
                     } label: {
                         Image(systemName: "arrow.up.arrow.down")
+                    }
+                }
+                if isRoot {
+                    Button { showSettings = true } label: {
+                        Image(systemName: "gear")
                     }
                 }
             }
@@ -71,17 +69,6 @@ struct FolderBrowserView: View {
     private func folderContent(_ folder: PhotoFolder) -> some View {
         let sortedSubfolders = manager.sortFolders(folder.subfolders)
         List {
-            if isRoot {
-                Text(folder.name)
-                    .font(.system(size: 30, weight: .semibold))
-                    .tracking(-0.6)
-                    .foregroundStyle(Design.ink)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 4, trailing: 20))
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
-            }
-
             if !folder.photos.isEmpty {
                 Section("Photos") {
                     NavigationLink {

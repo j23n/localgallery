@@ -15,11 +15,11 @@ struct AllPhotosView: View {
                 }
             } else {
                 PhotoGridScreen(
-                    title: "All Photos",
-                    subtitle: "\(manager.sortedPhotos.count) photos",
+                    title: "Photos",
                     photos: manager.sortedPhotos,
                     isRoot: true,
                     showSearch: true,
+                    showVisibleDateRange: true,
                     initialTags: seedTags
                 )
                 // Force fresh PhotoGridScreen state when a deep-link seeds new

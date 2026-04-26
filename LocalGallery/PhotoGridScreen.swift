@@ -31,6 +31,10 @@ struct PhotoGridScreen: View {
     // Viewer
     @State private var viewerPhoto: PhotoFile?
     @State private var viewerID = UUID()
+    // Owned by the parent so it survives transient view recreations (e.g. the
+    // foreground rescan rebuilding `filtered`) — without this, returning to
+    // the app would reset the viewer to its initially-tapped photo.
+    @State private var viewerCurrentIndex: Int = 0
 
     // Select mode
     @State private var selectMode = false
@@ -175,8 +179,8 @@ struct PhotoGridScreen: View {
             }
             await recomputeFilter()
         }
-        .fullScreenCover(item: $viewerPhoto) { photo in
-            PhotoViewerView(photos: filtered, initialPhoto: photo)
+        .fullScreenCover(item: $viewerPhoto) { _ in
+            PhotoViewerView(photos: filtered, currentIndex: $viewerCurrentIndex)
                 .id(viewerID)
         }
         .sheet(isPresented: $showSettings) { SettingsView() }
@@ -367,15 +371,13 @@ struct PhotoGridScreen: View {
                 if selected.contains(photo.id) { selected.remove(photo.id) }
                 else { selected.insert(photo.id) }
             } else {
-                viewerID = UUID()
-                viewerPhoto = photo
+                openViewer(at: photo)
             }
         }
         .contextMenu {
             if !selectMode {
                 Button {
-                    viewerID = UUID()
-                    viewerPhoto = photo
+                    openViewer(at: photo)
                 } label: {
                     Label("Open", systemImage: "eye")
                 }
@@ -393,6 +395,12 @@ struct PhotoGridScreen: View {
                 }
             }
         }
+    }
+
+    private func openViewer(at photo: PhotoFile) {
+        viewerCurrentIndex = filtered.firstIndex(where: { $0.id == photo.id }) ?? 0
+        viewerID = UUID()
+        viewerPhoto = photo
     }
 
     // MARK: - Toolbar

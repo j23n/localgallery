@@ -2,6 +2,8 @@ import SwiftUI
 
 struct AllPhotosView: View {
     @EnvironmentObject var manager: GalleryManager
+    @EnvironmentObject var router: AppRouter
+    @State private var seedTags: [TagSuggestion] = []
 
     var body: some View {
         Group {
@@ -17,11 +19,26 @@ struct AllPhotosView: View {
                     subtitle: "\(manager.sortedPhotos.count) photos",
                     photos: manager.sortedPhotos,
                     isRoot: true,
-                    showSearch: true
+                    showSearch: true,
+                    initialTags: seedTags
                 )
+                // Force fresh PhotoGridScreen state when a deep-link seeds new
+                // tags so its internal @State activeTags actually adopts them.
+                .id("photogrid-" + seedTags.map(\.id).joined(separator: "|"))
             }
         }
         .background(Design.bg)
+        .onAppear { applyPendingTagFilter() }
+        .onChange(of: router.pendingPhotosTagFilter) { _, _ in applyPendingTagFilter() }
+    }
+
+    private func applyPendingTagFilter() {
+        guard !router.pendingPhotosTagFilter.isEmpty else { return }
+        let resolved = router.pendingPhotosTagFilter.compactMap { path in
+            manager.allTags.first { $0.fullPath == path }
+        }
+        seedTags = resolved
+        router.pendingPhotosTagFilter = []
     }
 
     private var emptyState: some View {

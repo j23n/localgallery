@@ -181,21 +181,18 @@ struct PagingPhotoView: UIViewControllerRepresentable {
 
 struct PhotoViewerView: View {
     let photos: [PhotoFile]
-    let initialPhoto: PhotoFile
+    @Binding var currentIndex: Int
     @EnvironmentObject var manager: GalleryManager
     @Environment(\.dismiss) private var dismiss
 
-    @State private var currentIndex: Int
-
-    init(photos: [PhotoFile], initialPhoto: PhotoFile) {
-        self.photos = photos
-        self.initialPhoto = initialPhoto
-        _currentIndex = State(initialValue: photos.firstIndex(where: { $0.id == initialPhoto.id }) ?? 0)
-    }
     @State private var isChromeVisible: Bool = true
     @State private var showShareSheet: Bool = false
     @State private var showEXIF: Bool = false
     @State private var dismissOffset: CGFloat = 0
+
+    private var safeIndex: Int {
+        max(0, min(currentIndex, photos.count - 1))
+    }
 
     var body: some View {
         ZStack {
@@ -223,7 +220,7 @@ struct PhotoViewerView: View {
                                 .background(.white.opacity(0.15), in: Circle())
                         }
                         Spacer()
-                        Text("\(currentIndex + 1) / \(photos.count)")
+                        Text("\(safeIndex + 1) / \(photos.count)")
                             .font(.system(size: 13, weight: .medium, design: .rounded))
                             .foregroundStyle(.white.opacity(0.85))
                             .padding(.horizontal, 12)
@@ -288,13 +285,13 @@ struct PhotoViewerView: View {
             .frame(width: 0, height: 0)
         )
         .sheet(isPresented: $showShareSheet) {
-            if currentIndex < photos.count {
-                ShareSheet(items: [photos[currentIndex].url])
+            if safeIndex < photos.count {
+                ShareSheet(items: [photos[safeIndex].url])
             }
         }
         .sheet(isPresented: $showEXIF) {
-            if currentIndex < photos.count {
-                EXIFSheetView(photo: photos[currentIndex])
+            if safeIndex < photos.count {
+                EXIFSheetView(photo: photos[safeIndex])
             }
         }
     }
@@ -340,6 +337,7 @@ final class ZoomingScrollView: UIScrollView {
 struct ZoomableImageView: UIViewRepresentable {
     let image: UIImage
     var onSingleTap: () -> Void = {}
+    var onZoomChange: (Bool) -> Void = { _ in }
 
     func makeUIView(context: Context) -> ZoomingScrollView {
         let scrollView = ZoomingScrollView()
@@ -375,23 +373,28 @@ struct ZoomableImageView: UIViewRepresentable {
 
     func updateUIView(_ scrollView: ZoomingScrollView, context: Context) {
         context.coordinator.onSingleTap = onSingleTap
+        context.coordinator.onZoomChange = onZoomChange
         guard let imageView = scrollView.imageView else { return }
         if imageView.image !== image {
             imageView.image = image
             scrollView.zoomScale = 1.0
             scrollView.fitImage()
+            context.coordinator.reportZoom(scale: 1.0)
         }
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onSingleTap: onSingleTap)
+        Coordinator(onSingleTap: onSingleTap, onZoomChange: onZoomChange)
     }
 
     class Coordinator: NSObject, UIScrollViewDelegate {
         var onSingleTap: () -> Void
+        var onZoomChange: (Bool) -> Void
+        private var lastReportedZoomed = false
 
-        init(onSingleTap: @escaping () -> Void) {
+        init(onSingleTap: @escaping () -> Void, onZoomChange: @escaping (Bool) -> Void) {
             self.onSingleTap = onSingleTap
+            self.onZoomChange = onZoomChange
         }
 
         func viewForZooming(in scrollView: UIScrollView) -> UIView? {
@@ -408,6 +411,15 @@ struct ZoomableImageView: UIViewRepresentable {
                 x: contentSize.width / 2 + xOffset,
                 y: contentSize.height / 2 + yOffset
             )
+            reportZoom(scale: scrollView.zoomScale)
+        }
+
+        func reportZoom(scale: CGFloat) {
+            let zoomed = scale > 1.001
+            if zoomed != lastReportedZoomed {
+                lastReportedZoomed = zoomed
+                onZoomChange(zoomed)
+            }
         }
 
         @objc func handleDoubleTap(_ gesture: UITapGestureRecognizer) {
@@ -446,6 +458,7 @@ struct PhotoPageView: View {
     @State private var isPlayingVideo = false
     @State private var isPlayingLive = false
     @State private var livePlayer: AVPlayer?
+    @State private var isZoomed = false
 
     var body: some View {
         GeometryReader { geo in
@@ -477,9 +490,16 @@ struct PhotoPageView: View {
                     }
                 } else {
                     if let displayImage = fullImage ?? thumbnail ?? initialThumbnail {
-                        ZoomableImageView(image: displayImage) {
-                            withAnimation { isChromeVisible.toggle() }
-                        }
+                        ZoomableImageView(
+                            image: displayImage,
+                            onSingleTap: { withAnimation { isChromeVisible.toggle() } },
+                            onZoomChange: { zoomed in
+                                isZoomed = zoomed
+                                if zoomed {
+                                    stopLivePlayback()
+                                }
+                            }
+                        )
                     } else {
                         ProgressView().tint(.white)
                     }
@@ -494,6 +514,10 @@ struct PhotoPageView: View {
             .frame(width: geo.size.width, height: geo.size.height)
             .onLongPressGesture(minimumDuration: 0.3, pressing: { pressing in
                 guard let liveURL = photo.livePhotoVideoURL else { return }
+                // Suppress live playback while the still is zoomed in —
+                // otherwise a hold to pan the zoomed image would superimpose
+                // a fitted-frame video on top of the zoomed content.
+                if pressing && isZoomed { return }
                 if pressing {
                     let player = AVPlayer(url: liveURL)
                     livePlayer = player
@@ -501,9 +525,7 @@ struct PhotoPageView: View {
                     withAnimation(.easeIn(duration: 0.15)) { isPlayingLive = true }
                     isChromeVisible = false
                 } else {
-                    withAnimation(.easeOut(duration: 0.15)) { isPlayingLive = false }
-                    livePlayer?.pause()
-                    livePlayer = nil
+                    stopLivePlayback()
                 }
             }, perform: {})
         }
@@ -521,6 +543,7 @@ struct PhotoPageView: View {
         isPlayingLive = false
         livePlayer?.pause()
         livePlayer = nil
+        isZoomed = false
 
         if thumbnail == nil {
             thumbnail = await manager.thumbnail(for: photo.url, size: CGSize(width: 400, height: 400), isVideo: photo.isVideo)
@@ -528,5 +551,12 @@ struct PhotoPageView: View {
         if !photo.isVideo {
             fullImage = await manager.loadFullImage(for: photo.url)
         }
+    }
+
+    private func stopLivePlayback() {
+        guard isPlayingLive || livePlayer != nil else { return }
+        withAnimation(.easeOut(duration: 0.15)) { isPlayingLive = false }
+        livePlayer?.pause()
+        livePlayer = nil
     }
 }

@@ -100,13 +100,6 @@ struct SettingsView: View {
                 }
             }
         }
-        // Sheets don't always inherit `.tint` from the presenter reliably —
-        // after a re-render (e.g. `manager.rescan()` flipping @Published
-        // properties, or pushing/popping a NavigationLink) the icons can
-        // momentarily fall back to the system blue. Pinning the tint at the
-        // sheet's root keeps every Label/Toggle/NavigationLink on the warm
-        // accent.
-        .tint(Design.accentColor)
     }
 
     /// One-line summary of linked / auto-matched contacts for the Settings row.

@@ -192,13 +192,25 @@ struct LocalGalleryApp: App {
 
     private func configureAppearance() {
         let bg = UIColor(Design.bg)
+        let accent = UIColor(Design.accentColor)
 
-        // SwiftUI's `.tint()` is the primary tint, but during heavy re-renders
-        // (e.g. a `manager.rescan()` flipping several @Published properties at
-        // once) List rows can briefly fall back to the underlying window tint —
-        // which is system blue by default. Pinning the UIKit window tint to our
-        // accent makes that fallback invisible.
-        UIWindow.appearance().tintColor = UIColor(Design.accentColor)
+        // The WindowGroup-level `.tint()` is the SwiftUI authority, but there
+        // are gaps where it can't reach a control: sheet presentations cross
+        // a `UIPresentationController` boundary (and nested sheets compound
+        // it — Settings → Linked Contacts → Contact picker), and during
+        // bursts of @Published updates (e.g. `manager.rescan()` rewriting
+        // `allPhotos`/`allTags`/indexes at once) descendant Lists can rebuild
+        // before the new tint context resolves. In any of those gaps the
+        // underlying UIView falls through to `tintColor`, which inherits up
+        // to the window — and the iOS default window tint is system blue.
+        //
+        // Pinning the UIKit appearance accent at app start sets the floor of
+        // that cascade so no SF Symbol in a Label/Toggle/NavigationLink can
+        // resolve to system blue, regardless of which sheet/nav context it
+        // lives in. SwiftUI `.tint()` modifiers continue to override where
+        // intentional (e.g. `.tint(.primary)` on the Folder row in Settings).
+        UIView.appearance().tintColor = accent
+        UIWindow.appearance().tintColor = accent
 
         // Nav bar: transparent at scroll edge, translucent blur when content scrolls under.
         // Matches stock apps (Photos, Messages) — no opaque band.

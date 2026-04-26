@@ -16,6 +16,9 @@ struct PhotoGridScreen: View {
     var playableMemory: Memory? = nil
     /// When set, photo long-press offers "Set as featured image" for this person.
     var featureContextPerson: TagSuggestion? = nil
+    /// Tags applied as the initial filter — used by widget deep-links that
+    /// land on AllPhotos with a specific tag set already chosen.
+    var initialTags: [TagSuggestion] = []
 
     @EnvironmentObject var manager: GalleryManager
     @AppStorage("gridSizeTier") private var sizeTier: Int = 0
@@ -162,6 +165,14 @@ struct PhotoGridScreen: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { toolbarContent }
         .task(id: filterKey) {
+            // Seed tags on first appearance when a deep link supplied them.
+            // Re-mounts (via the parent's `.id(...)` whenever seedTags
+            // changes) reset @State, so the `activeTags.isEmpty` check is
+            // the only guard we need against re-seeding over user edits.
+            if !initialTags.isEmpty && activeTags.isEmpty {
+                activeTags = initialTags
+                return
+            }
             await recomputeFilter()
         }
         .fullScreenCover(item: $viewerPhoto) { photo in

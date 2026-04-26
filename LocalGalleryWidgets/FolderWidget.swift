@@ -107,7 +107,11 @@ struct FolderProvider: AppIntentTimelineProvider {
         guard !candidates.isEmpty else {
             return [FolderEntry(date: now, folderName: folder.displayName, folderId: folder.id, ref: nil, image: nil)]
         }
-        let pickIndices = pickRotation(count: candidates.count, slots: slots, seed: folder.id)
+        let pickIndices = pickRotation(
+            count: candidates.count,
+            slots: slots,
+            seed: "\(WidgetDayKey.string())|folder|\(folder.id)"
+        )
         return pickIndices.enumerated().map { (slot, idx) in
             let date = now.addingTimeInterval(Double(slot) * 2 * 60 * 60)
             let ref = candidates[idx]
@@ -122,12 +126,15 @@ struct FolderWidgetEntryView: View {
 
     var body: some View {
         if let id = entry.folderId, entry.ref != nil {
-            Link(destination: WidgetDeepLink.folder(id: id).url) {
-                WidgetHeroView(
-                    image: entry.image,
-                    title: entry.folderName ?? "",
-                    subtitle: entry.ref?.date.map(formatted)
-                )
+            let hero = WidgetHeroView(
+                image: entry.image,
+                title: entry.folderName ?? "",
+                subtitle: entry.ref?.date.map(WidgetDateFormat.shared.string(from:))
+            )
+            if let url = WidgetDeepLink.folder(id: id).url {
+                Link(destination: url) { hero }
+            } else {
+                hero
             }
         } else if entry.folderName == nil {
             WidgetEmptyView(
@@ -143,54 +150,5 @@ struct FolderWidgetEntryView: View {
             )
         }
     }
-
-    private func formatted(_ date: Date) -> String {
-        let f = DateFormatter()
-        f.dateStyle = .medium
-        f.timeStyle = .none
-        return f.string(from: date)
-    }
 }
 
-// MARK: - Rotation
-
-/// Picks `slots` distinct (when possible) indices from `0..<count` deterministically
-/// keyed by `seed`, so refreshes show different photos but the order is stable
-/// for the configured surface.
-func pickRotation(count: Int, slots: Int, seed: String) -> [Int] {
-    guard count > 0 else { return [] }
-    var rng = SeededRNG(seed: seed)
-    var pool = Array(0..<count).shuffled(using: &rng)
-    if pool.count >= slots { return Array(pool.prefix(slots)) }
-    // Pool smaller than slots — repeat with re-shuffle so back-to-back slots
-    // don't show the same photo when the pool barely fits.
-    var out = pool
-    while out.count < slots {
-        pool.shuffle(using: &rng)
-        out.append(contentsOf: pool)
-    }
-    return Array(out.prefix(slots))
-}
-
-/// Tiny SplitMix64-derived RNG seeded by hashing a string. Deterministic per
-/// seed across processes; widget extensions and previews see the same order.
-struct SeededRNG: RandomNumberGenerator {
-    private var state: UInt64
-    init(seed: String) {
-        var hasher = Hasher()
-        hasher.combine(seed)
-        // Hasher.finalize is per-process random — fine, but we want determinism
-        // across launches. Fall back to a stable hash of the bytes.
-        let bytes = Array(seed.utf8)
-        var s: UInt64 = 0xcbf29ce484222325
-        for b in bytes { s = (s ^ UInt64(b)) &* 0x100000001b3 }
-        self.state = s == 0 ? 0xdeadbeef : s
-    }
-    mutating func next() -> UInt64 {
-        state = state &+ 0x9E3779B97F4A7C15
-        var z = state
-        z = (z ^ (z >> 30)) &* 0xBF58476D1CE4E5B9
-        z = (z ^ (z >> 27)) &* 0x94D049BB133111EB
-        return z ^ (z >> 31)
-    }
-}

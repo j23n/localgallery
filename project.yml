@@ -59,6 +59,11 @@ targets:
   LocalGalleryWidgets:
     type: app-extension
     platform: iOS
+    # The Shared/ files (SharedContainer, WidgetSnapshot, WidgetDeepLink,
+    # WidgetRotation) are intentionally compiled into both the host app and
+    # this extension target. Each target gets its own copy — they cross
+    # process boundaries only via the JSON files in the App Group container,
+    # never as in-memory references.
     sources:
       - path: LocalGalleryWidgets
         excludes:
@@ -78,3 +83,17 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
         CODE_SIGN_ENTITLEMENTS: LocalGalleryWidgets/LocalGalleryWidgets.entitlements
         SKIP_INSTALL: "YES"
+
+  LocalGalleryTests:
+    type: bundle.unit-test
+    platform: iOS
+    # Tests use `@testable import LocalGallery` to reach the Shared/ types
+    # — don't add `LocalGallery/Shared` here or every type would clash.
+    sources:
+      - path: LocalGalleryTests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.localgallery.app.tests
+        GENERATE_INFOPLIST_FILE: true
+    dependencies:
+      - target: LocalGallery

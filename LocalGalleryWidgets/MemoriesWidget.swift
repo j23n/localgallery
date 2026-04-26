@@ -60,14 +60,7 @@ struct MemoriesWidgetEntryView: View {
 
     var body: some View {
         if let item = entry.item {
-            Link(destination: deepLink(for: item)) {
-                WidgetHeroView(
-                    image: entry.image,
-                    title: item.title,
-                    subtitle: item.subtitle,
-                    glyph: item.kind == .birthday ? "gift.fill" : nil
-                )
-            }
+            heroLink(item: item)
         } else {
             WidgetEmptyView(
                 symbol: "sparkles.rectangle.stack",
@@ -77,7 +70,18 @@ struct MemoriesWidgetEntryView: View {
         }
     }
 
-    private func deepLink(for item: MemorySnapshotItem) -> URL {
-        WidgetDeepLink.memory(id: item.id).url
+    @ViewBuilder
+    private func heroLink(item: MemorySnapshotItem) -> some View {
+        let hero = WidgetHeroView(
+            image: entry.image,
+            title: item.title,
+            subtitle: item.subtitle,
+            glyph: item.kind == .birthday ? "gift.fill" : nil
+        )
+        if let url = WidgetDeepLink.memory(id: item.id).url {
+            Link(destination: url) { hero }
+        } else {
+            hero
+        }
     }
 }

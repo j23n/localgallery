@@ -6,12 +6,21 @@ import UIKit
 /// Select mode with share, and long-press menus — matching the Quiet design.
 struct PhotoGridScreen: View {
     let title: String
+    /// Static subtitle shown when no in-screen filter is active and
+    /// `showVisibleDateRange` is false. When the user activates a filter
+    /// (search query or tag chip), the subtitle switches to the match count;
+    /// when `showVisibleDateRange` is true, the subtitle becomes a live
+    /// date-range derived from the on-screen sections.
     var subtitle: String?
     let photos: [PhotoFile]
-    /// When true, show the gear button in the leading toolbar slot.
+    /// When true, render the gear button (settings) in the toolbar.
     var isRoot: Bool = false
     /// Enable search field + tag suggestions in the header.
     var showSearch: Bool = false
+    /// When true, show a live "<first> – <last>" date range derived from the
+    /// sections currently scrolled into view, pinned below the nav bar so it
+    /// stays visible as the user scrolls. Used by the Photos tab.
+    var showVisibleDateRange: Bool = false
     /// When present, shows a "Play" button in the toolbar to jump into slideshow.
     var playableMemory: Memory? = nil
     /// When set, photo long-press offers "Set as featured image" for this person.
@@ -57,6 +66,10 @@ struct PhotoGridScreen: View {
     @State private var sectionsCache: [PhotoSection] = []
     @State private var yearsCache: [(year: String, sectionID: String)] = []
 
+    // IDs of sections whose header is currently within the scrollview's visible
+    // area, used to compute the live date-range subtitle on the Photos tab.
+    @State private var visibleSectionIDs: Set<String> = []
+
     private func grid(isLandscape: Bool) -> GridLayoutConfig {
         GridLayoutConfig(sizeTier: sizeTier, isLandscape: isLandscape)
     }
@@ -81,6 +94,55 @@ struct PhotoGridScreen: View {
         )
     }
 
+    /// True when the user has narrowed the grid via the search field or a tag
+    /// chip — i.e. `filtered.count` no longer reflects the full input set.
+    private var isFiltered: Bool {
+        !activeTags.isEmpty || !query.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    /// The title shown in the navigation bar — collapses to the select-mode
+    /// status when in select mode so the same chrome conveys both states.
+    private var displayTitle: String {
+        if selectMode {
+            return selected.isEmpty ? "Select Items" : "\(selected.count) Selected"
+        }
+        return title
+    }
+
+    /// The subtitle line rendered just under the large nav title. Three modes,
+    /// in priority order: select-mode hint > visible-date-range (Photos tab) >
+    /// match-count (when filtered) > caller-supplied static subtitle.
+    private var displaySubtitle: String? {
+        if selectMode {
+            return selected.isEmpty
+                ? "Tap photos to select"
+                : "Tap Share to send \(selected.count == 1 ? "this photo" : "these photos")"
+        }
+        if showVisibleDateRange {
+            return visibleDateRangeText
+        }
+        if isFiltered {
+            let n = filtered.count
+            return "\(n) \(n == 1 ? "match" : "matches")"
+        }
+        return subtitle
+    }
+
+    /// Date range spanning the dateTaken values of the photos in any
+    /// currently-visible section. Empty until the first section reports its
+    /// onAppear, and recomputed on every membership change in `visibleSectionIDs`.
+    private var visibleDateRangeText: String {
+        let visible = sectionsCache.filter { visibleSectionIDs.contains($0.id) }
+        let dates = visible.flatMap(\.photos).compactMap(\.dateTaken)
+        guard let first = dates.min(), let last = dates.max() else { return "" }
+        let fmt = DateFormatter()
+        fmt.setLocalizedDateFormatFromTemplate("d MMM yyyy")
+        if Calendar.current.isDate(first, inSameDayAs: last) {
+            return fmt.string(from: first)
+        }
+        return "\(fmt.string(from: first)) – \(fmt.string(from: last))"
+    }
+
     private var suggestions: [TagSuggestion] {
         let q = query.lowercased()
         guard !q.isEmpty else { return [] }
@@ -102,7 +164,12 @@ struct PhotoGridScreen: View {
                 ScrollView {
                     Color.clear.frame(height: 0).id("__top__")
 
-                    header
+                    // Static subtitle line directly under the system large
+                    // title — only shown when not using the pinned visible-
+                    // date-range bar (which lives in safeAreaInset).
+                    if !showVisibleDateRange, let sub = displaySubtitle, !sub.isEmpty {
+                        inContentSubtitle(sub)
+                    }
 
                     if !activeTags.isEmpty {
                         tagPills
@@ -137,6 +204,14 @@ struct PhotoGridScreen: View {
                                         .padding(.top, 14)
                                         .padding(.bottom, 6)
                                         .id(section.id)
+                                        .onAppear {
+                                            guard showVisibleDateRange else { return }
+                                            visibleSectionIDs.insert(section.id)
+                                        }
+                                        .onDisappear {
+                                            guard showVisibleDateRange else { return }
+                                            visibleSectionIDs.remove(section.id)
+                                        }
                                 }
                             }
                         }
@@ -166,8 +241,20 @@ struct PhotoGridScreen: View {
             }
         }
         .background(Design.bg)
-        .navigationBarTitleDisplayMode(.inline)
+        .navigationTitle(displayTitle)
+        .navigationBarTitleDisplayMode(isRoot ? .large : .inline)
         .toolbar { toolbarContent }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            // Pinned date-range bar for the Photos tab — sits between the nav
+            // bar and the scroll content so the range stays visible (and
+            // updates) as the user scrolls through their library.
+            if showVisibleDateRange {
+                let sub = displaySubtitle ?? ""
+                if !sub.isEmpty {
+                    pinnedSubtitleBar(sub)
+                }
+            }
+        }
         .task(id: filterKey) {
             // Seed tags on first appearance when a deep link supplied them.
             // Re-mounts (via the parent's `.id(...)` whenever seedTags
@@ -177,6 +264,10 @@ struct PhotoGridScreen: View {
                 activeTags = initialTags
                 return
             }
+            // Stale section IDs would survive a filter change otherwise —
+            // sections are re-keyed but the old IDs linger until SwiftUI
+            // recycles the views, briefly polluting the date range.
+            visibleSectionIDs.removeAll()
             await recomputeFilter()
         }
         .fullScreenCover(item: $viewerPhoto) { _ in
@@ -197,38 +288,33 @@ struct PhotoGridScreen: View {
         }
     }
 
-    // MARK: - Header (custom large title + reserved subtitle slot)
+    // MARK: - Subtitle (in-content for static, pinned for live date range)
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(selectMode
-                 ? (selected.isEmpty ? "Select Items" : "\(selected.count) Selected")
-                 : title)
-                .font(.system(size: 30, weight: .semibold))
-                .tracking(-0.6)
-                .foregroundStyle(Design.ink)
-                .lineLimit(1)
-
-            // Reserve the subtitle slot so toggling Select mode doesn't jump.
-            Group {
-                if selectMode {
-                    Text(selected.isEmpty
-                         ? "Tap photos to select"
-                         : "Tap Share to send \(selected.count == 1 ? "this photo" : "these photos")")
-                } else if let s = subtitle, !s.isEmpty {
-                    Text(s)
-                } else {
-                    Text(" ")
-                }
-            }
+    private func inContentSubtitle(_ text: String) -> some View {
+        Text(text)
             .font(.system(size: 13))
             .foregroundStyle(Design.ink3)
             .lineLimit(1)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 20)
-        .padding(.top, 8)
-        .padding(.bottom, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 20)
+            .padding(.top, 4)
+            .padding(.bottom, 8)
+    }
+
+    private func pinnedSubtitleBar(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 12, weight: .medium, design: .rounded))
+            .foregroundStyle(Design.ink2)
+            .lineLimit(1)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 6)
+            .background(.ultraThinMaterial)
+            .overlay(alignment: .bottom) {
+                Rectangle()
+                    .fill(Design.separator)
+                    .frame(height: 0.5)
+            }
     }
 
     private var tagPills: some View {
@@ -408,16 +494,15 @@ struct PhotoGridScreen: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .topBarLeading) {
+            // Only Cancel lives on the leading side now — the gear button
+            // moved to the trailing group so the title is unambiguously
+            // left-aligned beside the system large title.
             if selectMode {
                 Button("Cancel") {
                     selectMode = false
                     selected.removeAll()
                 }
                 .foregroundStyle(Design.accentColor)
-            } else if isRoot {
-                Button { showSettings = true } label: {
-                    Image(systemName: "gear")
-                }
             }
         }
 
@@ -456,6 +541,12 @@ struct PhotoGridScreen: View {
                     sizeTier = (sizeTier + 1) % GridLayoutConfig.tierCount
                 } label: {
                     Image(systemName: GridLayoutConfig(sizeTier: sizeTier, isLandscape: false).gridIconName)
+                }
+
+                if isRoot {
+                    Button { showSettings = true } label: {
+                        Image(systemName: "gear")
+                    }
                 }
             }
         }

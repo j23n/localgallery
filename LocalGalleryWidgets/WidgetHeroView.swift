@@ -23,19 +23,29 @@ struct WidgetHeroView: View {
             background
             captionOverlay
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipped()
     }
 
     @ViewBuilder
     private var background: some View {
         if let image {
+            // `.fill` + explicit max-frame + `.clipped()` is the canonical
+            // edge-to-edge pattern. Without the frame, SwiftUI may resolve the
+            // image's intrinsic size and leave the widget's black container
+            // background visible as letterbox bars when the source aspect
+            // ratio differs from the widget family's.
             Image(uiImage: image)
                 .resizable()
                 .aspectRatio(contentMode: .fill)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .clipped()
         } else {
             LinearGradient(
                 colors: [Color(white: 0.18), Color(white: 0.08)],
                 startPoint: .top, endPoint: .bottom
             )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 

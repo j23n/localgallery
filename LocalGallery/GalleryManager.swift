@@ -87,6 +87,7 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
     private var activeSecurityScopedURL: URL?
     private var foregroundObserver: Any?
     private var significantTimeChangeObserver: Any?
+    private var contactStoreObserver: Any?
 
     private let thumbnailDiskCacheDir: URL = {
         let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
@@ -181,6 +182,20 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
             }
         }
 
+        // Address-book mutations while the app is foregrounded — new contact,
+        // edited birthday, etc. Without this, birthday memories only pick up
+        // changes on the next foreground transition. iOS coalesces multiple
+        // edits into one notification, so a reload-on-fire is cheap.
+        contactStoreObserver = NotificationCenter.default.addObserver(
+            forName: .CNContactStoreDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                await self?.loadContacts()
+            }
+        }
+
         _isInitializing = false
     }
 
@@ -209,6 +224,9 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
             NotificationCenter.default.removeObserver(observer)
         }
         if let observer = significantTimeChangeObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        if let observer = contactStoreObserver {
             NotificationCenter.default.removeObserver(observer)
         }
         let url = activeSecurityScopedURL
@@ -392,15 +410,28 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
     }
 
     /// Load contacts if access is already granted. No-op when denied.
+    /// When the address-book contents that affect birthday memories actually
+    /// change (new contact, edited birthday, renamed person), force a memory
+    /// rebuild so the change surfaces without waiting for the daily gate.
     func loadContacts() async {
-        let wasEmpty = contacts.isEmpty
+        let previous = contacts
         let loaded = await ContactsService.loadContacts()
         contacts = loaded
-        // First successful load — surface birthday memories without waiting
-        // for the daily gate to expire.
-        if wasEmpty && !loaded.isEmpty {
+        if Self.birthdayRelevantSignature(loaded) != Self.birthdayRelevantSignature(previous) {
             forceRegenerateMemories()
         }
+    }
+
+    /// Set of (id, name, month-day) tuples — the only contact fields that the
+    /// memories pipeline reads. Comparing signatures lets us skip a costly
+    /// memory regeneration on no-op reloads while still catching adds/edits/
+    /// removes.
+    private static func birthdayRelevantSignature(_ contacts: [ContactInfo]) -> Set<String> {
+        Set(contacts.map { c in
+            let m = c.birthday?.month.map(String.init) ?? "-"
+            let d = c.birthday?.day.map(String.init) ?? "-"
+            return "\(c.id)|\(c.fullName)|\(m)-\(d)"
+        })
     }
 
     /// Manually link a person tag to a contact. Triggers a memory rebuild so

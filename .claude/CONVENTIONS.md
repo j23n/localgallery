@@ -71,9 +71,12 @@ LocalXTests/
 project.yml
 README.md
 LICENSE                  # MPL 2.0
+.claude/
+  CLAUDE.md              # repo-specific Claude Code guide (optional)
+  CONVENTIONS.md         # cross-app conventions (this file, mirrored — see §18)
 .github/workflows/
-  build.yml              # archive + IPA on tag (see §14)
-  test.yml               # tests on PR (see §14)
+  build.yml              # archive + IPA on tag (see §15)
+  test.yml               # tests on PR (see §15)
 .gitignore
 ```
 
@@ -810,12 +813,17 @@ Extension targets append a sub-id: `com.localgallery.app.widgets`,
 
 ## 18. Sync
 
-This file is **mirrored** across the three repos. The canonical source is
-[`localgallery/CONVENTIONS.md`][canon]; the others should match byte-for-byte.
+This file is **mirrored** across the three repos at `.claude/CONVENTIONS.md`.
+The canonical source is [`localgallery/.claude/CONVENTIONS.md`][canon]; the
+others should match byte-for-byte.
+
+It lives next to the per-repo [`CLAUDE.md`](./CLAUDE.md) so Claude Code
+sessions (CLI and web) pick it up automatically without polluting the repo
+root.
 
 Until a sync mechanism is in place (a fourth `localfiles-shared` repo, a
 GitHub Action that opens PRs across all three when `localgallery` changes,
 or a `git subtree` setup), updates must be propagated by hand. Mirror any
 edit to all three repos in the same PR.
 
-[canon]: https://github.com/j23n/localgallery/blob/main/CONVENTIONS.md
+[canon]: https://github.com/j23n/localgallery/blob/main/.claude/CONVENTIONS.md

@@ -23,9 +23,11 @@ final class BookmarkManager {
     }
 
     deinit {
-        // BookmarkManager is @MainActor; the Store releases its reference on
-        // main, so this deinit also runs on main. Stop the security scope so
-        // a torn-down instance doesn't leak access.
+        // Under Swift 6, deinit on a `@MainActor` type is implicitly
+        // nonisolated — it runs on whichever thread releases the last
+        // reference. That's why `activeURL` above is `nonisolated(unsafe)`.
+        // `stopAccessingSecurityScopedResource()` is documented thread-safe
+        // (it's reference-counted), so calling it from any thread is fine.
         activeURL?.stopAccessingSecurityScopedResource()
     }
 

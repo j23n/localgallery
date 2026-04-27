@@ -181,10 +181,19 @@ struct LocalGalleryApp: App {
                 .environment(galleryManager)
                 .environment(router)
                 .tint(Design.accentColor)
-                // Hand the manager to the BG-task service. Runs once per scene
-                // build; on a true background-only launch the WindowGroup
-                // doesn't build and the service stays detached (BG handler
-                // no-ops, foreground catch-up takes over on next entry).
+                // Hand the manager to the BG-task service. Runs once per
+                // scene build; on a true background-only launch the
+                // WindowGroup doesn't build and the service stays detached
+                // (BG handler no-ops, foreground catch-up takes over on
+                // next entry).
+                //
+                // Trade-off vs the previous synchronous `Self.shared = self`
+                // in `GalleryManager.init()`: there is now a small additional
+                // window between `@State` materialisation and `.task` firing
+                // where a BG handler could see a manager-less service and
+                // no-op. In practice BG tasks are gated to ≥24h after
+                // submission and the foreground catch-up covers any miss, so
+                // the window is benign.
                 .task {
                     appDelegate.memoryRefresh.attach(galleryManager)
                 }

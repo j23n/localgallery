@@ -1643,7 +1643,7 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
                 candidates.append(Memory(
                     id: "onThisDay", type: .onThisDay,
                     title: "On this day",
-                    subtitle: "\(years.count) different years",
+                    subtitle: nil,
                     photoIDs: ids,
                     coverPhotoID: ids[ids.count / 2],
                     dateRange: onThisDay.first!.1...onThisDay.last!.1,
@@ -1663,12 +1663,12 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
                 guard window.count >= 3,
                       let first = window.first?.1, let last = window.last?.1 else { continue }
 
-                let yearLabel = milestone == 1 ? "1 year ago" : "\(milestone) years ago"
+                let targetYear = calendar.component(.year, from: targetDate)
                 let ids = window.map(\.0.id)
                 candidates.append(Memory(
                     id: "yearsAgo-\(milestone)", type: .yearsAgo,
-                    title: "\(yearLabel) today",
-                    subtitle: Self.formatDateRange(first, last),
+                    title: "On this day in \(targetYear)",
+                    subtitle: nil,
                     photoIDs: ids,
                     coverPhotoID: ids[ids.count / 2],
                     dateRange: first...last,
@@ -1697,8 +1697,8 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
                 guard let first = sorted.first?.1, let last = sorted.last?.1 else { continue }
                 candidates.append(Memory(
                     id: "person-\(name)", type: .personOverTime,
-                    title: "\(name) through the years",
-                    subtitle: "\(years.count) years of memories",
+                    title: "\(name) over the years",
+                    subtitle: nil,
                     photoIDs: ids,
                     coverPhotoID: ids.last!,
                     dateRange: first...last,
@@ -1725,7 +1725,7 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
                 candidates.append(Memory(
                     id: "folder-\(folder.url.lastPathComponent)", type: .folderEvent,
                     title: folder.name,
-                    subtitle: Self.formatDateRange(first, last),
+                    subtitle: nil,
                     photoIDs: ids,
                     coverPhotoID: ids[ids.count / 3],
                     dateRange: first...last,
@@ -1750,13 +1750,12 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
                 let sorted = dayEntries.sorted { $0.1 < $1.1 }
                 let ids = sorted.map(\.0.id)
                 guard let first = sorted.first?.1, let last = sorted.last?.1 else { continue }
-                let relDate = Self.relativeDescription(for: dayDate, calendar: calendar, today: today)
                 let dayKey = "\(dayComp.year ?? 0)-\(dayComp.month ?? 0)-\(dayComp.day ?? 0)"
 
                 candidates.append(Memory(
                     id: "density-\(dayKey)", type: .photoDensity,
-                    title: "A busy day \(relDate)",
-                    subtitle: Self.formatDateRange(first, last),
+                    title: "A busy day",
+                    subtitle: nil,
                     photoIDs: ids,
                     coverPhotoID: ids[ids.count / 2],
                     dateRange: first...last,
@@ -1783,7 +1782,6 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
                     lowerNameIndex: lowerNameIndexSnapshot,
                     calendar: calendar,
                     todayComponents: todayComponents,
-                    currentYear: currentYear,
                     into: &candidates
                 )
             }
@@ -1798,6 +1796,19 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
                 return Memory(
                     id: mem.id, type: mem.type, title: mem.title, subtitle: mem.subtitle,
                     photoIDs: sampled, coverPhotoID: mem.coverPhotoID,
+                    dateRange: mem.dateRange, score: mem.score,
+                    yearsAgo: mem.yearsAgo, personName: mem.personName
+                )
+            }
+
+            // Standardize every memory's subtitle to "<first date> – <last date> · N photos".
+            // Done after the photo-count sampling above so the count reflects what the
+            // user will actually see in the grid/slideshow.
+            candidates = candidates.map { mem in
+                let unified = Self.subtitleWithCount(dateRange: mem.dateRange, count: mem.photoIDs.count)
+                return Memory(
+                    id: mem.id, type: mem.type, title: mem.title, subtitle: unified,
+                    photoIDs: mem.photoIDs, coverPhotoID: mem.coverPhotoID,
                     dateRange: mem.dateRange, score: mem.score,
                     yearsAgo: mem.yearsAgo, personName: mem.personName
                 )
@@ -1850,7 +1861,6 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         lowerNameIndex: [String: ContactInfo],
         calendar: Calendar,
         todayComponents: DateComponents,
-        currentYear: Int,
         into candidates: inout [Memory]
     ) {
         guard let todayMonth = todayComponents.month,
@@ -1909,20 +1919,13 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
                 dateRange = nil
             }
 
-            let subtitle: String
-            if let bYear = contact.birthday?.year, bYear > 0, currentYear > bYear {
-                subtitle = "Turning \(currentYear - bYear) today"
-            } else {
-                subtitle = "Birthday today"
-            }
-
             // Score sits well above on-this-day / years-ago so birthdays float
             // to the front of the rail on the matching day.
             candidates.append(Memory(
                 id: "birthday-\(path)",
                 type: .birthday,
                 title: "Happy birthday, \(bundle.displayName)",
-                subtitle: subtitle,
+                subtitle: nil,
                 photoIDs: ids,
                 coverPhotoID: coverID,
                 dateRange: dateRange,
@@ -1988,16 +1991,15 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         guard calendar.dateComponents([.month, .year], from: last) != currentMonthYear else { return }
 
         let days = max(1, calendar.dateComponents([.day], from: first, to: last).day ?? 1)
-        let relDate = relativeDescription(for: first, calendar: calendar, today: today)
         let ids = sorted.map(\.0.id)
         let tripKey = "\(calendar.component(.year, from: first))-\(calendar.component(.month, from: first))-\(calendar.component(.day, from: first))"
 
         let locationLabel = tripLabel(for: sorted.map(\.0))
         let title: String
         if let locationLabel {
-            title = "A trip to \(locationLabel) \(relDate)"
+            title = "A trip to \(locationLabel)"
         } else {
-            title = "A trip \(relDate)"
+            title = "A trip"
             let sampleTags = sorted.prefix(3).flatMap { $0.0.hierarchicalTags.map(\.fullPath) }
             let sampleCountries = sorted.prefix(3).compactMap { $0.0.countryCode }
             Log.memory.debug("Trip \(tripKey): no location label. sampleTags=\(sampleTags) countryCodes=\(sampleCountries)")
@@ -2006,7 +2008,7 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         candidates.append(Memory(
             id: "trip-\(tripKey)", type: .trip,
             title: title,
-            subtitle: "\(days) \(days == 1 ? "day" : "days")",
+            subtitle: nil,
             photoIDs: ids,
             coverPhotoID: ids[ids.count / 3],
             dateRange: first...last,
@@ -2042,12 +2044,11 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
             guard segSet != parentSet,
                   Double(segSet.count) <= Double(parentSet.count) * 0.85 else { continue }
 
-            let segRel = relativeDescription(for: segFirst, calendar: calendar, today: today)
-            let subTitle = "A trip to \(seg.label) \(segRel)"
+            let subTitle = "A trip to \(seg.label)"
             candidates.append(Memory(
                 id: "subtrip-\(tripKey)-\(seg.key)", type: .trip,
                 title: subTitle,
-                subtitle: "\(segDays) \(segDays == 1 ? "day" : "days") · part of \(locationLabel ?? "this trip")",
+                subtitle: nil,
                 photoIDs: segIDs,
                 coverPhotoID: segIDs[segIDs.count / 3],
                 dateRange: segFirst...segLast,
@@ -2132,7 +2133,7 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
 
     /// Derives a location-based title for a trip from `Places/*` tags and
     /// `photo-tools:CountryCode`. Returns nil when no tag data is available so
-    /// the caller can fall back to the generic "A trip N years ago" string.
+    /// the caller can fall back to the generic "A trip" title.
     private nonisolated static func tripLabel(for photos: [PhotoFile]) -> String? {
         var countryCounts: [String: Int] = [:]
         for photo in photos {
@@ -2215,27 +2216,23 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
 
     private nonisolated static func formatDateRange(_ first: Date, _ last: Date) -> String {
         let fmt = DateFormatter()
-        fmt.dateStyle = .medium
-        fmt.timeStyle = .none
+        fmt.setLocalizedDateFormatFromTemplate("d MMM yyyy")
         if Calendar.current.isDate(first, inSameDayAs: last) {
             return fmt.string(from: first)
         }
         return "\(fmt.string(from: first)) – \(fmt.string(from: last))"
     }
 
-    private nonisolated static func relativeDescription(for date: Date, calendar: Calendar, today: Date) -> String {
-        let years = calendar.dateComponents([.year], from: date, to: today).year ?? 0
-        if years == 0 {
-            let months = calendar.dateComponents([.month], from: date, to: today).month ?? 0
-            if months == 0 { return "earlier this month" }
-            let fmt = DateFormatter()
-            fmt.setLocalizedDateFormatFromTemplate("MMMM")
-            return "last \(fmt.string(from: date))"
-        } else if years == 1 {
-            return "a year ago"
-        } else {
-            return "\(years) years ago"
-        }
+    /// Standardized memory subtitle: "<first date> – <last date> · N photos".
+    /// Falls back to just the photo count when no date range is available
+    /// (e.g. birthday memories whose photos all lack dateTaken).
+    private nonisolated static func subtitleWithCount(
+        dateRange: ClosedRange<Date>?,
+        count: Int
+    ) -> String {
+        let countText = "\(count) \(count == 1 ? "photo" : "photos")"
+        guard let range = dateRange else { return countText }
+        return "\(formatDateRange(range.lowerBound, range.upperBound)) · \(countText)"
     }
 
     // MARK: - Thumbnails

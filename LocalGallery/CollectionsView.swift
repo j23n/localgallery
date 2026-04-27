@@ -40,9 +40,10 @@ struct CollectionsView: View {
             }
         }
         .background(Design.bg)
-        .navigationBarTitleDisplayMode(.inline)
+        .navigationTitle("Collections")
+        .navigationBarTitleDisplayMode(.large)
         .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
+            ToolbarItem(placement: .topBarTrailing) {
                 Button { showSettings = true } label: { Image(systemName: "gear") }
             }
         }
@@ -171,8 +172,6 @@ struct CollectionsView: View {
     private var collectionsBody: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                titleHeader
-
                 let memories = manager.visibleMemories
                 if !memories.isEmpty {
                     sectionHeader("Memories", systemIcon: "sparkles", accent: true)
@@ -200,17 +199,6 @@ struct CollectionsView: View {
         }
         .softTopScrollEdge()
         .background(Design.bg)
-    }
-
-    private var titleHeader: some View {
-        Text("Collections")
-            .font(.system(size: 30, weight: .semibold))
-            .tracking(-0.6)
-            .foregroundStyle(Design.ink)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 20)
-            .padding(.top, 8)
-            .padding(.bottom, 6)
     }
 
     // MARK: - Pieces
@@ -497,13 +485,19 @@ struct PersonCard: View {
             .padding(8)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
 
-            Text(tag.displayName)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.white)
-                .shadow(color: .black.opacity(0.35), radius: 3, y: 1)
-                .lineLimit(1)
-                .padding(.horizontal, 9)
-                .padding(.bottom, 7)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(tag.displayName)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                Text("\(tag.count) \(tag.count == 1 ? "photo" : "photos")")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.white.opacity(0.8))
+                    .lineLimit(1)
+            }
+            .shadow(color: .black.opacity(0.35), radius: 3, y: 1)
+            .padding(.horizontal, 9)
+            .padding(.bottom, 7)
         }
         .frame(width: 128, height: 128)
         .clipShape(RoundedRectangle(cornerRadius: Design.cardRadius))
@@ -560,10 +554,6 @@ struct MemoryCardView: View {
                         .foregroundStyle(.white.opacity(0.85))
                         .lineLimit(1)
                 }
-                Text("\(memory.photoIDs.count) photos")
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.white.opacity(0.65))
-                    .padding(.top, 1)
             }
             .padding(14)
         }

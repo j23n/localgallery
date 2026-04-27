@@ -106,7 +106,11 @@ private extension UIView {
 struct PagingPhotoView: UIViewControllerRepresentable {
     let photos: [PhotoFile]
     let manager: GalleryManager
-    @Binding var currentIndex: Int
+    /// Source of truth is the photo's id, not its index. A foreground rescan
+    /// can insert/remove photos and shift indices — the index would silently
+    /// land on a different photo, so we keep the id stable and re-resolve
+    /// the index against the current `photos` array on every update.
+    @Binding var currentPhotoID: UUID
     @Binding var isChromeVisible: Bool
 
     func makeUIViewController(context: Context) -> UIPageViewController {
@@ -118,26 +122,36 @@ struct PagingPhotoView: UIViewControllerRepresentable {
         pvc.dataSource = context.coordinator
         pvc.delegate = context.coordinator
         pvc.view.backgroundColor = .clear
-        let initial = context.coordinator.makeHostingController(for: currentIndex)
-        pvc.setViewControllers([initial], direction: .forward, animated: false)
+        // Fall back to the first photo's id when the bound id is no longer in
+        // `photos` — defensive against being constructed mid-rescan.
+        let initialID = photos.contains(where: { $0.id == currentPhotoID })
+            ? currentPhotoID
+            : photos.first?.id
+        if let id = initialID {
+            let initial = context.coordinator.makeHostingController(for: id)
+            pvc.setViewControllers([initial], direction: .forward, animated: false)
+        }
         return pvc
     }
 
     func updateUIViewController(_ pvc: UIPageViewController, context: Context) {
         context.coordinator.parent = self
         guard let current = pvc.viewControllers?.first as? IndexedHostingController,
-              current.pageIndex != currentIndex else { return }
-        let direction: UIPageViewController.NavigationDirection = currentIndex > current.pageIndex ? .forward : .reverse
-        let vc = context.coordinator.makeHostingController(for: currentIndex)
+              current.photoID != currentPhotoID,
+              photos.contains(where: { $0.id == currentPhotoID }) else { return }
+        let curIdx = photos.firstIndex(where: { $0.id == current.photoID }) ?? 0
+        let tarIdx = photos.firstIndex(where: { $0.id == currentPhotoID }) ?? 0
+        let direction: UIPageViewController.NavigationDirection = tarIdx > curIdx ? .forward : .reverse
+        let vc = context.coordinator.makeHostingController(for: currentPhotoID)
         pvc.setViewControllers([vc], direction: direction, animated: false)
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     class IndexedHostingController: UIHostingController<AnyView> {
-        let pageIndex: Int
-        init(pageIndex: Int, rootView: AnyView) {
-            self.pageIndex = pageIndex
+        let photoID: UUID
+        init(photoID: UUID, rootView: AnyView) {
+            self.photoID = photoID
             super.init(rootView: rootView)
             view.backgroundColor = .clear
         }
@@ -148,30 +162,37 @@ struct PagingPhotoView: UIViewControllerRepresentable {
         var parent: PagingPhotoView
         init(_ parent: PagingPhotoView) { self.parent = parent }
 
-        func makeHostingController(for index: Int) -> IndexedHostingController {
-            let photo = parent.photos[index]
+        func makeHostingController(for photoID: UUID) -> IndexedHostingController {
+            // Caller guarantees `photoID` is in `parent.photos`; the firstIndex
+            // lookup is the canonical resolution path post-rescan.
+            let idx = parent.photos.firstIndex(where: { $0.id == photoID }) ?? 0
+            let photo = parent.photos[idx]
             let view = PhotoPageView(
                 photo: photo,
                 initialThumbnail: parent.manager.cachedThumbnail(for: photo.url),
                 isChromeVisible: parent.$isChromeVisible
             )
             .environmentObject(parent.manager)
-            return IndexedHostingController(pageIndex: index, rootView: AnyView(view))
+            return IndexedHostingController(photoID: photoID, rootView: AnyView(view))
         }
 
         func pageViewController(_ pvc: UIPageViewController, viewControllerBefore vc: UIViewController) -> UIViewController? {
-            guard let indexed = vc as? IndexedHostingController, indexed.pageIndex > 0 else { return nil }
-            return makeHostingController(for: indexed.pageIndex - 1)
+            guard let indexed = vc as? IndexedHostingController,
+                  let curIdx = parent.photos.firstIndex(where: { $0.id == indexed.photoID }),
+                  curIdx > 0 else { return nil }
+            return makeHostingController(for: parent.photos[curIdx - 1].id)
         }
 
         func pageViewController(_ pvc: UIPageViewController, viewControllerAfter vc: UIViewController) -> UIViewController? {
-            guard let indexed = vc as? IndexedHostingController, indexed.pageIndex < parent.photos.count - 1 else { return nil }
-            return makeHostingController(for: indexed.pageIndex + 1)
+            guard let indexed = vc as? IndexedHostingController,
+                  let curIdx = parent.photos.firstIndex(where: { $0.id == indexed.photoID }),
+                  curIdx < parent.photos.count - 1 else { return nil }
+            return makeHostingController(for: parent.photos[curIdx + 1].id)
         }
 
         func pageViewController(_ pvc: UIPageViewController, didFinishAnimating finished: Bool, previousViewControllers: [UIViewController], transitionCompleted completed: Bool) {
             if completed, let indexed = pvc.viewControllers?.first as? IndexedHostingController {
-                parent.currentIndex = indexed.pageIndex
+                parent.currentPhotoID = indexed.photoID
             }
         }
     }
@@ -181,21 +202,35 @@ struct PagingPhotoView: UIViewControllerRepresentable {
 
 struct PhotoViewerView: View {
     let photos: [PhotoFile]
-    let initialPhoto: PhotoFile
+    /// Identifies the currently-shown photo. Tracked by id rather than index
+    /// so a rescan that re-orders or splices `photos` doesn't silently land
+    /// the user on a different image.
+    @Binding var currentPhotoID: UUID
     @EnvironmentObject var manager: GalleryManager
     @Environment(\.dismiss) private var dismiss
 
-    @State private var currentIndex: Int
-
-    init(photos: [PhotoFile], initialPhoto: PhotoFile) {
-        self.photos = photos
-        self.initialPhoto = initialPhoto
-        _currentIndex = State(initialValue: photos.firstIndex(where: { $0.id == initialPhoto.id }) ?? 0)
-    }
     @State private var isChromeVisible: Bool = true
     @State private var showShareSheet: Bool = false
     @State private var showEXIF: Bool = false
     @State private var dismissOffset: CGFloat = 0
+
+    /// Index of `currentPhotoID` within `photos`, or nil if the id isn't
+    /// present (rescan removed the photo, or the array is empty).
+    private var currentIndex: Int? {
+        photos.firstIndex(where: { $0.id == currentPhotoID })
+    }
+
+    private var currentPhoto: PhotoFile? {
+        guard let idx = currentIndex else { return nil }
+        return photos[idx]
+    }
+
+    private var positionLabel: String {
+        if let idx = currentIndex {
+            return "\(idx + 1) / \(photos.count)"
+        }
+        return "0 / \(photos.count)"
+    }
 
     var body: some View {
         ZStack {
@@ -203,14 +238,16 @@ struct PhotoViewerView: View {
                 .opacity(dismissOffset > 0 ? max(0.3, 1.0 - Double(dismissOffset) / 300.0) : 1.0)
                 .ignoresSafeArea()
 
-            PagingPhotoView(
-                photos: photos,
-                manager: manager,
-                currentIndex: $currentIndex,
-                isChromeVisible: $isChromeVisible
-            )
-            .ignoresSafeArea()
-            .offset(y: dismissOffset)
+            if !photos.isEmpty {
+                PagingPhotoView(
+                    photos: photos,
+                    manager: manager,
+                    currentPhotoID: $currentPhotoID,
+                    isChromeVisible: $isChromeVisible
+                )
+                .ignoresSafeArea()
+                .offset(y: dismissOffset)
+            }
 
             if isChromeVisible {
                 VStack {
@@ -223,7 +260,7 @@ struct PhotoViewerView: View {
                                 .background(.white.opacity(0.15), in: Circle())
                         }
                         Spacer()
-                        Text("\(currentIndex + 1) / \(photos.count)")
+                        Text(positionLabel)
                             .font(.system(size: 13, weight: .medium, design: .rounded))
                             .foregroundStyle(.white.opacity(0.85))
                             .padding(.horizontal, 12)
@@ -287,14 +324,21 @@ struct PhotoViewerView: View {
             )
             .frame(width: 0, height: 0)
         )
+        .onChange(of: photos) { _, newPhotos in
+            // Rescan dropped the photo we were viewing; dismiss instead of
+            // silently landing on a different image at a stale index.
+            if !newPhotos.contains(where: { $0.id == currentPhotoID }) {
+                dismiss()
+            }
+        }
         .sheet(isPresented: $showShareSheet) {
-            if currentIndex < photos.count {
-                ShareSheet(items: [photos[currentIndex].url])
+            if let photo = currentPhoto {
+                ShareSheet(items: [photo.url])
             }
         }
         .sheet(isPresented: $showEXIF) {
-            if currentIndex < photos.count {
-                EXIFSheetView(photo: photos[currentIndex])
+            if let photo = currentPhoto {
+                EXIFSheetView(photo: photo)
             }
         }
     }
@@ -340,6 +384,7 @@ final class ZoomingScrollView: UIScrollView {
 struct ZoomableImageView: UIViewRepresentable {
     let image: UIImage
     var onSingleTap: () -> Void = {}
+    var onZoomChange: (Bool) -> Void = { _ in }
 
     func makeUIView(context: Context) -> ZoomingScrollView {
         let scrollView = ZoomingScrollView()
@@ -375,23 +420,28 @@ struct ZoomableImageView: UIViewRepresentable {
 
     func updateUIView(_ scrollView: ZoomingScrollView, context: Context) {
         context.coordinator.onSingleTap = onSingleTap
+        context.coordinator.onZoomChange = onZoomChange
         guard let imageView = scrollView.imageView else { return }
         if imageView.image !== image {
             imageView.image = image
             scrollView.zoomScale = 1.0
             scrollView.fitImage()
+            context.coordinator.reportZoom(scale: 1.0)
         }
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onSingleTap: onSingleTap)
+        Coordinator(onSingleTap: onSingleTap, onZoomChange: onZoomChange)
     }
 
     class Coordinator: NSObject, UIScrollViewDelegate {
         var onSingleTap: () -> Void
+        var onZoomChange: (Bool) -> Void
+        private var lastReportedZoomed = false
 
-        init(onSingleTap: @escaping () -> Void) {
+        init(onSingleTap: @escaping () -> Void, onZoomChange: @escaping (Bool) -> Void) {
             self.onSingleTap = onSingleTap
+            self.onZoomChange = onZoomChange
         }
 
         func viewForZooming(in scrollView: UIScrollView) -> UIView? {
@@ -408,6 +458,15 @@ struct ZoomableImageView: UIViewRepresentable {
                 x: contentSize.width / 2 + xOffset,
                 y: contentSize.height / 2 + yOffset
             )
+            reportZoom(scale: scrollView.zoomScale)
+        }
+
+        func reportZoom(scale: CGFloat) {
+            let zoomed = scale > 1.001
+            if zoomed != lastReportedZoomed {
+                lastReportedZoomed = zoomed
+                onZoomChange(zoomed)
+            }
         }
 
         @objc func handleDoubleTap(_ gesture: UITapGestureRecognizer) {
@@ -446,6 +505,7 @@ struct PhotoPageView: View {
     @State private var isPlayingVideo = false
     @State private var isPlayingLive = false
     @State private var livePlayer: AVPlayer?
+    @State private var isZoomed = false
 
     var body: some View {
         GeometryReader { geo in
@@ -477,9 +537,16 @@ struct PhotoPageView: View {
                     }
                 } else {
                     if let displayImage = fullImage ?? thumbnail ?? initialThumbnail {
-                        ZoomableImageView(image: displayImage) {
-                            withAnimation { isChromeVisible.toggle() }
-                        }
+                        ZoomableImageView(
+                            image: displayImage,
+                            onSingleTap: { withAnimation { isChromeVisible.toggle() } },
+                            onZoomChange: { zoomed in
+                                isZoomed = zoomed
+                                if zoomed {
+                                    stopLivePlayback()
+                                }
+                            }
+                        )
                     } else {
                         ProgressView().tint(.white)
                     }
@@ -494,6 +561,10 @@ struct PhotoPageView: View {
             .frame(width: geo.size.width, height: geo.size.height)
             .onLongPressGesture(minimumDuration: 0.3, pressing: { pressing in
                 guard let liveURL = photo.livePhotoVideoURL else { return }
+                // Suppress live playback while the still is zoomed in —
+                // otherwise a hold to pan the zoomed image would superimpose
+                // a fitted-frame video on top of the zoomed content.
+                if pressing && isZoomed { return }
                 if pressing {
                     let player = AVPlayer(url: liveURL)
                     livePlayer = player
@@ -501,9 +572,7 @@ struct PhotoPageView: View {
                     withAnimation(.easeIn(duration: 0.15)) { isPlayingLive = true }
                     isChromeVisible = false
                 } else {
-                    withAnimation(.easeOut(duration: 0.15)) { isPlayingLive = false }
-                    livePlayer?.pause()
-                    livePlayer = nil
+                    stopLivePlayback()
                 }
             }, perform: {})
         }
@@ -521,6 +590,7 @@ struct PhotoPageView: View {
         isPlayingLive = false
         livePlayer?.pause()
         livePlayer = nil
+        isZoomed = false
 
         if thumbnail == nil {
             thumbnail = await manager.thumbnail(for: photo.url, size: CGSize(width: 400, height: 400), isVideo: photo.isVideo)
@@ -528,5 +598,12 @@ struct PhotoPageView: View {
         if !photo.isVideo {
             fullImage = await manager.loadFullImage(for: photo.url)
         }
+    }
+
+    private func stopLivePlayback() {
+        guard isPlayingLive || livePlayer != nil else { return }
+        withAnimation(.easeOut(duration: 0.15)) { isPlayingLive = false }
+        livePlayer?.pause()
+        livePlayer = nil
     }
 }

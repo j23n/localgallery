@@ -10,11 +10,6 @@ import os
 @Observable
 @MainActor
 final class GalleryManager {
-    /// Weak shared accessor used by the static `BGAppRefreshTask` handler in
-    /// AppDelegate. Set from `init()` so it resolves even during a background-
-    /// only launch where the SwiftUI scene's `.onAppear` may not fire.
-    static weak var shared: GalleryManager?
-
     var rootFolder: PhotoFolder?
     var allPhotos: [PhotoFile] = []
     var isScanning: Bool = false
@@ -109,7 +104,6 @@ final class GalleryManager {
     }
 
     init() {
-        Self.shared = self
         thumbnailCache.totalCostLimit = 100 * 1024 * 1024
         fullImageCache.totalCostLimit = 200 * 1024 * 1024
 

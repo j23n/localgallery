@@ -78,12 +78,11 @@ final class GalleryManager {
     private var memoriesGeneratedDay: Date? {
         didSet { persistMemoriesGeneratedDay() }
     }
-    private let thumbnailCache = NSCache<NSURL, UIImage>()
-    private let fullImageCache = NSCache<NSURL, UIImage>()
     private let bookmarks = BookmarkManager()
     private let contactLinker = ContactLinker()
     private let searchService = SearchIndex()
     private let tagService = TagIndex()
+    private let thumbnailService = ThumbnailService()
     /// NotificationCenter observer tokens. Set once in `init()` (on main),
     /// read once in `deinit` (on whatever thread released the last reference).
     /// `@ObservationIgnored` so the `@Observable` macro doesn't synthesize
@@ -93,13 +92,6 @@ final class GalleryManager {
     @ObservationIgnored private nonisolated(unsafe) var foregroundObserver: Any?
     @ObservationIgnored private nonisolated(unsafe) var significantTimeChangeObserver: Any?
     @ObservationIgnored private nonisolated(unsafe) var contactStoreObserver: Any?
-
-    private let thumbnailDiskCacheDir: URL = {
-        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("thumbnails", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
-    }()
 
     private var cacheURL: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -112,9 +104,6 @@ final class GalleryManager {
     }
 
     init() {
-        thumbnailCache.totalCostLimit = 100 * 1024 * 1024
-        fullImageCache.totalCostLimit = 200 * 1024 * 1024
-
         if let raw = UserDefaults.standard.string(forKey: "folderSortOrder"),
            let order = FolderSortOrder(rawValue: raw) {
             folderSortOrder = order
@@ -2018,116 +2007,18 @@ final class GalleryManager {
         return "\(formatDateRange(range.lowerBound, range.upperBound)) · \(countText)"
     }
 
-    // MARK: - Thumbnails
+    // MARK: - Thumbnails (forwarded to ThumbnailService)
 
     func cachedThumbnail(for url: URL) -> UIImage? {
-        thumbnailCache.object(forKey: url as NSURL)
+        thumbnailService.cachedThumbnail(for: url)
     }
 
     func thumbnail(for url: URL, size: CGSize, isVideo: Bool = false) async -> UIImage? {
-        if let cached = thumbnailCache.object(forKey: url as NSURL) {
-            return cached
-        }
-
-        let maxPixelSize = max(size.width, size.height) * UIScreen.main.scale
-        let diskPath = thumbnailDiskCacheDir.appendingPathComponent(
-            PhotoFile.stableID(for: url).uuidString + ".jpg"
-        )
-
-        do {
-            // Check disk cache
-            let image = try await Self.loadThumbnail(
-                for: url, maxPixelSize: maxPixelSize, isVideo: isVideo, diskPath: diskPath
-            )
-            guard let image else { return nil }
-            let cost = image.cgImage.map { $0.bytesPerRow * $0.height } ?? 0
-            thumbnailCache.setObject(image, forKey: url as NSURL, cost: cost)
-            return image
-        } catch is CancellationError {
-            Log.thumb.debug("Cancelled: \(url.lastPathComponent)")
-            return nil
-        } catch {
-            return nil
-        }
-    }
-
-    /// Generates or loads a thumbnail — nonisolated for cooperative pool execution with cancellation support
-    private nonisolated static func loadThumbnail(
-        for url: URL, maxPixelSize: CGFloat, isVideo: Bool, diskPath: URL
-    ) async throws -> UIImage? {
-        try Task.checkCancellation()
-
-        // Try disk cache first (compare modification dates)
-        if FileManager.default.fileExists(atPath: diskPath.path) {
-            let sourceModDate = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-            let cacheModDate = (try? diskPath.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-            if let src = sourceModDate, let cache = cacheModDate, cache >= src,
-               let data = try? Data(contentsOf: diskPath),
-               let image = UIImage(data: data) {
-                return image
-            }
-        }
-
-        try Task.checkCancellation()
-
-        if isVideo {
-            let asset = AVURLAsset(url: url)
-            let generator = AVAssetImageGenerator(asset: asset)
-            generator.appliesPreferredTrackTransform = true
-            generator.maximumSize = CGSize(width: maxPixelSize, height: maxPixelSize)
-            try Task.checkCancellation()
-            guard let cgImage = try? await generator.image(at: .zero).image else {
-                return nil
-            }
-            try Task.checkCancellation()
-            if let jpegData = opaqueJPEGData(from: cgImage, quality: 0.7) {
-                try? jpegData.write(to: diskPath, options: .atomic)
-            }
-            return UIImage(cgImage: cgImage)
-        } else {
-            let options: [CFString: Any] = [kCGImageSourceShouldCache: false]
-            guard let source = CGImageSourceCreateWithURL(url as CFURL, options as CFDictionary) else {
-                return nil
-            }
-            try Task.checkCancellation()
-            let thumbOptions: [CFString: Any] = [
-                kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceShouldCacheImmediately: true
-            ]
-            guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbOptions as CFDictionary) else {
-                return nil
-            }
-            try Task.checkCancellation()
-
-            // Write to disk cache (fire-and-forget)
-            if let jpegData = opaqueJPEGData(from: cgImage, quality: 0.7) {
-                try? jpegData.write(to: diskPath, options: .atomic)
-            }
-            return UIImage(cgImage: cgImage)
-        }
-    }
-
-    /// JPEG-encode a CGImage after flattening onto an opaque bitmap — avoids the
-    /// `writeImageAtIndex: trying to save an opaque image with AlphaPremulLast`
-    /// warning emitted by UIImage.jpegData when the source has an alpha channel.
-    private nonisolated static func opaqueJPEGData(from cgImage: CGImage, quality: CGFloat) -> Data? {
-        let size = CGSize(width: cgImage.width, height: cgImage.height)
-        let format = UIGraphicsImageRendererFormat()
-        format.opaque = true
-        format.scale = 1
-        let flattened = UIGraphicsImageRenderer(size: size, format: format).image { _ in
-            UIImage(cgImage: cgImage).draw(in: CGRect(origin: .zero, size: size))
-        }
-        return flattened.jpegData(compressionQuality: quality)
+        await thumbnailService.thumbnail(for: url, size: size, isVideo: isVideo)
     }
 
     func clearThumbnailCache() {
-        thumbnailCache.removeAllObjects()
-        try? FileManager.default.removeItem(at: thumbnailDiskCacheDir)
-        try? FileManager.default.createDirectory(at: thumbnailDiskCacheDir, withIntermediateDirectories: true)
-        Log.thumb.info("Thumbnail cache cleared")
+        thumbnailService.clearThumbnailCache()
     }
 
     // MARK: - EXIF
@@ -2246,40 +2137,6 @@ final class GalleryManager {
     // MARK: - Full Resolution
 
     func loadFullImage(for url: URL) async -> UIImage? {
-        if let cached = fullImageCache.object(forKey: url as NSURL) {
-            return cached
-        }
-        do {
-            guard let image = try await Self.generateFullImage(for: url) else { return nil }
-            let cost = image.cgImage.map { $0.bytesPerRow * $0.height } ?? 0
-            fullImageCache.setObject(image, forKey: url as NSURL, cost: cost)
-            return image
-        } catch is CancellationError {
-            Log.thumb.debug("Cancelled full image: \(url.lastPathComponent)")
-            return nil
-        } catch {
-            return nil
-        }
-    }
-
-    private nonisolated static func generateFullImage(for url: URL) async throws -> UIImage? {
-        try Task.checkCancellation()
-        let options: [CFString: Any] = [kCGImageSourceShouldCache: false]
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, options as CFDictionary) else {
-            return nil
-        }
-        try Task.checkCancellation()
-        // 2000px is sharp on phone screens, much faster to decode than 3600px
-        let thumbOptions: [CFString: Any] = [
-            kCGImageSourceThumbnailMaxPixelSize: 2000,
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceShouldCacheImmediately: true
-        ]
-        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbOptions as CFDictionary) else {
-            return nil
-        }
-        try Task.checkCancellation()
-        return UIImage(cgImage: cgImage)
+        await thumbnailService.loadFullImage(for: url)
     }
 }

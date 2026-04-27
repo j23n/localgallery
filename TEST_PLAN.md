@@ -219,7 +219,152 @@ test the index math here, leave the rest to XCUITest.)
 **Tier 1 totals:** ~30 test files, ~150-250 individual cases,
 ~200-400 LOC of fixtures + factory helpers, sub-second runtime.
 
-<!-- TIER 2 BODY -->
+## Tier 2 — Integration tests (fixture-based)
+
+Real I/O against committed fixture files. Every test gets its own
+temp dir; nothing leaks between tests.
+
+Conventions:
+- Fixtures live in `LocalGalleryTests/Fixtures/` and ship in the
+  test bundle's `Resources` build phase.
+- A `TempDir` helper (in `LocalGalleryTests/Support/`) creates &
+  tears down a unique dir per test under `NSTemporaryDirectory()`.
+- A `TestUserDefaults` helper returns a `UserDefaults(suiteName:)`
+  that's wiped on `tearDown`.
+- A `TestGalleryManager` factory builds a `GalleryManager` pointed
+  at temp dirs (cache URL, memories URL, bookmark URL, widget
+  shared container) — see [Required source changes](#required-source-changes)
+  for the small init surface this needs.
+
+### 2.0 Fixture library
+
+Document *how* each fixture was produced in
+`LocalGalleryTests/Fixtures/README.md`. Reproducibility matters —
+when a parser regresses, regenerating the fixture is the first
+diagnostic.
+
+| Fixture | Produced with |
+|---------|---------------|
+| `jpeg_with_exif.jpg` | `exiftool -DateTimeOriginal="2023:08:15 14:30:00" -GPSLatitude=41.9 -GPSLatitudeRef=N -GPSLongitude=12.5 -GPSLongitudeRef=E -Keywords+="People/Alice" -Keywords+="Places/Italy/Rome" foo.jpg` |
+| `jpeg_no_exif.jpg` | `exiftool -all= bar.jpg` |
+| `jpeg_with_sidecar.jpg` + `jpeg_with_sidecar.jpg.xmp` | Stripped JPEG + raw XMP XML (committed verbatim) carrying digiKam:TagsList and photo-tools:CountryCode |
+| `heic_with_exif.heic` | `exiftool` against a sample HEIC; same EXIF tags as the JPEG fixture |
+| `live_photo/IMG_1.heic` + `live_photo/IMG_1.mov` | Pair with matching basenames for live-photo pairing |
+| `video_with_creationdate.mp4` | `ffmpeg -i in.mov -metadata creation_time="2024-01-10T09:00:00Z" -t 1 -c:v libx264 -pix_fmt yuv420p out.mp4` |
+| `video_no_creationdate.mp4` | Same, with `-map_metadata -1` |
+| `xmp_phototools_full.xmp` | Hand-crafted XMP carrying every photo-tools field listed in the schema (countries, regions, cities, events, ratings) |
+| `corrupt_truncated.jpg` | First 200 bytes of a real JPEG |
+| `FixtureLibrary/` | Tree of A/B/C subfolders mixing all the above; covers leaf-folder detection, live-photo pairing inside subfolders |
+
+Keep total fixture size under ~2 MB. Use 1×1 or 16×16 pixel images
+where pixel content doesn't matter; only metadata matters.
+
+### 2.1 Image metadata reading
+
+| Test file | What it locks in |
+|-----------|------------------|
+| `ReadImageMetadataTests` | `jpeg_with_exif` → `dateTimeOriginal` parsed (timezone handled), GPS lat/lon with correct sign for N/S/E/W, country code uppercased, digiKam tags extracted into `hierarchicalTags`; `jpeg_no_exif` → date nil, tags empty (caller falls back); `heic_with_exif` → same fields as JPEG; `corrupt_truncated.jpg` → returns empty result, doesn't crash |
+| `ReadXMPSidecarTests` | `jpeg_with_sidecar` → tags from sidecar **merged** with embedded; sidecar country code overrides EXIF when both present; missing sidecar → no error; malformed XML → returns empty, logs |
+| `XMPStringArrayTests` | `xmpStringArray(_:)` against `CFArray<CFString>`, single `CFString`, `nil` → expected `[String]` outputs |
+| `PhotoToolsMetadataTests` | `xmp_phototools_full.xmp` → all schema fields decoded (countries, regions, cities, events, ratings, keywords); empty XMP → empty struct, not nil |
+
+### 2.2 Video metadata
+
+| Test file | What it locks in |
+|-----------|------------------|
+| `ReadVideoDateTests` | `video_with_creationdate` → embedded date parsed (catches "video dated today" regression); `video_no_creationdate` → nil (caller falls back to filesystem) |
+
+### 2.3 Folder scan
+
+| Test file | What it locks in |
+|-----------|------------------|
+| `ScanFolderTests` | `FixtureLibrary/` → expected photo count, expected folder tree shape; live-photo pairing (`IMG_1.heic` + `IMG_1.mov` → one `PhotoFile` with `livePhotoVideoURL` set); standalone `.mov` → kept as separate video; non-image files ignored |
+| `ScanFolderConcurrencyTests` | Two overlapping `scanFolder(at:)` calls for same URL → only one `performScan` runs (coalesced by `activeScanTask`); two calls for *different* URLs → second cancels first |
+| `ScanFolderCancellationTests` | Cancel mid-scan → `isScanning` returns to false; partial state not published |
+| `EnrichMetadataTests` | After initial fast scan, `enrichMetadata()` populates `dateTaken`, GPS, tags on each photo without losing IDs (grid stable) |
+
+### 2.4 Cache persistence
+
+| Test file | What it locks in |
+|-----------|------------------|
+| `LibraryCacheRoundTripTests` | scan → `saveCache` → wipe in-memory state → `loadCache` → photos and folder tree equal; `lastSyncedAt` preserved |
+| `LibraryCacheVersionTests` | Cache file with wrong `version` field → `loadCache` returns false, in-memory state untouched |
+| `LibraryCacheCorruptTests` | Truncated / non-JSON cache file → `loadCache` returns false, doesn't crash, logs |
+| `MemoriesCacheRoundTripTests` | `saveMemoriesCache` → wipe → `loadMemoriesCache` → `memories` equal; `memoriesGeneratedDay` survives via UserDefaults |
+| `BookmarkRoundTripTests` | `saveBookmark(for:)` against a temp dir → `resolveBookmark()` returns the same URL; deleted dir → returns nil, doesn't throw; corrupt bookmark data → returns nil |
+
+### 2.5 Persisted UserDefaults state
+
+| Test file | What it locks in |
+|-----------|------------------|
+| `FolderSortOrderPersistenceTests` | Set `folderSortOrder` → defaults written; new manager pointed at same defaults reads it back |
+| `HiddenFeaturedPersistenceTests` | `hiddenPeople`, `featuredPeople`, `hiddenMemories` round-trip via `didSet` writes |
+| `FeaturedPhotoPersistenceTests` | `featuredPhotoByPerson` JSON round-trip |
+| `PersonContactLinksPersistenceTests` | `personContactLinks` (enum with associated values) JSON round-trip; legacy raw shapes still decode |
+| `BirthdayMemoriesEnabledPersistenceTests` | Toggle persists; default is `true` on first launch |
+
+### 2.6 Thumbnail pipeline
+
+| Test file | What it locks in |
+|-----------|------------------|
+| `ThumbnailGenerationTests` | `thumbnail(for:size:isVideo:)` returns image of approximately requested size; cache hit on second call (no disk read); cache eviction under memory pressure (call `clearThumbnailCache` and verify miss) |
+| `ThumbnailDiskCacheTests` | First call writes JPEG to disk thumbnail dir; restart simulation (new manager, same dir) → loads from disk without regenerating |
+| `OpaqueJPEGDataTests` | `opaqueJPEGData(from:quality:)` produces JPEG with no alpha channel; quality argument respected (size monotonic with quality) |
+
+### 2.7 Memory generation end-to-end
+
+| Test file | What it locks in |
+|-----------|------------------|
+| `GenerateMemoriesIntegrationTests` | `FixtureLibrary/` + fixed `Date()` (injected via clock seam) → expected memory count and labels; on-this-day memory matches photos taken on this MM-DD across years; trip memories cluster correctly; respects `hiddenMemories` filter at output time |
+| `MemoryRegenerationTriggerTests` | Same-day call → `lastGeneratedDay` unchanged, no work; date advance + `runScheduledMemoryRefresh()` → memories regenerated, snapshot exported; `forceRegenerateMemories()` always regenerates |
+
+### 2.8 Widget snapshot export & read
+
+| Test file | What it locks in |
+|-----------|------------------|
+| `WidgetSnapshotExportTests` | `WidgetSnapshotExporter.export(_:)` against fixture inputs → writes `index.json`, `memories.json`, `folders.json`, `tags.json` to temp shared container; thumbnails written to `thumbs/<photoID>.jpg`; subsequent export with same fingerprint is a no-op (skip flag respected); changing inputs forces a rewrite |
+| `WidgetSnapshotGCTests` | `garbageCollectThumbs(thumbsDir:keepIDs:)` deletes orphan files; preserves files in `keepIDs`; survives missing dir |
+| `WidgetSnapshotReadTests` | Round-trip: write fixture JSON → `WidgetSnapshotReader.loadIndex/loadMemories/loadFolders/loadTags` decode equal; missing file → returns nil; corrupt JSON → returns nil |
+| `WidgetIndexQueryIntegrationTests` | Loaded `WidgetIndex` + `photos(matchingAllTags:)` returns expected refs end-to-end |
+
+### 2.9 SharedContainer
+
+| Test file | What it locks in |
+|-----------|------------------|
+| `SharedContainerTests` | `prepareDirectories()` is idempotent; creates `thumbs/` subdir; works against an injected root URL (so tests don't need the real App Group) |
+
+### 2.10 Performance regression guards (local-only)
+
+`XCTestCase.measure { }` blocks. **Do not gate CI** on these —
+device variance makes thresholds flaky. Run on dev machine to
+catch order-of-magnitude regressions.
+
+| Measurement | 20k photos baseline target |
+|-------------|---------------------------|
+| `recomputeFilter` empty query | < 100 ms |
+| `recomputeFilter` query "rome" | < 150 ms |
+| `recomputeFilter` 3 active tags | < 150 ms |
+| `PhotoSection.group(presorted:)` | < 30 ms |
+| `rebuildSortAndIndex` (sort + search index + tag aggregation) | < 250 ms |
+| Tag aggregation alone (the detached block) | < 300 ms |
+| `WidgetSnapshotExporter.export` (no thumb regen) | < 200 ms |
+| Thumbnail generation × 100 (cold) | < 5 s |
+
+Synthetic photos:
+```swift
+let photos = (0..<20_000).map { i in
+    PhotoFile.fixture(
+        url: URL(fileURLWithPath: "/tmp/p\(i).jpg"),
+        dateTaken: Date().addingTimeInterval(-TimeInterval(i * 60)),
+        tags: tagPoolPick(i)
+    )
+}
+```
+
+---
+
+**Tier 2 totals:** ~25 test files, fixture library ~2 MB, 5-15 s
+runtime (most cost is `XCTestCase.measure` warmup).
 
 <!-- TIER 3 BODY -->
 

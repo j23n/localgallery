@@ -646,8 +646,331 @@ Recommended GitHub Actions workflow gate:
 - Nightly → run `LocalGalleryUITests` on `iPhone 15` simulator.
 - Performance tests stay local-only.
 
-<!-- SOURCE CHANGES BODY -->
+## Required source changes
 
-<!-- ORDER & EFFORT BODY -->
+The strategy assumes these production-code edits land before
+(or alongside) the first test PR. None of them change runtime
+behavior — they're access widening + init seams.
 
-<!-- OUT OF SCOPE BODY -->
+### S.1 Access widening on `GalleryManager`
+
+Flip `private` → `internal` so `@testable import` can reach them.
+No `public` API changes; nothing leaks to consumers of the module.
+
+Static nonisolated helpers (the high-value pure functions):
+
+```swift
+// Was: private nonisolated static func ...
+internal nonisolated static func readImageMetadata(url: URL) -> MetadataResult
+internal nonisolated static func readXMPSidecar(for: URL) -> (rawTags: [String], countryCode: String?)
+internal nonisolated static func readVideoDate(url: URL) async -> Date?
+internal nonisolated static func xmpStringArray(_: CFTypeRef) -> [String]
+
+internal nonisolated static func generateBirthdayMemories(...)
+internal nonisolated static func generateTripMemories(...)
+internal nonisolated static func flushTrip(...)
+internal nonisolated static func consecutiveCountrySegments(...)
+internal nonisolated static func consecutivePlacesSegments(...)
+internal nonisolated static func tripLabel(for: [PhotoFile]) -> String?
+internal nonisolated static func deepestSharedPlacesPrefix(in: [PhotoFile]) -> [String]
+internal nonisolated static func countryName(from: String) -> String?
+internal nonisolated static func haversineKm(lat1: Double, lon1: Double, lat2: Double, lon2: Double) -> Double
+internal nonisolated static func formatDateRange(_: Date, _: Date) -> String
+internal nonisolated static func subtitleWithCount(...)
+internal nonisolated static func opaqueJPEGData(from: CGImage, quality: CGFloat) -> Data?
+internal nonisolated static func collectLeafFolders(_: PhotoFolder) -> [PhotoFolder]
+internal static func birthdayRelevantSignature(_: [ContactInfo]) -> Set<String>
+```
+
+Internal-but-still-private-set state (read access for assertions):
+
+```swift
+@Published internal private(set) var allTags: [TagSuggestion]
+internal private(set) var searchIndex: [UUID: String]
+internal private(set) var _photosForTag: [String: [PhotoFile]]
+internal private(set) var _photoByID: [UUID: PhotoFile]
+internal private(set) var _sortedPhotos: [PhotoFile]
+internal private(set) var _contactsByLowerName: [String: ContactInfo]
+internal private(set) var _contactByID: [String: ContactInfo]
+```
+
+Internal mutators tests need to drive directly:
+
+```swift
+internal func rebuildSortAndIndex()
+internal func rebuildContactsByLowerName()
+internal func generateMemoriesIfNeeded()
+internal func saveCache()
+internal func loadCache() -> Bool
+internal func saveMemoriesCache()
+internal func loadMemoriesCache()
+```
+
+### S.2 Init seams on `GalleryManager`
+
+Today `GalleryManager` is a singleton with hardcoded paths and
+`UserDefaults.standard`. Add a single overridable initializer
+without touching the singleton:
+
+```swift
+struct GalleryPaths {
+    let cacheURL: URL
+    let memoriesURL: URL
+    let bookmarkURL: URL
+    let thumbnailDir: URL
+    let widgetSharedRoot: URL
+
+    static let production = GalleryPaths(/* current hardcoded values */)
+}
+
+@MainActor
+final class GalleryManager: ObservableObject, @unchecked Sendable {
+    static let shared = GalleryManager(
+        paths: .production,
+        defaults: .standard,
+        clock: SystemClock(),
+        contactsService: LiveContactsService()
+    )
+
+    internal init(
+        paths: GalleryPaths,
+        defaults: UserDefaults,
+        clock: Clock,
+        contactsService: ContactsService
+    ) { /* ... */ }
+
+    private let paths: GalleryPaths
+    private let defaults: UserDefaults
+    internal let clock: Clock
+    private let contactsService: ContactsService
+}
+```
+
+Replace every `UserDefaults.standard` access inside the class with
+`self.defaults`. Replace every `Date()` used for memory-day or
+birthday-today comparison with `self.clock.now()`.
+
+### S.3 `ContactsService` protocol
+
+Extract the two methods that hit `CNContactStore` so tests can
+stub them.
+
+```swift
+protocol ContactsService {
+    func authorizationStatus() -> CNAuthorizationStatus
+    func requestAccess() async throws -> Bool
+    func loadContacts() async throws -> [ContactInfo]
+}
+
+struct LiveContactsService: ContactsService { /* current impl */ }
+
+#if DEBUG
+struct StubContactsService: ContactsService {
+    var contacts: [ContactInfo] = []
+    var status: CNAuthorizationStatus = .authorized
+    /* synchronous, deterministic */
+}
+#endif
+```
+
+The free functions in `ContactsService.swift` (`isAuthorized(_:)`,
+the existing static `loadContacts`) stay — they're still useful as
+pure helpers.
+
+### S.4 `Clock` protocol
+
+```swift
+protocol Clock: Sendable { func now() -> Date }
+struct SystemClock: Clock { func now() -> Date { Date() } }
+struct FixedClock: Clock { let date: Date; func now() -> Date { date } }
+```
+
+### S.5 DEBUG-only preview & UI-test seams
+
+In a new `LocalGallery/Previews/PreviewSupport.swift`
+(or `LocalGallery/Testing/TestSupport.swift`):
+
+```swift
+#if DEBUG
+extension GalleryManager {
+    static func previewSeeded(/* ... */) -> GalleryManager
+    func installFixtureLibrary(named: String)  // for Tier 4
+}
+#endif
+```
+
+Wired in `LocalGalleryApp.init()`:
+
+```swift
+#if DEBUG
+if ProcessInfo.processInfo.arguments.contains("--ui-test") {
+    GalleryManager.shared.installFixtureLibrary(
+        named: ProcessInfo.processInfo.environment["UI_TEST_FIXTURE"] ?? "default"
+    )
+}
+#endif
+```
+
+### S.6 `project.yml` additions
+
+```yaml
+LocalGalleryTests:
+  # existing — no change
+
+LocalGalleryUITests:
+  type: bundle.ui-test
+  platform: iOS
+  sources:
+    - path: LocalGalleryUITests
+  settings:
+    base:
+      PRODUCT_BUNDLE_IDENTIFIER: com.localgallery.app.uitests
+      GENERATE_INFOPLIST_FILE: true
+      TEST_TARGET_NAME: LocalGallery
+  dependencies:
+    - target: LocalGallery
+```
+
+Run `xcodegen` after editing.
+
+### S.7 Accessibility identifiers
+
+Add the small set listed under
+[Accessibility identifiers (for Tier 4)](#accessibility-identifiers-for-tier-4)
+when the corresponding XCUITest is being written — not preemptively.
+
+## Implementation order & effort
+
+Estimates assume one engineer familiar with the codebase. Each
+phase is independently shippable — stop wherever the
+cost/benefit stops paying off.
+
+### Phase 1 — Source seams (~half day)
+
+Required before any test-writing starts.
+
+1. Add `Clock` protocol + `SystemClock` / `FixedClock`.
+2. Add `ContactsService` protocol + `LiveContactsService`.
+3. Add `GalleryPaths` struct, `GalleryManager.init(paths:defaults:clock:contactsService:)`,
+   route the singleton through it.
+4. Replace `UserDefaults.standard` → `self.defaults` and
+   `Date()` → `self.clock.now()` inside `GalleryManager`.
+5. Flip `private` → `internal` on the static helpers and state
+   listed in [S.1](#s1-access-widening-on-gallerymanager).
+6. Add `Support/` skeleton (`Fixtures.swift`, `TempDir.swift`,
+   `TestUserDefaults.swift`, `TestGalleryManager.swift`) with
+   factory helpers and one smoke test that builds a manager.
+
+Deliverable: build still green, existing widget tests still pass,
+no behavior change.
+
+### Phase 2 — Tier 1 quick wins (~1 day)
+
+The pure-logic tests that need no fixtures and would have caught
+the most historical bugs.
+
+- `HierarchicalTagTests`, `TagNamespaceIconTests`,
+  `PhotoFileIDTests`, `PhotoFolderIDTests`,
+  `EarliestFilesystemDateTests`, `PhotoSectionGroupTests`,
+  `SortPhotosTests`, `SortFoldersTests`,
+  `FilterKeyEqualityTests`, `SearchQueryTests`,
+  `RequiredTagsTests`, `GridLayoutConfigTests`,
+  `EXIFFormattersTests`.
+
+Deliverable: ~80 test cases, sub-second runtime.
+**Stopping here is a defensible MVP.**
+
+### Phase 3 — Tier 1 memory generation (~half day)
+
+The highest-leverage area; needs the access flips from Phase 1.
+
+- `BirthdayMemoryTests`, `TripDetectionTests`, `TripLabelTests`,
+  `DeepestSharedPlacesPrefixTests`,
+  `ConsecutivePlacesSegmentsTests`,
+  `ConsecutiveCountrySegmentsTests`, `HaversineKmTests`,
+  `FormatDateRangeTests`, `SubtitleWithCountTests`,
+  `MemoryGenerationGateTests`,
+  `BirthdayRelevantSignatureTests`.
+
+### Phase 4 — Tier 1 navigation, contacts, widget logic (~half day)
+
+- `AppRouter*Tests` (5 files)
+- `LinkStateTests`, `EffectiveContactTests`,
+  `RebuildContactsByLowerNameTests`, `BirthdayLineTests`,
+  `IsBirthdayTodayTests`, `LinkPersonMutationsTests`
+- `ContentFingerprintTests`, `TopRecentPhotosTests`,
+  `BuildFolderIdMapTests`, `BuildMemoryItemsTests`,
+  `BuildFolderCatalogTests`, `WidgetIndexFilterTests`
+
+### Phase 5 — Tier 2 fixtures + metadata (~half day)
+
+1. Produce the fixture files per [2.0](#20-fixture-library);
+   commit `Fixtures/README.md` with exact recipes.
+2. Wire `Fixtures/` as a Resources build phase on
+   `LocalGalleryTests`.
+3. Write `ReadImageMetadataTests`, `ReadXMPSidecarTests`,
+   `XMPStringArrayTests`, `PhotoToolsMetadataTests`,
+   `ReadVideoDateTests`.
+
+### Phase 6 — Tier 2 cache, scan, persistence (~half day)
+
+- `LibraryCacheRoundTripTests`, `LibraryCacheVersionTests`,
+  `LibraryCacheCorruptTests`, `MemoriesCacheRoundTripTests`,
+  `BookmarkRoundTripTests`
+- `ScanFolderTests`, `ScanFolderConcurrencyTests`,
+  `ScanFolderCancellationTests`, `EnrichMetadataTests`
+- All UserDefaults persistence tests
+
+### Phase 7 — Tier 2 widget snapshot + memory integration (~half day)
+
+- `WidgetSnapshotExportTests`, `WidgetSnapshotGCTests`,
+  `WidgetSnapshotReadTests`, `WidgetIndexQueryIntegrationTests`,
+  `SharedContainerTests`
+- `GenerateMemoriesIntegrationTests`,
+  `MemoryRegenerationTriggerTests`
+- `ThumbnailGenerationTests`, `ThumbnailDiskCacheTests`
+
+### Phase 8 — Tier 3 preview harness (~2-3 hours)
+
+- Add `previewSeeded(...)`, `Memory.previewSet`, etc.
+- Add `#Preview` blocks per [3.2](#32-preview-blocks-to-add).
+- No automation. Manual visual QA only.
+
+### Phase 9 — Tier 4 UX (~1 day)
+
+1. Add `LocalGalleryUITests` target to `project.yml`, regenerate.
+2. Add `--ui-test` launch arg + `installFixtureLibrary(named:)`.
+3. Add the small accessibility-identifier set.
+4. Write the 5 tests in [4.2](#42-the-minimum-viable-ux-suite),
+   debugging simulator flakiness one at a time.
+
+### Phase 10 — Performance baselines (~2-3 hours, local only)
+
+Run on dev machine, record baselines, **don't gate CI**.
+
+### Total
+
+Full coverage: ~5 working days. Phase 1 + 2 alone (~1.5 days)
+captures most of the value; everything beyond that is incremental
+defense against specific failure modes.
+
+## Out of scope
+
+Not testing these on purpose. Each one has a specific reason.
+
+| Surface | Reason |
+|---------|--------|
+| `CNContactStore` permission prompts | System alert can't be reliably driven; we test the `ContactsService` protocol consumers, not the framework |
+| `BGTaskScheduler` invocation | Trust the OS to call `runScheduledMemoryRefresh()`; we test that method's body directly |
+| `AVAudioEngine` / `SlideshowMusicPlayer.play/stop` | Audio session setup is environment-dependent; we test `renderBuffer` math instead |
+| `UIPageViewController` internals | UIKit framework; we drive paging via XCUITest, not unit-test the controller |
+| `AVAssetWriter` codec correctness | Trust the framework; if `SlideshowVideoRenderer.render` writes a file at all, that's our scope |
+| `UIDocumentPickerViewController` | System UI; we test what happens after the URL comes back |
+| `UIActivityViewController` (share sheet) | Same |
+| Photo library / Photos framework | App reads filesystem, not Photos framework — N/A |
+| Security-scoped URLs | Behave specially only on real bookmarks from the document picker; tests use plain temp URLs |
+| Pixel-level visual diffing | Tier 3 is preview-only; opt in to swift-snapshot-testing only if visual regressions repeatedly slip |
+| Coverage % targets | Lagging indicator; we'd rather invest in catching specific historical regressions |
+| 100% view-body testing | SwiftUI bodies have negligible bug surface that isn't already caught by Tier 1 logic + Tier 4 smoke |
+| iCloud / Files.app integration | Out of project scope (LocalGallery is local-folder by design) |
+| Multi-window / iPad split-view layout assertions | Defer until iPad becomes a primary target |

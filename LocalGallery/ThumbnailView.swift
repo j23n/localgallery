@@ -6,7 +6,7 @@ struct ThumbnailView: View {
     var isVideo: Bool = false
     var isLivePhoto: Bool = false
     var cornerRadius: CGFloat = 0
-    @EnvironmentObject var manager: GalleryManager
+    @Environment(GalleryManager.self) private var manager
     @State private var thumbnail: UIImage?
 
     var body: some View {

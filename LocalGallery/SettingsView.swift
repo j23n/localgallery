@@ -1,11 +1,12 @@
 import SwiftUI
 
 struct SettingsView: View {
-    @EnvironmentObject var manager: GalleryManager
+    @Environment(GalleryManager.self) private var manager
     @Environment(\.dismiss) private var dismiss
     @State private var showPicker = false
 
     var body: some View {
+        @Bindable var manager = manager
         NavigationStack {
             List {
                 Section("Photo Library") {
@@ -104,8 +105,7 @@ struct SettingsView: View {
 
     /// One-line summary of linked / auto-matched contacts for the Settings row.
     /// Uses `linkState` so we don't linear-scan `manager.contacts` per person on
-    /// every body re-evaluation (which fires whenever any @Published on the
-    /// manager ticks).
+    /// every body re-evaluation.
     private var linkedContactsSummary: String {
         var total = 0
         for person in manager.peopleTags {
@@ -127,7 +127,7 @@ struct SettingsView: View {
 // MARK: - Hidden People sub-screen
 
 struct HiddenPeopleList: View {
-    @EnvironmentObject var manager: GalleryManager
+    @Environment(GalleryManager.self) private var manager
 
     var body: some View {
         Group {
@@ -155,7 +155,7 @@ struct HiddenPeopleList: View {
 
 private struct HiddenPersonRow: View {
     let person: TagSuggestion
-    @EnvironmentObject var manager: GalleryManager
+    @Environment(GalleryManager.self) private var manager
 
     private var featured: PhotoFile? {
         manager.photos(forTag: person).first

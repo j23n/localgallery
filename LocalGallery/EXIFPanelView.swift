@@ -3,7 +3,7 @@ import MapKit
 
 struct EXIFSheetView: View {
     let photo: PhotoFile
-    @EnvironmentObject var manager: GalleryManager
+    @Environment(GalleryManager.self) private var manager
     @State private var exifData: EXIFData?
     @State private var photoToolsData: PhotoToolsMetadata = PhotoToolsMetadata()
     @State private var isLoading = true

@@ -18,7 +18,7 @@ struct MemorySlideshowView: View {
     /// grid as a child of this view.
     var onSeeAll: ((Memory) -> Void)? = nil
 
-    @EnvironmentObject var manager: GalleryManager
+    @Environment(GalleryManager.self) private var manager
     @Environment(\.dismiss) private var dismiss
 
     private let baseSlideDuration: Double = 5.0
@@ -33,7 +33,7 @@ struct MemorySlideshowView: View {
     @State private var goToGrid: Bool = false
     @State private var slideDuration: Double = 5.0
     @State private var showThemePicker: Bool = false
-    @StateObject private var audio = SlideshowAudioController()
+    @State private var audio = SlideshowAudioController()
     @AppStorage("slideshowMusicTheme") private var storedTheme: String = SlideshowMusicTheme.wistful.rawValue
 
     private var photos: [PhotoFile] { manager.photos(for: memory) }
@@ -307,7 +307,7 @@ struct MemorySlideshowView: View {
 private struct SlideshowImage: View {
     let url: URL
     let size: CGSize
-    @EnvironmentObject var manager: GalleryManager
+    @Environment(GalleryManager.self) private var manager
     @State private var image: UIImage?
 
     var body: some View {
@@ -400,10 +400,11 @@ private struct MusicThemePicker: View {
 
 // MARK: - Audio controller wrapper
 
-/// `ObservableObject` wrapper so the SwiftUI view owns the player's lifetime
-/// via `@StateObject`. The player itself is a plain main-actor class.
+/// `@Observable` wrapper so the SwiftUI view owns the player's lifetime via
+/// `@State`. The player itself is a plain main-actor class.
+@Observable
 @MainActor
-final class SlideshowAudioController: ObservableObject {
+final class SlideshowAudioController {
     private let player = SlideshowMusicPlayer()
 
     func play(theme: SlideshowMusicTheme) {

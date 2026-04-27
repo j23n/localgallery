@@ -1,8 +1,8 @@
 import SwiftUI
 
 struct AllPhotosView: View {
-    @EnvironmentObject var manager: GalleryManager
-    @EnvironmentObject var router: AppRouter
+    @Environment(GalleryManager.self) private var manager
+    @Environment(AppRouter.self) private var router
     @State private var seedTags: [TagSuggestion] = []
 
     var body: some View {

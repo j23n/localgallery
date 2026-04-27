@@ -10,7 +10,7 @@ import Contacts
 ///   - Pick a specific contact
 struct ContactLinkSheet: View {
     let person: TagSuggestion
-    @EnvironmentObject var manager: GalleryManager
+    @Environment(GalleryManager.self) private var manager
     @Environment(\.dismiss) private var dismiss
 
     @State private var search: String = ""
@@ -317,7 +317,7 @@ struct ContactsPermissionPrimer: View {
 /// Lists every person tag that currently has a manual contact link or an
 /// auto-match, so the user can review and change them in one place.
 struct LinkedContactsList: View {
-    @EnvironmentObject var manager: GalleryManager
+    @Environment(GalleryManager.self) private var manager
     @State private var picker: TagSuggestion?
 
     private struct Row: Identifiable {

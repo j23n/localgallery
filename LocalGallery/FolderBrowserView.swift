@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct FolderBrowserView: View {
-    @EnvironmentObject var manager: GalleryManager
+    @Environment(GalleryManager.self) private var manager
     var folder: PhotoFolder? = nil
     /// Only the root tab should show the gear. Child browsers leave it off.
     var isRoot: Bool = true
@@ -13,6 +13,7 @@ struct FolderBrowserView: View {
     }
 
     var body: some View {
+        @Bindable var manager = manager
         Group {
             if manager.isScanning {
                 ProgressView("Scanning folder…")

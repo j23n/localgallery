@@ -161,8 +161,8 @@ enum OrientationLock {
 @main
 struct LocalGalleryApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @StateObject private var galleryManager = GalleryManager()
-    @StateObject private var router = AppRouter()
+    @State private var galleryManager = GalleryManager()
+    @State private var router = AppRouter()
 
     init() {
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
@@ -172,8 +172,8 @@ struct LocalGalleryApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .environmentObject(galleryManager)
-                .environmentObject(router)
+                .environment(galleryManager)
+                .environment(router)
                 .tint(Design.accentColor)
                 .onOpenURL { url in
                     router.handle(url, manager: galleryManager)
@@ -198,7 +198,7 @@ struct LocalGalleryApp: App {
         // are gaps where it can't reach a control: sheet presentations cross
         // a `UIPresentationController` boundary (and nested sheets compound
         // it — Settings → Linked Contacts → Contact picker), and during
-        // bursts of @Published updates (e.g. `manager.rescan()` rewriting
+        // bursts of observed-state updates (e.g. `manager.rescan()` rewriting
         // `allPhotos`/`allTags`/indexes at once) descendant Lists can rebuild
         // before the new tint context resolves. In any of those gaps the
         // underlying UIView falls through to `tintColor`, which inherits up
@@ -240,10 +240,11 @@ struct LocalGalleryApp: App {
 }
 
 struct ContentView: View {
-    @EnvironmentObject var manager: GalleryManager
-    @EnvironmentObject var router: AppRouter
+    @Environment(GalleryManager.self) private var manager
+    @Environment(AppRouter.self) private var router
 
     var body: some View {
+        @Bindable var router = router
         TabView(selection: $router.selectedTab) {
             NavigationStack(path: $router.foldersPath) {
                 FolderBrowserView()

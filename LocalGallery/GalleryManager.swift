@@ -93,11 +93,6 @@ final class GalleryManager {
     @ObservationIgnored private nonisolated(unsafe) var significantTimeChangeObserver: Any?
     @ObservationIgnored private nonisolated(unsafe) var contactStoreObserver: Any?
 
-    private var memoriesCacheURL: URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("memories_cache.json")
-    }
-
     init() {
         if let raw = UserDefaults.standard.string(forKey: "folderSortOrder"),
            let order = FolderSortOrder(rawValue: raw) {
@@ -267,28 +262,12 @@ final class GalleryManager {
     }
 
     private func saveMemoriesCache() {
-        let url = memoriesCacheURL
-        let snapshot = memories
-        Task.detached(priority: .utility) {
-            do {
-                let data = try JSONEncoder().encode(snapshot)
-                try data.write(to: url, options: .atomic)
-            } catch {
-                Log.cache.error("Failed to save memories cache: \(error.localizedDescription)")
-            }
-        }
+        MemoriesCacheStore.save(memories)
     }
 
     private func loadMemoriesCache() {
-        guard FileManager.default.fileExists(atPath: memoriesCacheURL.path) else { return }
-        do {
-            let data = try Data(contentsOf: memoriesCacheURL)
-            let cached = try JSONDecoder().decode([Memory].self, from: data)
+        if let cached = MemoriesCacheStore.load() {
             self.memories = cached
-            Log.cache.info("Loaded \(cached.count) memories from cache")
-        } catch {
-            Log.cache.warning("Failed to load memories cache: \(error.localizedDescription)")
-            try? FileManager.default.removeItem(at: memoriesCacheURL)
         }
     }
 
@@ -939,7 +918,7 @@ final class GalleryManager {
     func forceRegenerateMemories() {
         memoriesGeneratedDay = nil
         memories = []
-        try? FileManager.default.removeItem(at: memoriesCacheURL)
+        MemoriesCacheStore.clear()
         Log.memory.info("Force-regenerating memories")
         generateMemoriesIfNeeded()
     }

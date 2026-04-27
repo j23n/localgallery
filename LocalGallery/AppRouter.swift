@@ -8,22 +8,23 @@ import SwiftUI
 /// the target id is queued in `pendingFolderId` / `pendingMemoryId` and the
 /// view consumes it once the data appears. Same pattern as the existing
 /// `pendingPhotosTagFilter` for the Photos tab.
+@Observable
 @MainActor
-final class AppRouter: ObservableObject {
+final class AppRouter {
     enum Tab: Hashable {
         case folders, collections, photos
     }
 
-    @Published var selectedTab: Tab = .folders
-    @Published var foldersPath: [FolderRoute] = []
-    @Published var collectionsPath: [CollectionsRoute] = []
+    var selectedTab: Tab = .folders
+    var foldersPath: [FolderRoute] = []
+    var collectionsPath: [CollectionsRoute] = []
     /// Tag full-paths to apply when AllPhotosView next appears. Cleared after
     /// the view consumes it so subsequent visits don't re-apply the filter.
-    @Published var pendingPhotosTagFilter: [String] = []
+    var pendingPhotosTagFilter: [String] = []
     /// Folder id to navigate to when the folder tree finishes loading.
-    @Published var pendingFolderId: String?
+    var pendingFolderId: String?
     /// Memory id to push as a slideshow when memories finish generating.
-    @Published var pendingMemoryId: String?
+    var pendingMemoryId: String?
 
     func handle(_ url: URL, manager: GalleryManager) {
         guard let link = WidgetDeepLink.parse(url) else { return }

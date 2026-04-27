@@ -29,7 +29,7 @@ struct PhotoGridScreen: View {
     /// land on AllPhotos with a specific tag set already chosen.
     var initialTags: [TagSuggestion] = []
 
-    @EnvironmentObject var manager: GalleryManager
+    @Environment(GalleryManager.self) private var manager
     @AppStorage("gridSizeTier") private var sizeTier: Int = 0
 
     @State private var query: String = ""

@@ -4,53 +4,49 @@ import ImageIO
 import UniformTypeIdentifiers
 import AVFoundation
 import Contacts
+import Observation
 import os
 
-/// `@unchecked Sendable` invariant: every stored property is mutated only
-/// from `@MainActor` (the type-level isolation), and the `nonisolated static`
-/// helpers below operate on value-typed inputs (`PhotoFile`, `URL`, etc.) with
-/// no shared mutable state. The compiler can't see this through
-/// `ObservableObject`'s Combine machinery, so we vouch for it manually until
-/// #22 splits this type into a real Store + service actors.
+@Observable
 @MainActor
-final class GalleryManager: ObservableObject, @unchecked Sendable {
+final class GalleryManager {
     /// Weak shared accessor used by the static `BGAppRefreshTask` handler in
     /// AppDelegate. Set from `init()` so it resolves even during a background-
     /// only launch where the SwiftUI scene's `.onAppear` may not fire.
     static weak var shared: GalleryManager?
 
-    @Published var rootFolder: PhotoFolder?
-    @Published var allPhotos: [PhotoFile] = []
-    @Published var isScanning: Bool = false
-    @Published var lastSyncedAt: Date?
-    @Published private(set) var memories: [Memory] = []
-    @Published private(set) var topPeople: [TagSuggestion] = []
-    @Published private(set) var eventFolders: [PhotoFolder] = []
+    var rootFolder: PhotoFolder?
+    var allPhotos: [PhotoFile] = []
+    var isScanning: Bool = false
+    var lastSyncedAt: Date?
+    private(set) var memories: [Memory] = []
+    private(set) var topPeople: [TagSuggestion] = []
+    private(set) var eventFolders: [PhotoFolder] = []
 
-    @Published var folderSortOrder: FolderSortOrder = .nameAscending {
+    var folderSortOrder: FolderSortOrder = .nameAscending {
         didSet { UserDefaults.standard.set(folderSortOrder.rawValue, forKey: "folderSortOrder") }
     }
 
-    @Published var hiddenPeople: Set<String> = [] {
+    var hiddenPeople: Set<String> = [] {
         didSet { UserDefaults.standard.set(Array(hiddenPeople), forKey: "hiddenPeople") }
     }
     /// Person tag paths that are "featured" — sorted to the front of the People rail
     /// and decorated with a star. Stored under the legacy `pinnedPeople` key.
-    @Published var featuredPeople: [String] = [] {
+    var featuredPeople: [String] = [] {
         didSet { UserDefaults.standard.set(featuredPeople, forKey: "pinnedPeople") }
     }
-    @Published var hiddenMemories: Set<String> = [] {
+    var hiddenMemories: Set<String> = [] {
         didSet { UserDefaults.standard.set(Array(hiddenMemories), forKey: "hiddenMemories") }
     }
     /// Per-person featured photo ID. Keyed by person tag fullPath (case-sensitive).
-    @Published var featuredPhotoByPerson: [String: UUID] = [:] {
+    var featuredPhotoByPerson: [String: UUID] = [:] {
         didSet { persistFeaturedPhotoByPerson() }
     }
 
     /// Contacts loaded from the system address book. Empty until the user grants
     /// Contacts access. Populated by `loadContacts()` and refreshed when the app
     /// re-enters the foreground.
-    @Published private(set) var contacts: [ContactInfo] = [] {
+    private(set) var contacts: [ContactInfo] = [] {
         didSet { rebuildContactsByLowerName() }
     }
 
@@ -58,14 +54,14 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
     /// (case-sensitive). Absence from the dictionary means "auto-match by
     /// name"; entries record either a manual contact pick or an explicit
     /// "no birthdays for this person" choice. See `PersonLink`.
-    @Published var personContactLinks: [String: PersonLink] = [:] {
+    var personContactLinks: [String: PersonLink] = [:] {
         didSet { persistPersonContactLinks() }
     }
 
     /// Master toggle for birthday memories. When `false`, `generateMemories`
     /// skips the birthday category entirely. Default `true` so the feature
     /// surfaces automatically once Contacts access is granted.
-    @Published var birthdayMemoriesEnabled: Bool = true {
+    var birthdayMemoriesEnabled: Bool = true {
         didSet {
             guard oldValue != birthdayMemoriesEnabled, !_isInitializing else { return }
             UserDefaults.standard.set(birthdayMemoriesEnabled, forKey: "birthdayMemoriesEnabled")
@@ -1128,7 +1124,7 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         }
 
         Log.enrich.info("Enrichment changed \(enrichedCount) photos, publishing update")
-        // Single assignment updates @Published, triggers one view update
+        // Single assignment fires one Observation update per dependent view.
         self.allPhotos = enrichedPhotos
         rebuildSortAndIndex()
 
@@ -1156,7 +1152,7 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
     /// Lowercase search corpus per photo ID for fast substring matching
     private var searchIndex: [UUID: String] = [:]
     /// All unique tags across the library, sorted by frequency
-    @Published private(set) var allTags: [TagSuggestion] = []
+    private(set) var allTags: [TagSuggestion] = []
     /// Generation counter to cancel stale tag aggregation tasks
     private var tagBuildGeneration = 0
     /// Tag -> photos index for fast collection lookups

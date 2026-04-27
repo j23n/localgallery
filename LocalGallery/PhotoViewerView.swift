@@ -172,7 +172,7 @@ struct PagingPhotoView: UIViewControllerRepresentable {
                 initialThumbnail: parent.manager.cachedThumbnail(for: photo.url),
                 isChromeVisible: parent.$isChromeVisible
             )
-            .environmentObject(parent.manager)
+            .environment(parent.manager)
             return IndexedHostingController(photoID: photoID, rootView: AnyView(view))
         }
 
@@ -206,7 +206,7 @@ struct PhotoViewerView: View {
     /// so a rescan that re-orders or splices `photos` doesn't silently land
     /// the user on a different image.
     @Binding var currentPhotoID: UUID
-    @EnvironmentObject var manager: GalleryManager
+    @Environment(GalleryManager.self) private var manager
     @Environment(\.dismiss) private var dismiss
 
     @State private var isChromeVisible: Bool = true
@@ -496,7 +496,7 @@ struct ZoomableImageView: UIViewRepresentable {
 struct PhotoPageView: View {
     let photo: PhotoFile
     var initialThumbnail: UIImage? = nil
-    @EnvironmentObject var manager: GalleryManager
+    @Environment(GalleryManager.self) private var manager
     @Binding var isChromeVisible: Bool
 
     @State private var thumbnail: UIImage?

@@ -231,17 +231,6 @@ final class GalleryManager {
 
     // MARK: - Disk Cache (forwarded to LibraryCacheStore / MemoriesCacheStore)
 
-    private struct EnrichedResult: Sendable {
-        let index: Int
-        let dateTaken: Date?
-        let dateFromMetadata: Bool
-        let hierarchicalTags: [HierarchicalTag]
-        let countryCode: String?
-        let gpsLatitude: Double?
-        let gpsLongitude: Double?
-        let enrichedFileDate: Date?
-    }
-
     private func saveCache() {
         guard let root = rootFolder else { return }
         LibraryCacheStore.save(rootFolder: root, allPhotos: allPhotos)
@@ -465,7 +454,6 @@ final class GalleryManager {
 
         let photos = allPhotos
         let staleCount = photos.filter { $0.enrichedFileDate == nil }.count
-        let startTime = CFAbsoluteTimeGetCurrent()
         Log.enrich.info("Starting metadata enrichment: \(staleCount) new/changed of \(photos.count) total")
 
         if staleCount == 0 {
@@ -473,116 +461,7 @@ final class GalleryManager {
             return
         }
 
-        let enrichedPhotos: [PhotoFile] = await Task.detached(priority: .background) {
-            var result = photos
-            let staleIndices = result.indices.filter { result[$0].enrichedFileDate == nil }
-
-            // Enrich stale photos in parallel using TaskGroup. Read each
-            // `photo` from `result` *outside* the addTask closure so the
-            // closure captures only `let` values — Swift 6's sending check
-            // won't let us cross the task boundary while a mutable var is
-            // still in scope above. `FileManager.default` is referenced
-            // inline inside the closure for the same reason.
-            let batchResults: [EnrichedResult] = await withTaskGroup(of: EnrichedResult?.self) { group in
-                for idx in staleIndices {
-                    let photo = result[idx]
-                    group.addTask {
-                        guard !Task.isCancelled else { return nil }
-                        let modDate = (try? FileManager.default.attributesOfItem(atPath: photo.url.path)[.modificationDate]) as? Date
-
-                        if photo.isVideo {
-                            // Videos: use AVAsset.creationDate (embedded capture date)
-                            // in preference to filesystem dates, which often reflect
-                            // the download/AirDrop time rather than when the video
-                            // was actually recorded.
-                            var dateTaken = photo.dateTaken
-                            var dateFromMetadata = false
-                            if let avDate = await MetadataReader.readVideoDate(url: photo.url) {
-                                dateTaken = avDate
-                                dateFromMetadata = true
-                            } else if dateTaken == nil {
-                                let attrs = try? photo.url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
-                                dateTaken = MetadataReader.earliestFilesystemDate(
-                                    creation: attrs?.creationDate,
-                                    modification: attrs?.contentModificationDate
-                                )
-                            }
-                            return EnrichedResult(
-                                index: idx,
-                                dateTaken: dateTaken,
-                                dateFromMetadata: dateFromMetadata,
-                                hierarchicalTags: photo.hierarchicalTags,
-                                countryCode: photo.countryCode,
-                                gpsLatitude: photo.gpsLatitude,
-                                gpsLongitude: photo.gpsLongitude,
-                                enrichedFileDate: modDate ?? Date()
-                            )
-                        }
-
-                        let metadata = MetadataReader.readImageMetadata(url: photo.url)
-
-                        var dateTaken = photo.dateTaken
-                        var dateFromMetadata = false
-                        if let date = metadata.date {
-                            dateTaken = date
-                            dateFromMetadata = true
-                        } else if dateTaken == nil {
-                            let attrs = try? photo.url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
-                            dateTaken = MetadataReader.earliestFilesystemDate(
-                                creation: attrs?.creationDate,
-                                modification: attrs?.contentModificationDate
-                            )
-                        }
-
-                        return EnrichedResult(
-                            index: idx,
-                            dateTaken: dateTaken,
-                            dateFromMetadata: dateFromMetadata,
-                            hierarchicalTags: metadata.hierarchicalTags.isEmpty ? photo.hierarchicalTags : metadata.hierarchicalTags,
-                            countryCode: metadata.countryCode ?? photo.countryCode,
-                            gpsLatitude: metadata.gpsLatitude ?? photo.gpsLatitude,
-                            gpsLongitude: metadata.gpsLongitude ?? photo.gpsLongitude,
-                            enrichedFileDate: modDate ?? Date()
-                        )
-                    }
-                }
-                var collected: [EnrichedResult] = []
-                for await item in group {
-                    if let item { collected.append(item) }
-                    if collected.count % 5000 == 0 {
-                        Log.enrich.info("Processed \(collected.count)/\(staleIndices.count)…")
-                    }
-                }
-                return collected
-            }
-
-            var dateCount = 0
-            var tagCount = 0
-            var uniquePaths = Set<String>()
-            for enriched in batchResults {
-                result[enriched.index].dateTaken = enriched.dateTaken
-                result[enriched.index].dateFromMetadata = enriched.dateFromMetadata
-                result[enriched.index].hierarchicalTags = enriched.hierarchicalTags
-                result[enriched.index].countryCode = enriched.countryCode
-                result[enriched.index].gpsLatitude = enriched.gpsLatitude
-                result[enriched.index].gpsLongitude = enriched.gpsLongitude
-                result[enriched.index].enrichedFileDate = enriched.enrichedFileDate
-                if enriched.dateTaken != nil { dateCount += 1 }
-                if !enriched.hierarchicalTags.isEmpty {
-                    tagCount += 1
-                    for tag in enriched.hierarchicalTags { uniquePaths.insert(tag.fullPath.lowercased()) }
-                }
-            }
-
-            let elapsed = CFAbsoluteTimeGetCurrent() - startTime
-            Log.enrich.info("Done in \(String(format: "%.1f", elapsed))s: \(dateCount) EXIF dates, \(tagCount) photos with tags, \(uniquePaths.count) unique tag paths")
-            let sampleTags = result.flatMap(\.hierarchicalTags).prefix(20)
-            if !sampleTags.isEmpty {
-                let tagDetails = sampleTags.map { "\($0.fullPath) → ns:\($0.namespace ?? "nil") name:\($0.displayName)" }
-                Log.enrich.debug("Sample hierarchical tags:\n  \(tagDetails.joined(separator: "\n  "))")
-            }
-            return result
-        }.value
+        let enrichedPhotos = await EnrichmentService.enrich(photos: photos)
 
         // Only apply if allPhotos hasn't been replaced during enrichment
         guard allPhotos.count == photos.count,

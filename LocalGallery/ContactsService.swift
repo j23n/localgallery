@@ -37,14 +37,8 @@ enum ContactsService {
     }
 
     /// Whether the current status grants enough access to enumerate contacts.
-    /// Wraps the iOS 18+ `.limited` case behind a runtime availability check
-    /// so the iOS-17 deployment target still compiles.
     static func isAuthorized(_ status: CNAuthorizationStatus) -> Bool {
-        if status == .authorized { return true }
-        if #available(iOS 18.0, *) {
-            return status == .limited
-        }
-        return false
+        status == .authorized || status == .limited
     }
 
     /// Prompt the user for Contacts access if not already determined. Returns

@@ -6,6 +6,12 @@ import AVFoundation
 import Contacts
 import os
 
+/// `@unchecked Sendable` invariant: every stored property is mutated only
+/// from `@MainActor` (the type-level isolation), and the `nonisolated static`
+/// helpers below operate on value-typed inputs (`PhotoFile`, `URL`, etc.) with
+/// no shared mutable state. The compiler can't see this through
+/// `ObservableObject`'s Combine machinery, so we vouch for it manually until
+/// #22 splits this type into a real Store + service actors.
 @MainActor
 final class GalleryManager: ObservableObject, @unchecked Sendable {
     /// Weak shared accessor used by the static `BGAppRefreshTask` handler in

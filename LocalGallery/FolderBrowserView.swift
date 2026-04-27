@@ -22,7 +22,11 @@ struct FolderBrowserView: View {
                 emptyState
             }
         }
-        .navigationTitle(displayFolder?.name ?? "")
+        // Stable placeholder while the bookmark resolves on cold launch —
+        // without it the large title flashes from "" to the folder name on
+        // first render. Pushed children always have a folder by construction
+        // so the fallback only applies at the root.
+        .navigationTitle(displayFolder?.name ?? (isRoot ? "Folders" : ""))
         .navigationBarTitleDisplayMode(isRoot ? .large : .inline)
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {

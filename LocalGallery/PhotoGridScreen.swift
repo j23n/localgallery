@@ -40,10 +40,15 @@ struct PhotoGridScreen: View {
     // Viewer
     @State private var viewerPhoto: PhotoFile?
     @State private var viewerID = UUID()
-    // Owned by the parent so it survives transient view recreations (e.g. the
-    // foreground rescan rebuilding `filtered`) — without this, returning to
-    // the app would reset the viewer to its initially-tapped photo.
-    @State private var viewerCurrentIndex: Int = 0
+    // Tracks the viewer's position by photo id rather than raw index. Two
+    // benefits over an Int: (1) it survives transient view recreations such
+    // as the foreground rescan rebuilding `filtered`, and (2) if a rescan
+    // re-orders or splices photos around the current one, the viewer
+    // re-resolves to the same photo at its new index instead of silently
+    // landing on whatever ended up at the old index. Initial UUID() is a
+    // placeholder — never read because `openViewer(at:)` writes the real id
+    // before the cover binds to `viewerPhoto`.
+    @State private var viewerCurrentPhotoID: UUID = UUID()
 
     // Select mode
     @State private var selectMode = false
@@ -66,9 +71,17 @@ struct PhotoGridScreen: View {
     @State private var sectionsCache: [PhotoSection] = []
     @State private var yearsCache: [(year: String, sectionID: String)] = []
 
-    // IDs of sections whose header is currently within the scrollview's visible
-    // area, used to compute the live date-range subtitle on the Photos tab.
-    @State private var visibleSectionIDs: Set<String> = []
+    // Per-section count of currently-rendered photo cells. LazyVGrid only
+    // instantiates cells near the viewport, so a section's count is positive
+    // exactly while at least one of its photos is on (or near) screen — which
+    // is robust against tall sections whose header has scrolled off but
+    // whose photos are still visible. Used to compute the live date-range
+    // subtitle on the Photos tab.
+    @State private var visibleSectionCounts: [String: Int] = [:]
+
+    private var visibleSectionIDs: Set<String> {
+        Set(visibleSectionCounts.compactMap { $0.value > 0 ? $0.key : nil })
+    }
 
     private func grid(isLandscape: Bool) -> GridLayoutConfig {
         GridLayoutConfig(sizeTier: sizeTier, isLandscape: isLandscape)
@@ -128,20 +141,41 @@ struct PhotoGridScreen: View {
         return subtitle
     }
 
-    /// Date range spanning the dateTaken values of the photos in any
-    /// currently-visible section. Empty until the first section reports its
-    /// onAppear, and recomputed on every membership change in `visibleSectionIDs`.
+    /// Whether the subtitle bar should currently render visible content. Both
+    /// the in-content variant and the pinned safeAreaInset variant gate on
+    /// this so they stay in sync.
+    private var hasSubtitleContent: Bool {
+        guard let sub = displaySubtitle else { return false }
+        return !sub.isEmpty
+    }
+
+    /// Date range spanning the photos in any currently-visible section. Reduces
+    /// over each section's pre-cached `dateRange` rather than re-flattening
+    /// photo dates on every body evaluation — important because viewer paging
+    /// (which writes through `viewerCurrentPhotoID`) re-renders this view on
+    /// every swipe.
     private var visibleDateRangeText: String {
-        let visible = sectionsCache.filter { visibleSectionIDs.contains($0.id) }
-        let dates = visible.flatMap(\.photos).compactMap(\.dateTaken)
-        guard let first = dates.min(), let last = dates.max() else { return "" }
+        var minDate: Date?
+        var maxDate: Date?
+        for section in sectionsCache where visibleSectionIDs.contains(section.id) {
+            guard let range = section.dateRange else { continue }
+            if minDate == nil || range.lowerBound < minDate! { minDate = range.lowerBound }
+            if maxDate == nil || range.upperBound > maxDate! { maxDate = range.upperBound }
+        }
+        guard let first = minDate, let last = maxDate else { return "" }
+        if Calendar.current.isDate(first, inSameDayAs: last) {
+            return Self.dateRangeFormatter.string(from: first)
+        }
+        return "\(Self.dateRangeFormatter.string(from: first)) – \(Self.dateRangeFormatter.string(from: last))"
+    }
+
+    /// Shared `DateFormatter` for the visible-date-range subtitle. Stable per
+    /// process — avoids re-allocating on every body re-evaluation.
+    private static let dateRangeFormatter: DateFormatter = {
         let fmt = DateFormatter()
         fmt.setLocalizedDateFormatFromTemplate("d MMM yyyy")
-        if Calendar.current.isDate(first, inSameDayAs: last) {
-            return fmt.string(from: first)
-        }
-        return "\(fmt.string(from: first)) – \(fmt.string(from: last))"
-    }
+        return fmt
+    }()
 
     private var suggestions: [TagSuggestion] {
         let q = query.lowercased()
@@ -167,8 +201,8 @@ struct PhotoGridScreen: View {
                     // Static subtitle line directly under the system large
                     // title — only shown when not using the pinned visible-
                     // date-range bar (which lives in safeAreaInset).
-                    if !showVisibleDateRange, let sub = displaySubtitle, !sub.isEmpty {
-                        inContentSubtitle(sub)
+                    if !showVisibleDateRange && hasSubtitleContent {
+                        inContentSubtitle(displaySubtitle ?? "")
                     }
 
                     if !activeTags.isEmpty {
@@ -193,6 +227,19 @@ struct PhotoGridScreen: View {
                                 Section {
                                     ForEach(section.photos) { photo in
                                         gridCell(photo: photo, cellSize: cell)
+                                            .onAppear {
+                                                guard showVisibleDateRange else { return }
+                                                visibleSectionCounts[section.id, default: 0] += 1
+                                            }
+                                            .onDisappear {
+                                                guard showVisibleDateRange else { return }
+                                                let next = (visibleSectionCounts[section.id] ?? 0) - 1
+                                                if next <= 0 {
+                                                    visibleSectionCounts.removeValue(forKey: section.id)
+                                                } else {
+                                                    visibleSectionCounts[section.id] = next
+                                                }
+                                            }
                                     }
                                 } header: {
                                     Text(section.title.uppercased())
@@ -204,14 +251,6 @@ struct PhotoGridScreen: View {
                                         .padding(.top, 14)
                                         .padding(.bottom, 6)
                                         .id(section.id)
-                                        .onAppear {
-                                            guard showVisibleDateRange else { return }
-                                            visibleSectionIDs.insert(section.id)
-                                        }
-                                        .onDisappear {
-                                            guard showVisibleDateRange else { return }
-                                            visibleSectionIDs.remove(section.id)
-                                        }
                                 }
                             }
                         }
@@ -247,12 +286,12 @@ struct PhotoGridScreen: View {
         .safeAreaInset(edge: .top, spacing: 0) {
             // Pinned date-range bar for the Photos tab — sits between the nav
             // bar and the scroll content so the range stays visible (and
-            // updates) as the user scrolls through their library.
+            // updates) as the user scrolls through their library. The bar's
+            // height is reserved unconditionally (when this flag is on) so
+            // the grid doesn't shift down a frame after the first section
+            // reports its `onAppear`.
             if showVisibleDateRange {
-                let sub = displaySubtitle ?? ""
-                if !sub.isEmpty {
-                    pinnedSubtitleBar(sub)
-                }
+                pinnedSubtitleBar(displaySubtitle ?? "")
             }
         }
         .task(id: filterKey) {
@@ -264,14 +303,14 @@ struct PhotoGridScreen: View {
                 activeTags = initialTags
                 return
             }
-            // Stale section IDs would survive a filter change otherwise —
+            // Stale section counts would survive a filter change otherwise —
             // sections are re-keyed but the old IDs linger until SwiftUI
-            // recycles the views, briefly polluting the date range.
-            visibleSectionIDs.removeAll()
+            // recycles the cells, briefly polluting the date range.
+            visibleSectionCounts.removeAll()
             await recomputeFilter()
         }
         .fullScreenCover(item: $viewerPhoto) { _ in
-            PhotoViewerView(photos: filtered, currentIndex: $viewerCurrentIndex)
+            PhotoViewerView(photos: filtered, currentPhotoID: $viewerCurrentPhotoID)
                 .id(viewerID)
         }
         .sheet(isPresented: $showSettings) { SettingsView() }
@@ -302,7 +341,10 @@ struct PhotoGridScreen: View {
     }
 
     private func pinnedSubtitleBar(_ text: String) -> some View {
-        Text(text)
+        // Render a non-breaking space when empty so the bar reserves its
+        // height before the first section's `onAppear` populates the date
+        // range — without this, the grid shifts down a frame on launch.
+        Text(text.isEmpty ? "\u{00A0}" : text)
             .font(.system(size: 12, weight: .medium, design: .rounded))
             .foregroundStyle(Design.ink2)
             .lineLimit(1)
@@ -484,7 +526,7 @@ struct PhotoGridScreen: View {
     }
 
     private func openViewer(at photo: PhotoFile) {
-        viewerCurrentIndex = filtered.firstIndex(where: { $0.id == photo.id }) ?? 0
+        viewerCurrentPhotoID = photo.id
         viewerID = UUID()
         viewerPhoto = photo
     }
@@ -670,6 +712,23 @@ struct PhotoSection: Identifiable {
     let id: String
     let title: String
     let photos: [PhotoFile]
+    /// Pre-computed min/max of `dateTaken` across this section's photos.
+    /// Cached at grouping time so the live visible-date-range subtitle on
+    /// the Photos tab doesn't re-flatten every section's photos on each
+    /// SwiftUI body re-evaluation.
+    let dateRange: ClosedRange<Date>?
+
+    init(id: String, title: String, photos: [PhotoFile]) {
+        self.id = id
+        self.title = title
+        self.photos = photos
+        let dates = photos.compactMap(\.dateTaken)
+        if let first = dates.min(), let last = dates.max() {
+            self.dateRange = first...last
+        } else {
+            self.dateRange = nil
+        }
+    }
 
     static func group(_ photos: [PhotoFile]) -> [PhotoSection] {
         group(presorted: photos.sorted { ($0.dateTaken ?? .distantPast) > ($1.dateTaken ?? .distantPast) })

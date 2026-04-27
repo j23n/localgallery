@@ -106,7 +106,11 @@ private extension UIView {
 struct PagingPhotoView: UIViewControllerRepresentable {
     let photos: [PhotoFile]
     let manager: GalleryManager
-    @Binding var currentIndex: Int
+    /// Source of truth is the photo's id, not its index. A foreground rescan
+    /// can insert/remove photos and shift indices — the index would silently
+    /// land on a different photo, so we keep the id stable and re-resolve
+    /// the index against the current `photos` array on every update.
+    @Binding var currentPhotoID: UUID
     @Binding var isChromeVisible: Bool
 
     func makeUIViewController(context: Context) -> UIPageViewController {
@@ -118,26 +122,36 @@ struct PagingPhotoView: UIViewControllerRepresentable {
         pvc.dataSource = context.coordinator
         pvc.delegate = context.coordinator
         pvc.view.backgroundColor = .clear
-        let initial = context.coordinator.makeHostingController(for: currentIndex)
-        pvc.setViewControllers([initial], direction: .forward, animated: false)
+        // Fall back to the first photo's id when the bound id is no longer in
+        // `photos` — defensive against being constructed mid-rescan.
+        let initialID = photos.contains(where: { $0.id == currentPhotoID })
+            ? currentPhotoID
+            : photos.first?.id
+        if let id = initialID {
+            let initial = context.coordinator.makeHostingController(for: id)
+            pvc.setViewControllers([initial], direction: .forward, animated: false)
+        }
         return pvc
     }
 
     func updateUIViewController(_ pvc: UIPageViewController, context: Context) {
         context.coordinator.parent = self
         guard let current = pvc.viewControllers?.first as? IndexedHostingController,
-              current.pageIndex != currentIndex else { return }
-        let direction: UIPageViewController.NavigationDirection = currentIndex > current.pageIndex ? .forward : .reverse
-        let vc = context.coordinator.makeHostingController(for: currentIndex)
+              current.photoID != currentPhotoID,
+              photos.contains(where: { $0.id == currentPhotoID }) else { return }
+        let curIdx = photos.firstIndex(where: { $0.id == current.photoID }) ?? 0
+        let tarIdx = photos.firstIndex(where: { $0.id == currentPhotoID }) ?? 0
+        let direction: UIPageViewController.NavigationDirection = tarIdx > curIdx ? .forward : .reverse
+        let vc = context.coordinator.makeHostingController(for: currentPhotoID)
         pvc.setViewControllers([vc], direction: direction, animated: false)
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     class IndexedHostingController: UIHostingController<AnyView> {
-        let pageIndex: Int
-        init(pageIndex: Int, rootView: AnyView) {
-            self.pageIndex = pageIndex
+        let photoID: UUID
+        init(photoID: UUID, rootView: AnyView) {
+            self.photoID = photoID
             super.init(rootView: rootView)
             view.backgroundColor = .clear
         }
@@ -148,30 +162,37 @@ struct PagingPhotoView: UIViewControllerRepresentable {
         var parent: PagingPhotoView
         init(_ parent: PagingPhotoView) { self.parent = parent }
 
-        func makeHostingController(for index: Int) -> IndexedHostingController {
-            let photo = parent.photos[index]
+        func makeHostingController(for photoID: UUID) -> IndexedHostingController {
+            // Caller guarantees `photoID` is in `parent.photos`; the firstIndex
+            // lookup is the canonical resolution path post-rescan.
+            let idx = parent.photos.firstIndex(where: { $0.id == photoID }) ?? 0
+            let photo = parent.photos[idx]
             let view = PhotoPageView(
                 photo: photo,
                 initialThumbnail: parent.manager.cachedThumbnail(for: photo.url),
                 isChromeVisible: parent.$isChromeVisible
             )
             .environmentObject(parent.manager)
-            return IndexedHostingController(pageIndex: index, rootView: AnyView(view))
+            return IndexedHostingController(photoID: photoID, rootView: AnyView(view))
         }
 
         func pageViewController(_ pvc: UIPageViewController, viewControllerBefore vc: UIViewController) -> UIViewController? {
-            guard let indexed = vc as? IndexedHostingController, indexed.pageIndex > 0 else { return nil }
-            return makeHostingController(for: indexed.pageIndex - 1)
+            guard let indexed = vc as? IndexedHostingController,
+                  let curIdx = parent.photos.firstIndex(where: { $0.id == indexed.photoID }),
+                  curIdx > 0 else { return nil }
+            return makeHostingController(for: parent.photos[curIdx - 1].id)
         }
 
         func pageViewController(_ pvc: UIPageViewController, viewControllerAfter vc: UIViewController) -> UIViewController? {
-            guard let indexed = vc as? IndexedHostingController, indexed.pageIndex < parent.photos.count - 1 else { return nil }
-            return makeHostingController(for: indexed.pageIndex + 1)
+            guard let indexed = vc as? IndexedHostingController,
+                  let curIdx = parent.photos.firstIndex(where: { $0.id == indexed.photoID }),
+                  curIdx < parent.photos.count - 1 else { return nil }
+            return makeHostingController(for: parent.photos[curIdx + 1].id)
         }
 
         func pageViewController(_ pvc: UIPageViewController, didFinishAnimating finished: Bool, previousViewControllers: [UIViewController], transitionCompleted completed: Bool) {
             if completed, let indexed = pvc.viewControllers?.first as? IndexedHostingController {
-                parent.currentIndex = indexed.pageIndex
+                parent.currentPhotoID = indexed.photoID
             }
         }
     }
@@ -181,7 +202,10 @@ struct PagingPhotoView: UIViewControllerRepresentable {
 
 struct PhotoViewerView: View {
     let photos: [PhotoFile]
-    @Binding var currentIndex: Int
+    /// Identifies the currently-shown photo. Tracked by id rather than index
+    /// so a rescan that re-orders or splices `photos` doesn't silently land
+    /// the user on a different image.
+    @Binding var currentPhotoID: UUID
     @EnvironmentObject var manager: GalleryManager
     @Environment(\.dismiss) private var dismiss
 
@@ -190,8 +214,22 @@ struct PhotoViewerView: View {
     @State private var showEXIF: Bool = false
     @State private var dismissOffset: CGFloat = 0
 
-    private var safeIndex: Int {
-        max(0, min(currentIndex, photos.count - 1))
+    /// Index of `currentPhotoID` within `photos`, or nil if the id isn't
+    /// present (rescan removed the photo, or the array is empty).
+    private var currentIndex: Int? {
+        photos.firstIndex(where: { $0.id == currentPhotoID })
+    }
+
+    private var currentPhoto: PhotoFile? {
+        guard let idx = currentIndex else { return nil }
+        return photos[idx]
+    }
+
+    private var positionLabel: String {
+        if let idx = currentIndex {
+            return "\(idx + 1) / \(photos.count)"
+        }
+        return "0 / \(photos.count)"
     }
 
     var body: some View {
@@ -200,14 +238,16 @@ struct PhotoViewerView: View {
                 .opacity(dismissOffset > 0 ? max(0.3, 1.0 - Double(dismissOffset) / 300.0) : 1.0)
                 .ignoresSafeArea()
 
-            PagingPhotoView(
-                photos: photos,
-                manager: manager,
-                currentIndex: $currentIndex,
-                isChromeVisible: $isChromeVisible
-            )
-            .ignoresSafeArea()
-            .offset(y: dismissOffset)
+            if !photos.isEmpty {
+                PagingPhotoView(
+                    photos: photos,
+                    manager: manager,
+                    currentPhotoID: $currentPhotoID,
+                    isChromeVisible: $isChromeVisible
+                )
+                .ignoresSafeArea()
+                .offset(y: dismissOffset)
+            }
 
             if isChromeVisible {
                 VStack {
@@ -220,7 +260,7 @@ struct PhotoViewerView: View {
                                 .background(.white.opacity(0.15), in: Circle())
                         }
                         Spacer()
-                        Text("\(safeIndex + 1) / \(photos.count)")
+                        Text(positionLabel)
                             .font(.system(size: 13, weight: .medium, design: .rounded))
                             .foregroundStyle(.white.opacity(0.85))
                             .padding(.horizontal, 12)
@@ -284,14 +324,21 @@ struct PhotoViewerView: View {
             )
             .frame(width: 0, height: 0)
         )
+        .onChange(of: photos) { _, newPhotos in
+            // Rescan dropped the photo we were viewing; dismiss instead of
+            // silently landing on a different image at a stale index.
+            if !newPhotos.contains(where: { $0.id == currentPhotoID }) {
+                dismiss()
+            }
+        }
         .sheet(isPresented: $showShareSheet) {
-            if safeIndex < photos.count {
-                ShareSheet(items: [photos[safeIndex].url])
+            if let photo = currentPhoto {
+                ShareSheet(items: [photo.url])
             }
         }
         .sheet(isPresented: $showEXIF) {
-            if safeIndex < photos.count {
-                EXIFSheetView(photo: photos[safeIndex])
+            if let photo = currentPhoto {
+                EXIFSheetView(photo: photo)
             }
         }
     }

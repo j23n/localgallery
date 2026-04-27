@@ -1643,7 +1643,7 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
                 candidates.append(Memory(
                     id: "onThisDay", type: .onThisDay,
                     title: "On this day",
-                    subtitle: "\(years.count) different years",
+                    subtitle: nil,
                     photoIDs: ids,
                     coverPhotoID: ids[ids.count / 2],
                     dateRange: onThisDay.first!.1...onThisDay.last!.1,
@@ -1668,7 +1668,7 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
                 candidates.append(Memory(
                     id: "yearsAgo-\(milestone)", type: .yearsAgo,
                     title: "On this day in \(targetYear)",
-                    subtitle: Self.formatDateRange(first, last),
+                    subtitle: nil,
                     photoIDs: ids,
                     coverPhotoID: ids[ids.count / 2],
                     dateRange: first...last,
@@ -1698,7 +1698,7 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
                 candidates.append(Memory(
                     id: "person-\(name)", type: .personOverTime,
                     title: "\(name) over the years",
-                    subtitle: "\(years.count) years of memories",
+                    subtitle: nil,
                     photoIDs: ids,
                     coverPhotoID: ids.last!,
                     dateRange: first...last,
@@ -1725,7 +1725,7 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
                 candidates.append(Memory(
                     id: "folder-\(folder.url.lastPathComponent)", type: .folderEvent,
                     title: folder.name,
-                    subtitle: Self.formatDateRange(first, last),
+                    subtitle: nil,
                     photoIDs: ids,
                     coverPhotoID: ids[ids.count / 3],
                     dateRange: first...last,
@@ -1755,7 +1755,7 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
                 candidates.append(Memory(
                     id: "density-\(dayKey)", type: .photoDensity,
                     title: "A busy day",
-                    subtitle: Self.formatDateRange(first, last),
+                    subtitle: nil,
                     photoIDs: ids,
                     coverPhotoID: ids[ids.count / 2],
                     dateRange: first...last,
@@ -1782,7 +1782,6 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
                     lowerNameIndex: lowerNameIndexSnapshot,
                     calendar: calendar,
                     todayComponents: todayComponents,
-                    currentYear: currentYear,
                     into: &candidates
                 )
             }
@@ -1862,7 +1861,6 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         lowerNameIndex: [String: ContactInfo],
         calendar: Calendar,
         todayComponents: DateComponents,
-        currentYear: Int,
         into candidates: inout [Memory]
     ) {
         guard let todayMonth = todayComponents.month,
@@ -1921,20 +1919,13 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
                 dateRange = nil
             }
 
-            let subtitle: String
-            if let bYear = contact.birthday?.year, bYear > 0, currentYear > bYear {
-                subtitle = "Turning \(currentYear - bYear) today"
-            } else {
-                subtitle = "Birthday today"
-            }
-
             // Score sits well above on-this-day / years-ago so birthdays float
             // to the front of the rail on the matching day.
             candidates.append(Memory(
                 id: "birthday-\(path)",
                 type: .birthday,
                 title: "Happy birthday, \(bundle.displayName)",
-                subtitle: subtitle,
+                subtitle: nil,
                 photoIDs: ids,
                 coverPhotoID: coverID,
                 dateRange: dateRange,
@@ -2017,7 +2008,7 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
         candidates.append(Memory(
             id: "trip-\(tripKey)", type: .trip,
             title: title,
-            subtitle: "\(days) \(days == 1 ? "day" : "days")",
+            subtitle: nil,
             photoIDs: ids,
             coverPhotoID: ids[ids.count / 3],
             dateRange: first...last,
@@ -2057,7 +2048,7 @@ final class GalleryManager: ObservableObject, @unchecked Sendable {
             candidates.append(Memory(
                 id: "subtrip-\(tripKey)-\(seg.key)", type: .trip,
                 title: subTitle,
-                subtitle: "\(segDays) \(segDays == 1 ? "day" : "days") · part of \(locationLabel ?? "this trip")",
+                subtitle: nil,
                 photoIDs: segIDs,
                 coverPhotoID: segIDs[segIDs.count / 3],
                 dateRange: segFirst...segLast,

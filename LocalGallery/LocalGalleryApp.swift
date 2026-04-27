@@ -48,17 +48,28 @@ extension View {
 /// task that re-runs memory generation when the app isn't open. Registration
 /// must happen synchronously in `didFinishLaunchingWithOptions`, before the
 /// scene is connected — that's why this lives here and not on `GalleryManager`.
+@MainActor
 final class AppDelegate: NSObject, UIApplicationDelegate {
     /// `BGTaskSchedulerPermittedIdentifiers` whitelists this exact string in
     /// the Info.plist; both must stay in sync.
     static let backgroundRefreshIdentifier = "com.localgallery.app.dailyMemories"
 
+    /// Owns the BG-task → manager indirection. The `WindowGroup` attaches the
+    /// `GalleryManager` once SwiftUI builds the scene. We hold the service
+    /// here (rather than reaching for a `GalleryManager.shared` global) so the
+    /// BG handler has a stable, isolation-correct API to call.
+    let memoryRefresh = MemoryRefreshService()
+
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        // Capture the service value (Sendable because MemoryRefreshService is
+        // `@MainActor`) rather than `self` (AppDelegate isn't auto-Sendable
+        // under Swift 6 strict concurrency).
+        let service = memoryRefresh
         BGTaskScheduler.shared.register(
             forTaskWithIdentifier: Self.backgroundRefreshIdentifier,
             using: nil
         ) { task in
-            Self.handleBackgroundRefresh(task: task as! BGAppRefreshTask)
+            Self.handleBackgroundRefresh(task: task as! BGAppRefreshTask, service: service)
         }
 
         NotificationCenter.default.addObserver(
@@ -93,28 +104,17 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         }
     }
 
-    /// Handler for the background refresh. Asks `GalleryManager` to run the
-    /// once-a-day memory regeneration (skipped if already done today). Always
-    /// re-schedules the next run so a single skipped day doesn't kill the
-    /// recurring schedule.
-    private static func handleBackgroundRefresh(task: BGAppRefreshTask) {
+    /// Handler for the background refresh. Forwards to `MemoryRefreshService`
+    /// which runs the once-a-day memory regeneration on the attached manager
+    /// (or no-ops on a background-only launch where the WindowGroup never
+    /// built). Always re-schedules the next run so a single skipped day
+    /// doesn't kill the recurring schedule.
+    private static func handleBackgroundRefresh(task: BGAppRefreshTask, service: MemoryRefreshService) {
         Log.bg.info("Background refresh started")
         scheduleBackgroundRefresh()
 
         let work = Task { @MainActor in
-            // GalleryManager.shared is set inside `GalleryManager.init`, which
-            // SwiftUI invokes lazily the first time the WindowGroup body
-            // evaluates. On a true background-only launch SwiftUI may never
-            // build a scene, in which case `shared` is nil and we no-op. That's
-            // acceptable: the next foreground entry runs the same generation
-            // via `generateMemoriesIfNeeded` (the foreground catch-up path).
-            // Constructing the manager from AppDelegate would fix this but
-            // would also tie the SwiftUI environment to an external instance.
-            guard let manager = GalleryManager.shared else {
-                Log.bg.warning("No active GalleryManager (background-only launch); nothing to do")
-                return
-            }
-            await manager.runScheduledMemoryRefresh()
+            await service.runDailyRefresh()
         }
 
         // Expiration just cancels — completion is reported once below after
@@ -175,6 +175,13 @@ struct LocalGalleryApp: App {
                 .environment(galleryManager)
                 .environment(router)
                 .tint(Design.accentColor)
+                // Hand the manager to the BG-task service. Runs once per scene
+                // build; on a true background-only launch the WindowGroup
+                // doesn't build and the service stays detached (BG handler
+                // no-ops, foreground catch-up takes over on next entry).
+                .task {
+                    appDelegate.memoryRefresh.attach(galleryManager)
+                }
                 .onOpenURL { url in
                     router.handle(url, manager: galleryManager)
                 }

@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Local. — iOS apps</title>
+  <meta name="description" content="Three iOS apps that keep your files on your device. No cloud, no accounts, no tracking.">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #ffffff;
+      --fg: #111111;
+      --muted: #666666;
+      --border: #e5e5e5;
+      --surface: #f5f5f3;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: inherit; text-decoration: none; }
+    .page { max-width: 660px; margin: 0 auto; padding: 0 24px; }
+    header { padding: 52px 0 0; }
+    .brand { font-size: 26px; font-weight: 700; letter-spacing: -0.5px; }
+    .brand-sub { margin-top: 5px; font-size: 15px; color: var(--muted); }
+    .rule { border: none; border-top: 1px solid var(--border); margin: 44px 0; }
+    .apps { margin-top: 48px; }
+    .app { display: grid; grid-template-columns: 80px 1fr; column-gap: 22px; }
+    .icon { width: 80px; height: 80px; border-radius: 18px; overflow: hidden; flex-shrink: 0; box-shadow: 0 2px 10px rgba(0,0,0,.14); }
+    .icon svg { display: block; width: 100%; height: 100%; }
+    .app-name { font-size: 19px; font-weight: 600; letter-spacing: -0.3px; line-height: 1.2; margin-top: 2px; }
+    .app-tagline { font-size: 14px; color: var(--muted); margin-top: 4px; line-height: 1.5; }
+    .features { margin-top: 13px; list-style: none; display: flex; flex-direction: column; gap: 3px; }
+    .features li { font-size: 13.5px; color: var(--muted); padding-left: 14px; position: relative; }
+    .features li::before { content: '\2013'; position: absolute; left: 0; color: #bbb; }
+    .tf-btn {
+      display: inline-block;
+      margin-top: 17px;
+      padding: 8px 16px;
+      background: #111;
+      color: #fff;
+      font-size: 13px;
+      font-weight: 500;
+      border-radius: 8px;
+      letter-spacing: 0.1px;
+      transition: background .15s;
+    }
+    .tf-btn:hover { background: #333; }
+    .sync-box { margin-top: 56px; background: var(--surface); border-radius: 14px; padding: 24px 28px; }
+    .sync-box h2 { font-size: 15px; font-weight: 600; letter-spacing: -0.2px; }
+    .sync-box p { margin-top: 7px; font-size: 14px; color: var(--muted); line-height: 1.65; }
+    .sync-box a { color: var(--fg); text-decoration: underline; text-underline-offset: 2px; }
+    footer {
+      margin-top: 56px;
+      padding-bottom: 52px;
+      font-size: 13px;
+      color: var(--muted);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      align-items: center;
+    }
+    footer a:hover { color: var(--fg); }
+    .dot { color: #ccc; }
+    @media (max-width: 480px) {
+      .app { grid-template-columns: 64px 1fr; column-gap: 16px; }
+      .icon { width: 64px; height: 64px; border-radius: 14px; }
+      .sync-box { padding: 20px 22px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+
+    <header>
+      <div class="brand">Local.</div>
+      <div class="brand-sub">Three iOS apps. Your files. No cloud.</div>
+    </header>
+
+    <hr class="rule" style="margin-top:40px">
+
+    <div class="apps">
+
+      <!-- LocalGallery -->
+      <div class="app" id="gallery">
+        <div class="icon">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+            <defs>
+              <linearGradient id="g-bg" x1="0" y1="0" x2="1024" y2="1024" gradientUnits="userSpaceOnUse">
+                <stop offset="0%" stop-color="#1E1B2E"/>
+                <stop offset="100%" stop-color="#100E19"/>
+              </linearGradient>
+              <linearGradient id="g-folderBody" x1="512" y1="375" x2="512" y2="795" gradientUnits="userSpaceOnUse">
+                <stop offset="0%" stop-color="#F5EADB"/>
+                <stop offset="100%" stop-color="#E2CDAF"/>
+              </linearGradient>
+              <linearGradient id="g-folderTab" x1="310" y1="275" x2="310" y2="375" gradientUnits="userSpaceOnUse">
+                <stop offset="0%" stop-color="#FAF2E8"/>
+                <stop offset="100%" stop-color="#EEDDCA"/>
+              </linearGradient>
+              <linearGradient id="g-sky" x1="512" y1="425" x2="512" y2="680" gradientUnits="userSpaceOnUse">
+                <stop offset="0%" stop-color="#FCCF90"/>
+                <stop offset="30%" stop-color="#F0A672"/>
+                <stop offset="65%" stop-color="#6EB4CE"/>
+                <stop offset="100%" stop-color="#4A95B8"/>
+              </linearGradient>
+              <filter id="g-folderShadow">
+                <feDropShadow dx="0" dy="10" stdDeviation="22" flood-color="#000" flood-opacity="0.5"/>
+              </filter>
+              <filter id="g-photoShadow">
+                <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#000" flood-opacity="0.25"/>
+              </filter>
+              <clipPath id="g-photoClip">
+                <rect x="240" y="432" width="544" height="296" rx="10"/>
+              </clipPath>
+            </defs>
+            <rect width="1024" height="1024" fill="url(#g-bg)"/>
+            <ellipse cx="512" cy="580" rx="340" ry="260" fill="#2E2844" opacity="0.6"/>
+            <g filter="url(#g-folderShadow)">
+              <path d="M205,375 L205,320 Q205,288 235,288 L400,288 Q426,288 436,316 L458,375" fill="url(#g-folderTab)"/>
+              <rect x="182" y="375" width="660" height="420" rx="28" fill="url(#g-folderBody)"/>
+            </g>
+            <g filter="url(#g-photoShadow)">
+              <rect x="248" y="408" width="556" height="316" rx="14" fill="#FFFFFF" transform="rotate(-2.5, 512, 566)" opacity="0.8"/>
+            </g>
+            <g filter="url(#g-photoShadow)">
+              <rect x="232" y="424" width="560" height="312" rx="14" fill="#FFFFFF"/>
+            </g>
+            <g clip-path="url(#g-photoClip)">
+              <rect x="240" y="432" width="544" height="296" fill="url(#g-sky)"/>
+              <circle cx="636" cy="488" r="52" fill="#F7D26B" opacity="0.18"/>
+              <circle cx="636" cy="488" r="36" fill="#F7D26B"/>
+              <polygon points="240,605 330,548 408,578 488,528 558,560 636,518 714,548 784,522 784,728 240,728" fill="#5E9F92" opacity="0.55"/>
+              <polygon points="240,640 326,578 414,618 504,564 586,598 668,558 754,588 784,572 784,728 240,728" fill="#2E7C6A"/>
+              <polygon points="240,690 370,668 530,680 690,664 784,678 784,728 240,728" fill="#1A5446"/>
+            </g>
+            <rect x="240" y="432" width="544" height="296" rx="10" fill="none" stroke="#000" stroke-opacity="0.06" stroke-width="1.5"/>
+          </svg>
+        </div>
+        <div>
+          <div class="app-name">LocalGallery</div>
+          <div class="app-tagline">Read-only photo and video viewer for local files. No importing, no library lock-in.</div>
+          <ul class="features">
+            <li>Browse folders with cover thumbnails and sorting</li>
+            <li>Collections auto-grouped by tag &#8212; people, places, objects</li>
+            <li>Video and Live Photo inline playback</li>
+            <li>EXIF metadata: camera, lens, exposure, GPS</li>
+            <li>Hierarchical keyword tags (XMP/IPTC)</li>
+            <li>No account, no server, no tracking</li>
+          </ul>
+          <a href="#" class="tf-btn">Join TestFlight beta &#8594;</a>
+        </div>
+      </div>
+
+      <hr class="rule">
+
+      <!-- LocalContacts -->
+      <div class="app" id="contacts">
+        <div class="icon">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+            <defs>
+              <linearGradient id="c-bg" x1="0" y1="0" x2="1024" y2="1024" gradientUnits="userSpaceOnUse">
+                <stop offset="0%" stop-color="#1A1E2E"/>
+                <stop offset="100%" stop-color="#0E1018"/>
+              </linearGradient>
+              <linearGradient id="c-cardFront" x1="512" y1="308" x2="512" y2="768" gradientUnits="userSpaceOnUse">
+                <stop offset="0%" stop-color="#F5EADB"/>
+                <stop offset="100%" stop-color="#E2CDAF"/>
+              </linearGradient>
+              <linearGradient id="c-cardBack" x1="512" y1="280" x2="512" y2="740" gradientUnits="userSpaceOnUse">
+                <stop offset="0%" stop-color="#EEE0CC"/>
+                <stop offset="100%" stop-color="#D9C4A0"/>
+              </linearGradient>
+              <filter id="c-shadow">
+                <feDropShadow dx="0" dy="10" stdDeviation="22" flood-color="#000" flood-opacity="0.45"/>
+              </filter>
+            </defs>
+            <rect width="1024" height="1024" fill="url(#c-bg)"/>
+            <ellipse cx="512" cy="560" rx="320" ry="240" fill="#252340" opacity="0.6"/>
+            <g filter="url(#c-shadow)">
+              <rect x="208" y="290" width="620" height="460" rx="28" fill="url(#c-cardBack)" transform="rotate(4,512,520)" opacity="0.75"/>
+            </g>
+            <g filter="url(#c-shadow)">
+              <rect x="196" y="308" width="632" height="460" rx="28" fill="url(#c-cardFront)"/>
+            </g>
+            <circle cx="512" cy="438" r="76" fill="#D4B896" opacity="0.4"/>
+            <circle cx="512" cy="418" r="40" fill="#C09070"/>
+            <ellipse cx="512" cy="486" rx="58" ry="40" fill="#C09070"/>
+            <rect x="356" y="548" width="300" height="20" rx="10" fill="#A07050" opacity="0.55"/>
+            <rect x="290" y="592" width="200" height="13" rx="6.5" fill="#A07050" opacity="0.32"/>
+            <rect x="290" y="620" width="240" height="13" rx="6.5" fill="#A07050" opacity="0.26"/>
+            <rect x="290" y="648" width="170" height="13" rx="6.5" fill="#A07050" opacity="0.20"/>
+            <rect x="290" y="676" width="210" height="13" rx="6.5" fill="#A07050" opacity="0.16"/>
+          </svg>
+        </div>
+        <div>
+          <div class="app-name">LocalContacts</div>
+          <div class="app-tagline">File-based contact manager. Each contact is a plain .vcf file in a folder you control.</div>
+          <ul class="features">
+            <li>Standard .vcf format &#8212; readable by any text editor</li>
+            <li>Optional sync with Apple Contacts for caller ID and QuickType</li>
+            <li>Conflict detection for external edits and deletions</li>
+            <li>Full fields: name, org, phone, email, address, birthday, photo, notes</li>
+            <li>Tag-based filter and search</li>
+            <li>No account, no server, no tracking</li>
+          </ul>
+          <a href="#" class="tf-btn">Join TestFlight beta &#8594;</a>
+        </div>
+      </div>
+
+      <hr class="rule">
+
+      <!-- LocalMusic -->
+      <div class="app" id="music">
+        <div class="icon">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+            <defs>
+              <linearGradient id="m-bg" x1="0" y1="0" x2="1024" y2="1024" gradientUnits="userSpaceOnUse">
+                <stop offset="0%" stop-color="#1E1B2E"/>
+                <stop offset="100%" stop-color="#100E19"/>
+              </linearGradient>
+              <linearGradient id="m-folderBody" x1="512" y1="375" x2="512" y2="795" gradientUnits="userSpaceOnUse">
+                <stop offset="0%" stop-color="#F5EADB"/>
+                <stop offset="100%" stop-color="#E2CDAF"/>
+              </linearGradient>
+              <linearGradient id="m-folderTab" x1="310" y1="275" x2="310" y2="375" gradientUnits="userSpaceOnUse">
+                <stop offset="0%" stop-color="#FAF2E8"/>
+                <stop offset="100%" stop-color="#EEDDCA"/>
+              </linearGradient>
+              <filter id="m-folderShadow">
+                <feDropShadow dx="0" dy="10" stdDeviation="22" flood-color="#000" flood-opacity="0.5"/>
+              </filter>
+            </defs>
+            <rect width="1024" height="1024" fill="url(#m-bg)"/>
+            <ellipse cx="512" cy="580" rx="340" ry="260" fill="#2E2844" opacity="0.6"/>
+            <g filter="url(#m-folderShadow)">
+              <path d="M205,375 L205,320 Q205,288 235,288 L400,288 Q426,288 436,316 L458,375" fill="url(#m-folderTab)"/>
+              <rect x="182" y="375" width="660" height="420" rx="28" fill="url(#m-folderBody)"/>
+            </g>
+            <circle cx="512" cy="592" r="168" fill="#1E1A30"/>
+            <circle cx="512" cy="592" r="152" fill="none" stroke="#F5EADB" stroke-width="1" stroke-opacity="0.06"/>
+            <circle cx="512" cy="592" r="130" fill="none" stroke="#F5EADB" stroke-width="1" stroke-opacity="0.08"/>
+            <circle cx="512" cy="592" r="108" fill="none" stroke="#F5EADB" stroke-width="1" stroke-opacity="0.07"/>
+            <circle cx="512" cy="592" r="90" fill="none" stroke="#F5EADB" stroke-width="1" stroke-opacity="0.06"/>
+            <circle cx="512" cy="592" r="72" fill="#3A3258"/>
+            <circle cx="512" cy="592" r="56" fill="#D4A870" opacity="0.18"/>
+            <circle cx="512" cy="592" r="14" fill="#100E19"/>
+            <circle cx="512" cy="592" r="168" fill="none" stroke="#F5EADB" stroke-width="1.5" stroke-opacity="0.1"/>
+          </svg>
+        </div>
+        <div>
+          <div class="app-name">LocalMusic</div>
+          <div class="app-tagline">Music player for locally stored audio files. Point it at a folder and it becomes your library.</div>
+          <ul class="features">
+            <li>Folder-based library scanned recursively</li>
+            <li>Synced and unsynced lyrics with auto-scroll</li>
+            <li>M3U and PLS playlist support</li>
+            <li>Lock screen controls and Now Playing info</li>
+            <li>MP3, M4A, FLAC, AIFF, Opus, and more</li>
+            <li>No account, no server, no tracking</li>
+          </ul>
+          <a href="#" class="tf-btn">Join TestFlight beta &#8594;</a>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="sync-box">
+      <h2>Works great with Syncthing</h2>
+      <p>
+        All three apps work with any folder accessible to iOS &#8212; including folders synced by
+        <a href="https://syncthing.net/">Syncthing</a>. On iOS, use
+        <a href="https://apps.apple.com/app/synctrain/id6475591584">SyncTrain</a> to run
+        Syncthing on your device. Your files stay on your own hardware, synced directly
+        between devices &#8212; no third-party servers involved.
+      </p>
+    </div>
+
+    <hr class="rule">
+
+    <footer>
+      <span>&#169; 2026 j23n</span>
+      <span class="dot">&#183;</span>
+      <a href="privacy.html">Privacy policy</a>
+      <span class="dot">&#183;</span>
+      <a href="mailto:mail@j23n.com">mail@j23n.com</a>
+      <span class="dot">&#183;</span>
+      <a href="https://github.com/j23n/localgallery">LocalGallery</a>
+      <span class="dot">&#183;</span>
+      <a href="https://github.com/j23n/localcontacts">LocalContacts</a>
+      <span class="dot">&#183;</span>
+      <a href="https://github.com/j23n/localmusic">LocalMusic</a>
+    </footer>
+
+  </div>
+</body>
+</html>

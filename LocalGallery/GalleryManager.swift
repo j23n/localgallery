@@ -42,7 +42,7 @@ final class GalleryManager {
     /// Contacts access. Populated by `loadContacts()` and refreshed when the app
     /// re-enters the foreground.
     private(set) var contacts: [ContactInfo] = [] {
-        didSet { rebuildContactsByLowerName() }
+        didSet { contactLinker.index(contacts) }
     }
 
     /// Explicit person-tag → contact decisions. Keyed by tag fullPath
@@ -81,6 +81,7 @@ final class GalleryManager {
     private let thumbnailCache = NSCache<NSURL, UIImage>()
     private let fullImageCache = NSCache<NSURL, UIImage>()
     private let bookmarks = BookmarkManager()
+    private let contactLinker = ContactLinker()
     /// NotificationCenter observer tokens. Set once in `init()` (on main),
     /// read once in `deinit` (on whatever thread released the last reference).
     /// `@ObservationIgnored` so the `@Observable` macro doesn't synthesize
@@ -345,26 +346,6 @@ final class GalleryManager {
         UserDefaults.standard.set(data, forKey: "personContactLinks")
     }
 
-    /// Lowercased "<given> <family>" → contact, used for birthday auto-matching.
-    /// First-write wins so the address book's order determines which homonym
-    /// auto-matches. Manual links via `personContactLinks` always override.
-    private var _contactsByLowerName: [String: ContactInfo] = [:]
-    /// CNContact.identifier → contact. Avoids linear scans when resolving a
-    /// manual link to its target contact in `effectiveContact`.
-    private var _contactByID: [String: ContactInfo] = [:]
-
-    private func rebuildContactsByLowerName() {
-        var byName: [String: ContactInfo] = [:]
-        var byID: [String: ContactInfo] = [:]
-        for c in contacts {
-            byID[c.id] = c
-            let key = c.fullName.lowercased()
-            if byName[key] == nil { byName[key] = c }
-        }
-        _contactsByLowerName = byName
-        _contactByID = byID
-    }
-
     // MARK: - Contacts
 
     /// Prompt for Contacts access and load on grant. Safe to call repeatedly.
@@ -383,21 +364,9 @@ final class GalleryManager {
         let previous = contacts
         let loaded = await ContactsService.loadContacts()
         contacts = loaded
-        if Self.birthdayRelevantSignature(loaded) != Self.birthdayRelevantSignature(previous) {
+        if ContactLinker.birthdayRelevantSignature(loaded) != ContactLinker.birthdayRelevantSignature(previous) {
             forceRegenerateMemories()
         }
-    }
-
-    /// Set of (id, name, month-day) tuples — the only contact fields that the
-    /// memories pipeline reads. Comparing signatures lets us skip a costly
-    /// memory regeneration on no-op reloads while still catching adds/edits/
-    /// removes.
-    private static func birthdayRelevantSignature(_ contacts: [ContactInfo]) -> Set<String> {
-        Set(contacts.map { c in
-            let m = c.birthday?.month.map(String.init) ?? "-"
-            let d = c.birthday?.day.map(String.init) ?? "-"
-            return "\(c.id)|\(c.fullName)|\(m)-\(d)"
-        })
     }
 
     /// Manually link a person tag to a contact. Triggers a memory rebuild so
@@ -425,39 +394,18 @@ final class GalleryManager {
     }
 
     /// Resolved link state for a person tag — what the UI should display.
-    /// Computed from `personContactLinks` + the contact indexes, so callers
-    /// don't reimplement the auto-match rule (and the linear scan that comes
-    /// with it) in their bodies.
-    enum PersonLinkState: Equatable {
-        case unlinked          // no manual link, no auto match
-        case disabled          // user explicitly disabled (no birthdays)
-        case manual(ContactInfo)
-        case auto(ContactInfo)
-    }
-
-    func linkState(forPersonPath path: String, displayName: String) -> PersonLinkState {
-        switch personContactLinks[path] {
-        case .disabled:
-            return .disabled
-        case .manual(let id):
-            if let c = _contactByID[id] { return .manual(c) }
-            return .unlinked  // dangling reference (contact deleted)
-        case nil:
-            if let auto = _contactsByLowerName[displayName.lowercased()] { return .auto(auto) }
-            return .unlinked
-        }
+    /// Forwards to `ContactLinker` which owns the indexes; the manager
+    /// passes in the observed `personContactLinks` dictionary.
+    func linkState(forPersonPath path: String, displayName: String) -> ContactLinker.LinkState {
+        contactLinker.linkState(forPersonPath: path, displayName: displayName, links: personContactLinks)
     }
 
     /// Effective contact for a person tag: manual link if present, otherwise
     /// the auto-match by case-insensitive equality of `displayName` to
     /// `<given> <family>`. Returns `nil` when the user explicitly disabled
-    /// the link or no contact matches. Both lookups go through hash-based
-    /// indexes so this is O(1) — safe to call from view bodies.
+    /// the link or no contact matches.
     func effectiveContact(forPersonPath path: String, displayName: String) -> ContactInfo? {
-        switch linkState(forPersonPath: path, displayName: displayName) {
-        case .manual(let c), .auto(let c): return c
-        case .unlinked, .disabled: return nil
-        }
+        contactLinker.effectiveContact(forPersonPath: path, displayName: displayName, links: personContactLinks)
     }
 
     @discardableResult
@@ -1585,7 +1533,7 @@ final class GalleryManager {
         // categories so the once-per-day gate covers it too.
         let contactsSnapshot = self.contacts
         let linksSnapshot = self.personContactLinks
-        let lowerNameIndexSnapshot = self._contactsByLowerName
+        let lowerNameIndexSnapshot = self.contactLinker.contactsByLowerName
         let birthdaysEnabledSnapshot = self.birthdayMemoriesEnabled
 
         let results: [Memory] = await Task.detached(priority: .utility) {

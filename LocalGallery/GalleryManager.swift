@@ -80,8 +80,7 @@ final class GalleryManager {
     }
     private let thumbnailCache = NSCache<NSURL, UIImage>()
     private let fullImageCache = NSCache<NSURL, UIImage>()
-    private let bookmarkKey = "rootFolderBookmark"
-    private var activeSecurityScopedURL: URL?
+    private let bookmarks = BookmarkManager()
     private var foregroundObserver: Any?
     private var significantTimeChangeObserver: Any?
     private var contactStoreObserver: Any?
@@ -155,7 +154,7 @@ final class GalleryManager {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 await self.loadContacts()
-                if let url = self.activeSecurityScopedURL {
+                if let url = self.bookmarks.activeURL {
                     await self.scanFolder(at: url, silent: true)
                 }
                 // Day rolled over while the app was backgrounded? Re-export so
@@ -225,56 +224,21 @@ final class GalleryManager {
         if let observer = contactStoreObserver {
             NotificationCenter.default.removeObserver(observer)
         }
-        let url = activeSecurityScopedURL
-        url?.stopAccessingSecurityScopedResource()
+        // BookmarkManager's deinit releases the security scope.
     }
 
-    // MARK: - Security-Scoped Access (balanced start/stop)
+    // MARK: - Bookmark / Security-Scoped Access (forwarded to BookmarkManager)
 
     func startAccessingFolder(_ url: URL) {
-        stopAccessingCurrentFolder()
-        _ = url.startAccessingSecurityScopedResource()
-        activeSecurityScopedURL = url
+        bookmarks.startAccessing(url)
     }
-
-    private func stopAccessingCurrentFolder() {
-        activeSecurityScopedURL?.stopAccessingSecurityScopedResource()
-        activeSecurityScopedURL = nil
-    }
-
-    // MARK: - Bookmark Persistence
 
     func saveBookmark(for url: URL) {
-        do {
-            let bookmarkData = try url.bookmarkData(
-                options: [],
-                includingResourceValuesForKeys: nil,
-                relativeTo: nil
-            )
-            UserDefaults.standard.set(bookmarkData, forKey: bookmarkKey)
-        } catch {
-            Log.cache.error("Failed to save bookmark: \(error.localizedDescription)")
-        }
+        bookmarks.save(for: url)
     }
 
     func resolveBookmark() -> URL? {
-        guard let data = UserDefaults.standard.data(forKey: bookmarkKey) else { return nil }
-        var isStale = false
-        do {
-            let url = try URL(
-                resolvingBookmarkData: data,
-                options: [],
-                relativeTo: nil,
-                bookmarkDataIsStale: &isStale
-            )
-            if isStale {
-                saveBookmark(for: url)
-            }
-            return url
-        } catch {
-            Log.cache.error("Failed to resolve bookmark: \(error.localizedDescription)")
-            return nil
-        }
+        bookmarks.resolve()
     }
 
     // MARK: - Disk Cache
@@ -524,11 +488,11 @@ final class GalleryManager {
 
         // Security scope may already be active from init()
         let url: URL
-        if let active = activeSecurityScopedURL {
+        if let active = bookmarks.activeURL {
             url = active
         } else {
-            guard let resolved = resolveBookmark() else { return }
-            startAccessingFolder(resolved)
+            guard let resolved = bookmarks.resolve() else { return }
+            bookmarks.startAccessing(resolved)
             url = resolved
         }
 
@@ -542,7 +506,7 @@ final class GalleryManager {
     }
 
     func rescan() async {
-        guard let url = activeSecurityScopedURL else { return }
+        guard let url = bookmarks.activeURL else { return }
         await scanFolder(at: url, silent: true)
     }
 

@@ -93,11 +93,6 @@ final class GalleryManager {
     @ObservationIgnored private nonisolated(unsafe) var significantTimeChangeObserver: Any?
     @ObservationIgnored private nonisolated(unsafe) var contactStoreObserver: Any?
 
-    private var cacheURL: URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("library_cache.json")
-    }
-
     private var memoriesCacheURL: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("memories_cache.json")
@@ -241,17 +236,6 @@ final class GalleryManager {
 
     // MARK: - Disk Cache
 
-    // v13: force rescan so video dates read AVAsset.creationDate (videos used to
-    // skip enrichment and fall back to the filesystem date, which often equals
-    // the download time on this device).
-    private static let cacheVersion = 15
-
-    private struct LibraryCache: Codable, Sendable {
-        let version: Int
-        let rootFolder: PhotoFolder
-        let allPhotos: [PhotoFile]
-    }
-
     private struct ScanFolderNode {
         let url: URL
         let name: String
@@ -279,16 +263,7 @@ final class GalleryManager {
 
     private func saveCache() {
         guard let root = rootFolder else { return }
-        let cache = LibraryCache(version: Self.cacheVersion, rootFolder: root, allPhotos: allPhotos)
-        let url = cacheURL
-        Task.detached(priority: .utility) {
-            do {
-                let data = try JSONEncoder().encode(cache)
-                try data.write(to: url, options: .atomic)
-            } catch {
-                Log.cache.error("Failed to save cache: \(error.localizedDescription)")
-            }
-        }
+        LibraryCacheStore.save(rootFolder: root, allPhotos: allPhotos)
     }
 
     private func saveMemoriesCache() {
@@ -401,24 +376,11 @@ final class GalleryManager {
 
     @discardableResult
     private func loadCache() -> Bool {
-        guard FileManager.default.fileExists(atPath: cacheURL.path) else { return false }
-        do {
-            let data = try Data(contentsOf: cacheURL)
-            let cache = try JSONDecoder().decode(LibraryCache.self, from: data)
-            guard cache.version == Self.cacheVersion else {
-                Log.cache.warning("Version mismatch (\(cache.version) vs \(Self.cacheVersion)), discarding")
-                try? FileManager.default.removeItem(at: cacheURL)
-                return false
-            }
-            self.rootFolder = cache.rootFolder
-            self.allPhotos = cache.allPhotos
-            Log.cache.info("Loaded \(cache.allPhotos.count) photos from cache v\(cache.version)")
-            rebuildSortAndIndex()
-            return true
-        } catch {
-            Log.cache.error("Failed to load cache: \(error.localizedDescription)")
-            return false
-        }
+        guard let cached = LibraryCacheStore.load() else { return false }
+        self.rootFolder = cached.rootFolder
+        self.allPhotos = cached.allPhotos
+        rebuildSortAndIndex()
+        return true
     }
 
     // MARK: - Restore on Launch

@@ -1,0 +1,60 @@
+import Foundation
+import os
+
+/// JSON-on-disk cache of the last folder scan: root folder tree + flat photo
+/// list. Save runs on a detached task, load is sync (called during init
+/// before the first SwiftUI render). Version mismatches are evicted.
+enum LibraryCacheStore {
+    /// Bumping invalidates every existing cache. v13: force rescan so video
+    /// dates read AVAsset.creationDate (videos used to skip enrichment and
+    /// fall back to the filesystem date, which often equals the download
+    /// time on this device).
+    static let version = 15
+
+    private struct Payload: Codable, Sendable {
+        let version: Int
+        let rootFolder: PhotoFolder
+        let allPhotos: [PhotoFile]
+    }
+
+    private static var cacheURL: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("library_cache.json")
+    }
+
+    /// Encode and write atomically on a detached task. Fire-and-forget; the
+    /// caller doesn't await completion (errors are logged).
+    static func save(rootFolder: PhotoFolder, allPhotos: [PhotoFile]) {
+        let payload = Payload(version: version, rootFolder: rootFolder, allPhotos: allPhotos)
+        let url = cacheURL
+        Task.detached(priority: .utility) {
+            do {
+                let data = try JSONEncoder().encode(payload)
+                try data.write(to: url, options: .atomic)
+            } catch {
+                Log.cache.error("Failed to save cache: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Synchronous load. Returns nil on miss / version mismatch / decode
+    /// error, after evicting any stale file.
+    static func load() -> (rootFolder: PhotoFolder, allPhotos: [PhotoFile])? {
+        let url = cacheURL
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        do {
+            let data = try Data(contentsOf: url)
+            let payload = try JSONDecoder().decode(Payload.self, from: data)
+            guard payload.version == version else {
+                Log.cache.warning("Version mismatch (\(payload.version) vs \(version)), discarding")
+                try? FileManager.default.removeItem(at: url)
+                return nil
+            }
+            Log.cache.info("Loaded \(payload.allPhotos.count) photos from cache v\(payload.version)")
+            return (payload.rootFolder, payload.allPhotos)
+        } catch {
+            Log.cache.error("Failed to load cache: \(error.localizedDescription)")
+            return nil
+        }
+    }
+}

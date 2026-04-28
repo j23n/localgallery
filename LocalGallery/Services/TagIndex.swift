@@ -68,7 +68,8 @@ final class TagIndex {
     /// actor; inputs and outputs are all Sendable value types.
     nonisolated static func aggregateTagsAndPeople(
         photosForTag: [String: [PhotoFile]],
-        canonicalPath: [String: String]
+        canonicalPath: [String: String],
+        now: Date = Date()
     ) -> (tags: [TagSuggestion], people: [TagSuggestion]) {
         // Build a TagSuggestion for every key in photosForTag — including the
         // virtual Places/* prefixes that no photo carries exactly.
@@ -88,7 +89,7 @@ final class TagIndex {
         // Sort people by recent-activity then count. Show all people, not just
         // 8 — pinning / featuring happens downstream in visiblePeople.
         let peopleTags = tags.filter { $0.namespace?.lowercased() == "people" }
-        let oneYearAgo = Calendar.current.date(byAdding: .year, value: -1, to: Date()) ?? Date()
+        let oneYearAgo = Calendar.current.date(byAdding: .year, value: -1, to: now) ?? now
         let scoredPeople: [(tag: TagSuggestion, hasRecent: Bool)] = peopleTags.map { person in
             let photos = photosForTag[person.fullPath.lowercased()] ?? []
             let hasRecent = photos.contains { ($0.dateTaken ?? .distantPast) > oneYearAgo }

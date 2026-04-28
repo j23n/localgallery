@@ -5,14 +5,13 @@ import os
 /// detached task, load is sync (called during init), clear is invoked from
 /// `forceRegenerateMemories` so the next read sees an empty file.
 enum MemoriesCacheStore {
-    private static var cacheURL: URL {
+    static var defaultURL: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("memories_cache.json")
     }
 
     /// Encode and write atomically on a detached task. Fire-and-forget.
-    static func save(_ memories: [Memory]) {
-        let url = cacheURL
+    static func save(_ memories: [Memory], to url: URL = Self.defaultURL) {
         Task.detached(priority: .utility) {
             do {
                 let data = try JSONEncoder().encode(memories)
@@ -25,8 +24,7 @@ enum MemoriesCacheStore {
 
     /// Synchronous load. Returns nil on miss / decode error, evicting any
     /// stale file in the latter case.
-    static func load() -> [Memory]? {
-        let url = cacheURL
+    static func load(from url: URL = Self.defaultURL) -> [Memory]? {
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         do {
             let data = try Data(contentsOf: url)
@@ -42,7 +40,7 @@ enum MemoriesCacheStore {
 
     /// Remove the cache file. Used by `forceRegenerateMemories` so the next
     /// generation starts from a clean slate.
-    static func clear() {
-        try? FileManager.default.removeItem(at: cacheURL)
+    static func clear(at url: URL = Self.defaultURL) {
+        try? FileManager.default.removeItem(at: url)
     }
 }

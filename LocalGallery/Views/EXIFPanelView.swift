@@ -135,13 +135,11 @@ struct EXIFContentView: View {
     // MARK: - Formatted Values
 
     private var dimensionsText: String? {
-        if let w = exifData?.pixelWidth, let h = exifData?.pixelHeight {
-            return "\(w) × \(h) px"
-        }
-        if let dim = photo.dimensions {
-            return "\(Int(dim.width)) × \(Int(dim.height)) px"
-        }
-        return nil
+        EXIFFormatters.dimensions(
+            exifWidth: exifData?.pixelWidth,
+            exifHeight: exifData?.pixelHeight,
+            runtimeSize: photo.dimensions
+        )
     }
 
     private var formattedDate: String? {
@@ -154,40 +152,19 @@ struct EXIFContentView: View {
     }
 
     private var cameraText: String? {
-        let make = exifData?.cameraMake
-        let model = exifData?.cameraModel
-        switch (make, model) {
-        case let (m?, mod?):
-            if mod.localizedCaseInsensitiveContains(m) {
-                return mod
-            }
-            return "\(m) \(mod)"
-        case let (m?, nil): return m
-        case let (nil, mod?): return mod
-        case (nil, nil): return nil
-        }
+        EXIFFormatters.camera(make: exifData?.cameraMake, model: exifData?.cameraModel)
     }
 
     private var apertureText: String? {
-        guard let aperture = exifData?.aperture else { return nil }
-        return String(format: "f/%.1f", aperture)
+        EXIFFormatters.aperture(exifData?.aperture)
     }
 
     private var shutterSpeedText: String? {
-        guard let speed = exifData?.shutterSpeed else { return nil }
-        if speed >= 1.0 {
-            return String(format: "%.1fs", speed)
-        } else if speed > 0 {
-            let denominator = Int(round(1.0 / speed))
-            return "1/\(denominator)s"
-        }
-        return nil
+        EXIFFormatters.shutterSpeed(exifData?.shutterSpeed)
     }
 
     private func formattedFileSize(_ bytes: Int64) -> String {
-        let formatter = ByteCountFormatter()
-        formatter.countStyle = .file
-        return formatter.string(fromByteCount: bytes)
+        EXIFFormatters.fileSize(bytes)
     }
 
     // MARK: - Map

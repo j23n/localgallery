@@ -49,11 +49,12 @@ enum MemoryEngine {
         contacts: [ContactInfo],
         personContactLinks: [String: PersonLink],
         contactsByLowerName: [String: ContactInfo],
-        birthdaysEnabled: Bool
+        birthdaysEnabled: Bool,
+        now: Date = Date()
     ) async -> [Memory] {
         await Task.detached(priority: .utility) {
             let calendar = Calendar.current
-            let today = Date()
+            let today = now
             let todayComponents = calendar.dateComponents([.month, .day], from: today)
             let currentYear = calendar.component(.year, from: today)
             let currentMonthYear = calendar.dateComponents([.month, .year], from: today)

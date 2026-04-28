@@ -45,6 +45,15 @@ enum TagNamespace {
         }
     }
 
+    /// Namespaces whose parent tags act as prefix filters — selecting e.g.
+    /// "Places/Italy" should match all nested leaves like "Places/Italy/Lazio/Rome".
+    static func matchesByPrefix(_ namespace: String?) -> Bool {
+        switch namespace?.lowercased() {
+        case "places", "objects", "scenes": return true
+        default: return false
+        }
+    }
+
     /// Depth-aware icon for `Places/*` tags so the suggestion list communicates
     /// what scale the user is filtering at. depth counts the segments under
     /// "Places" — depth 1 = country, 2 = region, 3 = city, 4+ = neighborhood.

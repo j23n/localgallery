@@ -31,17 +31,13 @@ final class TagIndex {
             var keysCreditedForPhoto = Set<String>()
             for tag in photo.hierarchicalTags {
                 let segments = tag.fullPath.split(separator: "/").map(String.init)
-                let isPlaces = tag.namespace?.lowercased() == "places"
                 let isHierarchical = segments.count > 1
                 let leafKey = tag.fullPath.lowercased()
                 if keysCreditedForPhoto.insert(leafKey).inserted {
                     tagPhotos[leafKey, default: []].append(photo)
                 }
                 canonical[leafKey] = tag.fullPath
-                let isHierarchicalNamespace = isPlaces
-                    || tag.namespace?.lowercased() == "objects"
-                    || tag.namespace?.lowercased() == "scenes"
-                if isHierarchicalNamespace && isHierarchical {
+                if TagNamespace.matchesByPrefix(tag.namespace) && isHierarchical {
                     for depth in 2..<segments.count {
                         let prefixSegments = Array(segments.prefix(depth))
                         let prefixPath = prefixSegments.joined(separator: "/")

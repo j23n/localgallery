@@ -23,14 +23,15 @@ struct SettingsView: View {
                     .tint(.primary)
 
                     Button {
-                        Task { await store.rescan() }
+                        Task { await store.rescan(silent: false) }
                     } label: {
                         Label("Reload Library", systemImage: "arrow.clockwise")
                     }
                     .disabled(store.isScanning)
 
                     if let lastSync = store.lastSyncedAt {
-                        LabeledContent("Last Synced", value: lastSync, format: .dateTime)
+                        LabeledContent("Last Synced", value: lastSync,
+                                       format: .dateTime.month(.abbreviated).day().hour().minute())
                     }
 
                     if store.isScanning {

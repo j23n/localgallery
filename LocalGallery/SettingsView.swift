@@ -1,11 +1,12 @@
 import SwiftUI
 
 struct SettingsView: View {
-    @EnvironmentObject var manager: GalleryManager
+    @Environment(GalleryStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     @State private var showPicker = false
 
     var body: some View {
+        @Bindable var store = store
         NavigationStack {
             List {
                 Section("Photo Library") {
@@ -13,7 +14,7 @@ struct SettingsView: View {
                         showPicker = true
                     } label: {
                         LabeledContent {
-                            Text(manager.resolveBookmark()?.lastPathComponent ?? "Not selected")
+                            Text(store.resolveBookmark()?.lastPathComponent ?? "Not selected")
                                 .foregroundStyle(.secondary)
                         } label: {
                             Label("Folder", systemImage: "folder")
@@ -22,12 +23,12 @@ struct SettingsView: View {
                     .tint(.primary)
 
                     Button {
-                        Task { await manager.rescan() }
+                        Task { await store.rescan() }
                     } label: {
                         Label("Reload Library", systemImage: "arrow.clockwise")
                     }
 
-                    if let lastSync = manager.lastSyncedAt {
+                    if let lastSync = store.lastSyncedAt {
                         LabeledContent("Last Synced") {
                             Text(lastSync, style: .relative)
                                 .foregroundStyle(.secondary)
@@ -36,7 +37,7 @@ struct SettingsView: View {
                 }
 
                 Section("People") {
-                    Toggle(isOn: $manager.birthdayMemoriesEnabled) {
+                    Toggle(isOn: $store.birthdayMemoriesEnabled) {
                         Label("Birthday Memories", systemImage: "birthday.cake")
                     }
 
@@ -55,7 +56,7 @@ struct SettingsView: View {
                         HiddenPeopleList()
                     } label: {
                         LabeledContent {
-                            Text(manager.hiddenPeople.isEmpty ? "None" : String(manager.hiddenPeople.count))
+                            Text(store.hiddenPeople.isEmpty ? "None" : String(store.hiddenPeople.count))
                                 .foregroundStyle(.secondary)
                         } label: {
                             Label("Hidden People", systemImage: "person.crop.circle.badge.xmark")
@@ -64,8 +65,8 @@ struct SettingsView: View {
                 }
 
                 Section("Info") {
-                    LabeledContent("Photos", value: "\(manager.allPhotos.count)")
-                    LabeledContent("Tags", value: "\(manager.allTags.count)")
+                    LabeledContent("Photos", value: "\(store.allPhotos.count)")
+                    LabeledContent("Tags", value: "\(store.allTags.count)")
                     LabeledContent("Version", value: appVersion)
                 }
 
@@ -88,13 +89,13 @@ struct SettingsView: View {
             .sheet(isPresented: $showPicker) {
                 DocumentPicker { pickerURL in
                     _ = pickerURL.startAccessingSecurityScopedResource()
-                    manager.saveBookmark(for: pickerURL)
+                    store.saveBookmark(for: pickerURL)
                     pickerURL.stopAccessingSecurityScopedResource()
 
-                    if let resolvedURL = manager.resolveBookmark() {
+                    if let resolvedURL = store.resolveBookmark() {
                         Task {
-                            manager.startAccessingFolder(resolvedURL)
-                            await manager.scanFolder(at: resolvedURL)
+                            store.startAccessingFolder(resolvedURL)
+                            await store.scanFolder(at: resolvedURL)
                         }
                     }
                 }
@@ -103,13 +104,12 @@ struct SettingsView: View {
     }
 
     /// One-line summary of linked / auto-matched contacts for the Settings row.
-    /// Uses `linkState` so we don't linear-scan `manager.contacts` per person on
-    /// every body re-evaluation (which fires whenever any @Published on the
-    /// manager ticks).
+    /// Uses `linkState` so we don't linear-scan `store.contacts` per person on
+    /// every body re-evaluation.
     private var linkedContactsSummary: String {
         var total = 0
-        for person in manager.peopleTags {
-            switch manager.linkState(forPersonPath: person.fullPath, displayName: person.displayName) {
+        for person in store.peopleTags {
+            switch store.linkState(forPersonPath: person.fullPath, displayName: person.displayName) {
             case .manual, .auto: total += 1
             case .disabled, .unlinked: break
             }
@@ -127,11 +127,11 @@ struct SettingsView: View {
 // MARK: - Hidden People sub-screen
 
 struct HiddenPeopleList: View {
-    @EnvironmentObject var manager: GalleryManager
+    @Environment(GalleryStore.self) private var store
 
     var body: some View {
         Group {
-            let hidden = manager.hiddenPeopleTags
+            let hidden = store.hiddenPeopleTags
             if hidden.isEmpty {
                 ContentUnavailableView {
                     Label("No hidden people", systemImage: "person.fill")
@@ -155,10 +155,10 @@ struct HiddenPeopleList: View {
 
 private struct HiddenPersonRow: View {
     let person: TagSuggestion
-    @EnvironmentObject var manager: GalleryManager
+    @Environment(GalleryStore.self) private var store
 
     private var featured: PhotoFile? {
-        manager.photos(forTag: person).first
+        store.photos(forTag: person).first
     }
 
     var body: some View {
@@ -186,7 +186,7 @@ private struct HiddenPersonRow: View {
             }
             Spacer()
             Button {
-                manager.unhidePerson(person.fullPath)
+                store.unhidePerson(person.fullPath)
             } label: {
                 Text("Unhide")
                     .font(.system(size: 12.5, weight: .semibold))

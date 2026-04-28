@@ -47,18 +47,30 @@ extension View {
 /// `OrientationLock`) and registration of the once-a-day background refresh
 /// task that re-runs memory generation when the app isn't open. Registration
 /// must happen synchronously in `didFinishLaunchingWithOptions`, before the
-/// scene is connected — that's why this lives here and not on `GalleryManager`.
+/// scene is connected — that's why this lives here and not on `GalleryStore`.
+@MainActor
 final class AppDelegate: NSObject, UIApplicationDelegate {
     /// `BGTaskSchedulerPermittedIdentifiers` whitelists this exact string in
-    /// the Info.plist; both must stay in sync.
-    static let backgroundRefreshIdentifier = "com.localgallery.app.dailyMemories"
+    /// the Info.plist; both must stay in sync. `nonisolated` so the
+    /// `nonisolated static func scheduleBackgroundRefresh()` can read it.
+    nonisolated static let backgroundRefreshIdentifier = "com.localgallery.app.dailyMemories"
+
+    /// Owns the BG-task → store indirection. The `WindowGroup` attaches the
+    /// `GalleryStore` once SwiftUI builds the scene. We hold the service
+    /// here (rather than reaching for a `GalleryStore.shared` global) so the
+    /// BG handler has a stable, isolation-correct API to call.
+    let memoryRefresh = MemoryRefreshService()
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        // Capture the service value (Sendable because MemoryRefreshService is
+        // `@MainActor`) rather than `self` (AppDelegate isn't auto-Sendable
+        // under Swift 6 strict concurrency).
+        let service = memoryRefresh
         BGTaskScheduler.shared.register(
             forTaskWithIdentifier: Self.backgroundRefreshIdentifier,
             using: nil
         ) { task in
-            Self.handleBackgroundRefresh(task: task as! BGAppRefreshTask)
+            Self.handleBackgroundRefresh(task: task as! BGAppRefreshTask, service: service)
         }
 
         NotificationCenter.default.addObserver(
@@ -78,9 +90,13 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 
     /// Schedule the next background refresh ~24h out. iOS treats this as an
     /// earliest-bound — the actual run is opportunistic and may be skipped.
-    /// The foreground catch-up in `GalleryManager.generateMemoriesIfNeeded` is
+    /// The foreground catch-up in `GalleryStore.generateMemoriesIfNeeded` is
     /// the safety net for days iOS skips.
-    static func scheduleBackgroundRefresh() {
+    ///
+    /// `nonisolated` so the `didEnterBackgroundNotification` observer (a
+    /// `@Sendable` closure) and the `BGAppRefreshTask` handler can call it
+    /// without hopping back to MainActor — neither needs MainActor state.
+    nonisolated static func scheduleBackgroundRefresh() {
         let request = BGAppRefreshTaskRequest(identifier: backgroundRefreshIdentifier)
         request.earliestBeginDate = Date(timeIntervalSinceNow: 24 * 60 * 60)
         do {
@@ -93,28 +109,17 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         }
     }
 
-    /// Handler for the background refresh. Asks `GalleryManager` to run the
-    /// once-a-day memory regeneration (skipped if already done today). Always
-    /// re-schedules the next run so a single skipped day doesn't kill the
-    /// recurring schedule.
-    private static func handleBackgroundRefresh(task: BGAppRefreshTask) {
+    /// Handler for the background refresh. Forwards to `MemoryRefreshService`
+    /// which runs the once-a-day memory regeneration on the attached store
+    /// (or no-ops on a background-only launch where the WindowGroup never
+    /// built). Always re-schedules the next run so a single skipped day
+    /// doesn't kill the recurring schedule.
+    private static func handleBackgroundRefresh(task: BGAppRefreshTask, service: MemoryRefreshService) {
         Log.bg.info("Background refresh started")
         scheduleBackgroundRefresh()
 
         let work = Task { @MainActor in
-            // GalleryManager.shared is set inside `GalleryManager.init`, which
-            // SwiftUI invokes lazily the first time the WindowGroup body
-            // evaluates. On a true background-only launch SwiftUI may never
-            // build a scene, in which case `shared` is nil and we no-op. That's
-            // acceptable: the next foreground entry runs the same generation
-            // via `generateMemoriesIfNeeded` (the foreground catch-up path).
-            // Constructing the manager from AppDelegate would fix this but
-            // would also tie the SwiftUI environment to an external instance.
-            guard let manager = GalleryManager.shared else {
-                Log.bg.warning("No active GalleryManager (background-only launch); nothing to do")
-                return
-            }
-            await manager.runScheduledMemoryRefresh()
+            await service.runDailyRefresh()
         }
 
         // Expiration just cancels — completion is reported once below after
@@ -134,6 +139,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     }
 }
 
+@MainActor
 enum OrientationLock {
     static var current: UIInterfaceOrientationMask = .all
 
@@ -161,8 +167,8 @@ enum OrientationLock {
 @main
 struct LocalGalleryApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @StateObject private var galleryManager = GalleryManager()
-    @StateObject private var router = AppRouter()
+    @State private var store = GalleryStore()
+    @State private var router = AppRouter()
 
     init() {
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
@@ -172,20 +178,36 @@ struct LocalGalleryApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .environmentObject(galleryManager)
-                .environmentObject(router)
+                .environment(store)
+                .environment(router)
                 .tint(Design.accentColor)
+                // Hand the store to the BG-task service. Runs once per
+                // scene build; on a true background-only launch the
+                // WindowGroup doesn't build and the service stays detached
+                // (BG handler no-ops, foreground catch-up takes over on
+                // next entry).
+                //
+                // Trade-off vs the previous synchronous `Self.shared = self`
+                // in `GalleryStore.init()`: there is now a small additional
+                // window between `@State` materialisation and `.task` firing
+                // where a BG handler could see a store-less service and
+                // no-op. In practice BG tasks are gated to ≥24h after
+                // submission and the foreground catch-up covers any miss, so
+                // the window is benign.
+                .task {
+                    appDelegate.memoryRefresh.attach(store)
+                }
                 .onOpenURL { url in
-                    router.handle(url, manager: galleryManager)
+                    router.handle(url, store: store)
                 }
                 // Cold-launch deep links (folder/memory) queue an id when the
                 // backing data isn't ready; consume them as soon as the data
                 // appears so the user lands on the right screen.
-                .onChange(of: galleryManager.rootFolder?.id) { _, _ in
-                    router.consumePendingIfReady(manager: galleryManager)
+                .onChange(of: store.rootFolder?.id) { _, _ in
+                    router.consumePendingIfReady(store: store)
                 }
-                .onChange(of: galleryManager.memories.count) { _, _ in
-                    router.consumePendingIfReady(manager: galleryManager)
+                .onChange(of: store.memories.count) { _, _ in
+                    router.consumePendingIfReady(store: store)
                 }
         }
     }
@@ -198,7 +220,7 @@ struct LocalGalleryApp: App {
         // are gaps where it can't reach a control: sheet presentations cross
         // a `UIPresentationController` boundary (and nested sheets compound
         // it — Settings → Linked Contacts → Contact picker), and during
-        // bursts of @Published updates (e.g. `manager.rescan()` rewriting
+        // bursts of observed-state updates (e.g. `store.rescan()` rewriting
         // `allPhotos`/`allTags`/indexes at once) descendant Lists can rebuild
         // before the new tint context resolves. In any of those gaps the
         // underlying UIView falls through to `tintColor`, which inherits up
@@ -240,10 +262,11 @@ struct LocalGalleryApp: App {
 }
 
 struct ContentView: View {
-    @EnvironmentObject var manager: GalleryManager
-    @EnvironmentObject var router: AppRouter
+    @Environment(GalleryStore.self) private var store
+    @Environment(AppRouter.self) private var router
 
     var body: some View {
+        @Bindable var router = router
         TabView(selection: $router.selectedTab) {
             NavigationStack(path: $router.foldersPath) {
                 FolderBrowserView()
@@ -278,7 +301,7 @@ struct ContentView: View {
             .tag(AppRouter.Tab.photos)
         }
         .task {
-            await manager.restoreFolder()
+            await store.restoreFolder()
         }
     }
 }

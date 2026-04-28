@@ -10,18 +10,18 @@ import Contacts
 ///   - Pick a specific contact
 struct ContactLinkSheet: View {
     let person: TagSuggestion
-    @EnvironmentObject var manager: GalleryManager
+    @Environment(GalleryStore.self) private var store
     @Environment(\.dismiss) private var dismiss
 
     @State private var search: String = ""
     @State private var requestingAccess = false
     @State private var showDeniedAlert = false
 
-    private var manualLink: PersonLink? { manager.personContactLinks[person.fullPath] }
+    private var manualLink: PersonLink? { store.personContactLinks[person.fullPath] }
 
     private var filteredContacts: [ContactInfo] {
         let trimmed = search.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let sorted = manager.contacts.sorted {
+        let sorted = store.contacts.sorted {
             $0.fullName.localizedCaseInsensitiveCompare($1.fullName) == .orderedAscending
         }
         guard !trimmed.isEmpty else { return sorted }
@@ -79,7 +79,7 @@ struct ContactLinkSheet: View {
             Button {
                 requestingAccess = true
                 Task {
-                    let granted = await manager.requestContactsAccess()
+                    let granted = await store.requestContactsAccess()
                     requestingAccess = false
                     if !granted { showDeniedAlert = true }
                 }
@@ -125,7 +125,7 @@ struct ContactLinkSheet: View {
 
             Section {
                 Button {
-                    manager.resetPersonLink(person.fullPath)
+                    store.resetPersonLink(person.fullPath)
                     dismiss()
                 } label: {
                     Label("Reset to auto-match", systemImage: "arrow.counterclockwise")
@@ -133,7 +133,7 @@ struct ContactLinkSheet: View {
                 .disabled(manualLink == nil)
 
                 Button(role: .destructive) {
-                    manager.unlinkPerson(person.fullPath)
+                    store.unlinkPerson(person.fullPath)
                     dismiss()
                 } label: {
                     Label("No contact (skip birthdays)", systemImage: "xmark.circle")
@@ -155,12 +155,12 @@ struct ContactLinkSheet: View {
             }
         }
         .searchable(text: $search, prompt: "Search contacts")
-        .task { await manager.loadContacts() }
+        .task { await store.loadContacts() }
     }
 
     @ViewBuilder
     private var statusRow: some View {
-        switch manager.linkState(forPersonPath: person.fullPath, displayName: person.displayName) {
+        switch store.linkState(forPersonPath: person.fullPath, displayName: person.displayName) {
         case .disabled:
             Label {
                 Text("Skipped — no birthday memories")
@@ -205,7 +205,7 @@ struct ContactLinkSheet: View {
             return false
         }()
         return Button {
-            manager.linkPerson(person.fullPath, toContactID: contact.id)
+            store.linkPerson(person.fullPath, toContactID: contact.id)
             dismiss()
         } label: {
             HStack(spacing: 12) {
@@ -317,7 +317,7 @@ struct ContactsPermissionPrimer: View {
 /// Lists every person tag that currently has a manual contact link or an
 /// auto-match, so the user can review and change them in one place.
 struct LinkedContactsList: View {
-    @EnvironmentObject var manager: GalleryManager
+    @Environment(GalleryStore.self) private var store
     @State private var picker: TagSuggestion?
 
     private struct Row: Identifiable {
@@ -329,11 +329,11 @@ struct LinkedContactsList: View {
     }
 
     private var rows: [Row] {
-        // Resolve every person tag through the manager's index-backed
+        // Resolve every person tag through the store's index-backed
         // `linkState` accessor so this is O(people) rather than
         // O(people × contacts).
-        manager.peopleTags.map { person in
-            switch manager.linkState(forPersonPath: person.fullPath, displayName: person.displayName) {
+        store.peopleTags.map { person in
+            switch store.linkState(forPersonPath: person.fullPath, displayName: person.displayName) {
             case .unlinked:
                 return Row(person: person, contact: nil, isManual: false, isExplicitlyDisabled: false)
             case .disabled:
@@ -360,7 +360,7 @@ struct LinkedContactsList: View {
 
     var body: some View {
         Group {
-            if manager.peopleTags.isEmpty {
+            if store.peopleTags.isEmpty {
                 ContentUnavailableView {
                     Label("No people yet", systemImage: "person.fill")
                 } description: {
@@ -392,7 +392,7 @@ struct LinkedContactsList: View {
         .sheet(item: $picker) { person in
             ContactLinkSheet(person: person)
         }
-        .task { await manager.loadContacts() }
+        .task { await store.loadContacts() }
     }
 
     @ViewBuilder
@@ -403,13 +403,13 @@ struct LinkedContactsList: View {
                 Label("Granted", systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.green)
                 Spacer()
-                Text("\(manager.contacts.count) contacts loaded")
+                Text("\(store.contacts.count) contacts loaded")
                     .foregroundStyle(.secondary)
                     .font(.footnote)
             }
         } else if status == .notDetermined {
             Button {
-                Task { await manager.requestContactsAccess() }
+                Task { await store.requestContactsAccess() }
             } label: {
                 Label("Allow Contacts access", systemImage: "person.crop.circle.badge.plus")
             }
@@ -451,7 +451,7 @@ struct LinkedContactsList: View {
 
     @ViewBuilder
     private func personThumb(_ person: TagSuggestion) -> some View {
-        if let photo = manager.featuredPhoto(for: person) {
+        if let photo = store.featuredPhoto(for: person) {
             ThumbnailView(url: photo.url, size: 40, cornerRadius: 20)
                 .frame(width: 40, height: 40)
         } else {
@@ -499,7 +499,10 @@ struct LinkedContactsList: View {
         return fmt.string(from: date)
     }
 
-    private func isBirthdayToday(_ contact: ContactInfo) -> Bool {
+    /// `nonisolated` so the synchronous `.sorted` closure (which doesn't
+    /// inherit View's MainActor isolation) can call this. Pure function over
+    /// Sendable inputs — no MainActor state read.
+    private nonisolated func isBirthdayToday(_ contact: ContactInfo) -> Bool {
         guard let m = contact.birthday?.month, let d = contact.birthday?.day else { return false }
         let today = Calendar.current.dateComponents([.month, .day], from: Date())
         return today.month == m && today.day == d

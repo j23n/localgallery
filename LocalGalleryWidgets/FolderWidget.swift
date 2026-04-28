@@ -9,8 +9,8 @@ struct FolderEntity: AppEntity {
     var displayName: String
     var pathDescription: String
 
-    static var typeDisplayRepresentation: TypeDisplayRepresentation = "Folder"
-    static var defaultQuery = FolderQuery()
+    static let typeDisplayRepresentation: TypeDisplayRepresentation = "Folder"
+    static let defaultQuery = FolderQuery()
 
     var displayRepresentation: DisplayRepresentation {
         DisplayRepresentation(title: "\(displayName)", subtitle: "\(pathDescription)")
@@ -38,8 +38,8 @@ struct FolderQuery: EntityQuery {
 }
 
 struct FolderWidgetIntent: WidgetConfigurationIntent {
-    static var title: LocalizedStringResource = "Choose Folder"
-    static var description = IntentDescription("Pick a folder to feature on this widget.")
+    static let title: LocalizedStringResource = "Choose Folder"
+    static let description = IntentDescription("Pick a folder to feature on this widget.")
 
     @Parameter(title: "Folder")
     var folder: FolderEntity?

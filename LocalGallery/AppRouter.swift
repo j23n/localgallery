@@ -8,32 +8,33 @@ import SwiftUI
 /// the target id is queued in `pendingFolderId` / `pendingMemoryId` and the
 /// view consumes it once the data appears. Same pattern as the existing
 /// `pendingPhotosTagFilter` for the Photos tab.
+@Observable
 @MainActor
-final class AppRouter: ObservableObject {
+final class AppRouter {
     enum Tab: Hashable {
         case folders, collections, photos
     }
 
-    @Published var selectedTab: Tab = .folders
-    @Published var foldersPath: [FolderRoute] = []
-    @Published var collectionsPath: [CollectionsRoute] = []
+    var selectedTab: Tab = .folders
+    var foldersPath: [FolderRoute] = []
+    var collectionsPath: [CollectionsRoute] = []
     /// Tag full-paths to apply when AllPhotosView next appears. Cleared after
     /// the view consumes it so subsequent visits don't re-apply the filter.
-    @Published var pendingPhotosTagFilter: [String] = []
+    var pendingPhotosTagFilter: [String] = []
     /// Folder id to navigate to when the folder tree finishes loading.
-    @Published var pendingFolderId: String?
+    var pendingFolderId: String?
     /// Memory id to push as a slideshow when memories finish generating.
-    @Published var pendingMemoryId: String?
+    var pendingMemoryId: String?
 
-    func handle(_ url: URL, manager: GalleryManager) {
+    func handle(_ url: URL, store: GalleryStore) {
         guard let link = WidgetDeepLink.parse(url) else { return }
         switch link {
         case .memory(let id):
             selectedTab = .collections
-            applyMemory(id: id, manager: manager)
+            applyMemory(id: id, store: store)
         case .folder(let id):
             selectedTab = .folders
-            applyFolder(id: id, manager: manager)
+            applyFolder(id: id, store: store)
         case .tags(let paths):
             selectedTab = .photos
             pendingPhotosTagFilter = paths
@@ -41,18 +42,18 @@ final class AppRouter: ObservableObject {
     }
 
     /// Re-evaluate any queued deep link now that data may have loaded. Called
-    /// by the views observing `manager.rootFolder` / `manager.memories`.
-    func consumePendingIfReady(manager: GalleryManager) {
+    /// by the views observing `store.rootFolder` / `store.memories`.
+    func consumePendingIfReady(store: GalleryStore) {
         if let id = pendingFolderId {
-            applyFolder(id: id, manager: manager)
+            applyFolder(id: id, store: store)
         }
         if let id = pendingMemoryId {
-            applyMemory(id: id, manager: manager)
+            applyMemory(id: id, store: store)
         }
     }
 
-    private func applyFolder(id: String, manager: GalleryManager) {
-        guard let root = manager.rootFolder else {
+    private func applyFolder(id: String, store: GalleryStore) {
+        guard let root = store.rootFolder else {
             pendingFolderId = id
             return
         }
@@ -71,8 +72,8 @@ final class AppRouter: ObservableObject {
         }
     }
 
-    private func applyMemory(id: String, manager: GalleryManager) {
-        if let memory = manager.memories.first(where: { $0.id == id }) {
+    private func applyMemory(id: String, store: GalleryStore) {
+        if let memory = store.memories.first(where: { $0.id == id }) {
             pendingMemoryId = nil
             collectionsPath = [.slideshow(memory)]
             return
@@ -80,7 +81,7 @@ final class AppRouter: ObservableObject {
         // Memories haven't been generated yet OR this id no longer exists.
         // Queue the id only when memories are still empty (cold launch); if
         // they're populated and the id isn't there, the memory is gone.
-        if manager.memories.isEmpty {
+        if store.memories.isEmpty {
             pendingMemoryId = id
         } else {
             pendingMemoryId = nil

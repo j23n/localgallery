@@ -29,7 +29,7 @@ struct PhotoGridScreen: View {
     /// land on AllPhotos with a specific tag set already chosen.
     var initialTags: [TagSuggestion] = []
 
-    @EnvironmentObject var manager: GalleryManager
+    @Environment(GalleryStore.self) private var store
     @AppStorage("gridSizeTier") private var sizeTier: Int = 0
 
     @State private var query: String = ""
@@ -181,7 +181,7 @@ struct PhotoGridScreen: View {
         let q = query.lowercased()
         guard !q.isEmpty else { return [] }
         let activeIDs = Set(activeTags.map(\.id))
-        return Array(manager.allTags.lazy.filter {
+        return Array(store.allTags.lazy.filter {
             !activeIDs.contains($0.id) &&
             ($0.displayName.lowercased().contains(q) || $0.fullPath.lowercased().contains(q))
         }.prefix(6))
@@ -263,7 +263,7 @@ struct PhotoGridScreen: View {
                 }
                 .scrollDismissesKeyboard(.interactively)
                 .softTopScrollEdge()
-                .refreshable { await manager.rescan() }
+                .refreshable { await store.rescan() }
                 .overlay(alignment: .trailing) {
                     if yearsCache.count > 1 && !selectMode {
                         YearScrubber(years: yearsCache) { sectionID in
@@ -516,7 +516,7 @@ struct PhotoGridScreen: View {
                 }
                 if let person = featureContextPerson {
                     Button {
-                        manager.setFeaturedPhoto(personPath: person.fullPath, photoID: photo.id)
+                        store.setFeaturedPhoto(personPath: person.fullPath, photoID: photo.id)
                     } label: {
                         Label("Set as featured image", systemImage: "star")
                     }

@@ -27,15 +27,16 @@ actor WidgetSnapshotExporter {
 
     /// Day-only formatter reused across exports — `ISO8601DateFormatter()` is
     /// expensive to allocate, and we only need a stable date string for the
-    /// content fingerprint.
-    private static let dayKeyFormatter: ISO8601DateFormatter = {
+    /// content fingerprint. Apple documents `ISO8601DateFormatter` as
+    /// thread-safe; `nonisolated(unsafe)` documents that invariant for Swift 6.
+    private nonisolated(unsafe) static let dayKeyFormatter: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withFullDate]
         return f
     }()
 
     /// One person whose linked contact's birthday is today. Pre-computed on
-    /// the main actor by `GalleryManager.exportWidgetSnapshot`, so the
+    /// the main actor by `GalleryStore.exportWidgetSnapshot`, so the
     /// exporter doesn't need access to `Contacts.framework` or the
     /// `PersonLink` enum.
     struct BirthdayResolution: Sendable, Hashable {
@@ -279,7 +280,7 @@ actor WidgetSnapshotExporter {
         //    people already, so we just emit one item per resolution. We
         //    build the tag→photos index once and key it on lowercased
         //    fullPath, matching the convention used elsewhere in the app
-        //    (`GalleryManager._photosForTag`) — so case-only differences
+        //    (`GalleryStore._photosForTag`) — so case-only differences
         //    between the canonical tag list and a photo's raw XMP entry
         //    don't drop photos.
         if !todayBirthdays.isEmpty {

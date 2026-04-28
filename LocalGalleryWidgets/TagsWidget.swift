@@ -8,8 +8,8 @@ struct TagEntity: AppEntity {
     var id: String              // tag full path (case-preserved)
     var displayName: String     // leaf segment
 
-    static var typeDisplayRepresentation: TypeDisplayRepresentation = "Tag"
-    static var defaultQuery = TagQuery()
+    static let typeDisplayRepresentation: TypeDisplayRepresentation = "Tag"
+    static let defaultQuery = TagQuery()
 
     var displayRepresentation: DisplayRepresentation {
         let parts = id.split(separator: "/")
@@ -43,8 +43,8 @@ struct TagQuery: EntityStringQuery {
 }
 
 struct TagsWidgetIntent: WidgetConfigurationIntent {
-    static var title: LocalizedStringResource = "Choose Tags"
-    static var description = IntentDescription("Pick one or more tags. Photos must match all of them (AND).")
+    static let title: LocalizedStringResource = "Choose Tags"
+    static let description = IntentDescription("Pick one or more tags. Photos must match all of them (AND).")
 
     @Parameter(title: "Tags")
     var tags: [TagEntity]?

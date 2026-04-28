@@ -6,7 +6,7 @@ struct ThumbnailView: View {
     var isVideo: Bool = false
     var isLivePhoto: Bool = false
     var cornerRadius: CGFloat = 0
-    @EnvironmentObject var manager: GalleryManager
+    @Environment(GalleryStore.self) private var store
     @State private var thumbnail: UIImage?
 
     var body: some View {
@@ -56,7 +56,7 @@ struct ThumbnailView: View {
         .animation(.easeIn(duration: 0.2), value: thumbnail != nil)
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
         .task(id: url) {
-            thumbnail = await manager.thumbnail(for: url, size: CGSize(width: size, height: size), isVideo: isVideo)
+            thumbnail = await store.thumbnail(for: url, size: CGSize(width: size, height: size), isVideo: isVideo)
         }
     }
 }

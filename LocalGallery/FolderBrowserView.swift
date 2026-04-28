@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct FolderBrowserView: View {
-    @EnvironmentObject var manager: GalleryManager
+    @Environment(GalleryStore.self) private var store
     var folder: PhotoFolder? = nil
     /// Only the root tab should show the gear. Child browsers leave it off.
     var isRoot: Bool = true
@@ -9,12 +9,13 @@ struct FolderBrowserView: View {
     @State private var showSettings = false
 
     private var displayFolder: PhotoFolder? {
-        folder ?? manager.rootFolder
+        folder ?? store.rootFolder
     }
 
     var body: some View {
+        @Bindable var store = store
         Group {
-            if manager.isScanning {
+            if store.isScanning {
                 ProgressView("Scanning folder…")
             } else if let folder = displayFolder {
                 folderContent(folder)
@@ -32,7 +33,7 @@ struct FolderBrowserView: View {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 if displayFolder != nil && !(displayFolder?.subfolders.isEmpty ?? true) {
                     Menu {
-                        Picker("Sort Folders", selection: $manager.folderSortOrder) {
+                        Picker("Sort Folders", selection: $store.folderSortOrder) {
                             ForEach(FolderSortOrder.allCases, id: \.self) { order in
                                 Text(order.label).tag(order)
                             }
@@ -71,7 +72,7 @@ struct FolderBrowserView: View {
 
     @ViewBuilder
     private func folderContent(_ folder: PhotoFolder) -> some View {
-        let sortedSubfolders = manager.sortFolders(folder.subfolders)
+        let sortedSubfolders = store.sortFolders(folder.subfolders)
         List {
             if !folder.photos.isEmpty {
                 Section("Photos") {
@@ -115,7 +116,7 @@ struct FolderBrowserView: View {
         }
         .softTopScrollEdge()
         .refreshable {
-            await manager.rescan()
+            await store.rescan()
         }
     }
 

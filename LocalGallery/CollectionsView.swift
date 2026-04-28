@@ -10,7 +10,7 @@ enum CollectionsRoute: Hashable {
 
 struct CollectionsView: View {
     @Binding var path: [CollectionsRoute]
-    @EnvironmentObject var manager: GalleryManager
+    @Environment(GalleryStore.self) private var store
     @State private var showSettings = false
 
     // Person → contact linking sheet
@@ -29,8 +29,8 @@ struct CollectionsView: View {
 
     var body: some View {
         Group {
-            if manager.allPhotos.isEmpty {
-                if manager.isScanning {
+            if store.allPhotos.isEmpty {
+                if store.isScanning {
                     ProgressView("Scanning…")
                 } else {
                     emptyState
@@ -55,7 +55,7 @@ struct CollectionsView: View {
             ContactsPermissionPrimer(
                 onAllow: {
                     showContactsPrimer = false
-                    Task { await manager.requestContactsAccess() }
+                    Task { await store.requestContactsAccess() }
                 },
                 onSkip: { showContactsPrimer = false }
             )
@@ -66,9 +66,9 @@ struct CollectionsView: View {
         // empty → populated (initial scan) so it doesn't miss the moment.
         // Skips silently when access is already determined (granted or denied) —
         // we don't re-prompt; the user can grant access from Settings.
-        .task(id: manager.allPhotos.isEmpty) {
+        .task(id: store.allPhotos.isEmpty) {
             guard !hasShownContactsPrimer,
-                  !manager.allPhotos.isEmpty,
+                  !store.allPhotos.isEmpty,
                   ContactsService.authorizationStatus() == .notDetermined
             else { return }
             // Tiny pause so the sheet doesn't fight the appear animation.
@@ -135,7 +135,7 @@ struct CollectionsView: View {
     }
 
     private func startRender(memory: Memory) {
-        let mgr = manager
+        let mgr = store
         let photos = mgr.photos(for: memory)
         guard !photos.isEmpty else { return }
         renderingMemory = memory
@@ -172,23 +172,23 @@ struct CollectionsView: View {
     private var collectionsBody: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                let memories = manager.visibleMemories
+                let memories = store.visibleMemories
                 if !memories.isEmpty {
                     sectionHeader("Memories", systemIcon: "sparkles", accent: true)
                         .contentShape(Rectangle())
                         .onLongPressGesture(minimumDuration: 0.6) {
-                            manager.forceRegenerateMemories()
+                            store.forceRegenerateMemories()
                         }
                     memoriesRail(memories)
                 }
 
-                let people = manager.visiblePeople
+                let people = store.visiblePeople
                 if !people.isEmpty {
                     sectionHeader("People")
                     peopleRail(people)
                 }
 
-                if !manager.eventFolders.isEmpty {
+                if !store.eventFolders.isEmpty {
                     sectionHeader("Events")
                     eventsList
                         .padding(.horizontal, 16)
@@ -240,7 +240,7 @@ struct CollectionsView: View {
                             Label("Share slideshow video", systemImage: "square.and.arrow.up")
                         }
                         Button(role: .destructive) {
-                            manager.hideMemory(memory.id)
+                            store.hideMemory(memory.id)
                         } label: {
                             Label("Hide memory", systemImage: "eye.slash")
                         }
@@ -266,13 +266,13 @@ struct CollectionsView: View {
                             NavigationLink {
                                 TagGridView(tag: person)
                             } label: {
-                                PersonCard(tag: person, featured: manager.isFeatured(person.fullPath))
+                                PersonCard(tag: person, featured: store.isFeatured(person.fullPath))
                             }
                             .buttonStyle(.plain)
                             .contextMenu {
-                                let isFeatured = manager.isFeatured(person.fullPath)
+                                let isFeatured = store.isFeatured(person.fullPath)
                                 Button {
-                                    manager.toggleFeaturePerson(person.fullPath)
+                                    store.toggleFeaturePerson(person.fullPath)
                                 } label: {
                                     Label(isFeatured ? "Unfeature" : "Feature",
                                           systemImage: isFeatured ? "star.slash" : "star")
@@ -283,7 +283,7 @@ struct CollectionsView: View {
                                     Label(linkContextLabel(person), systemImage: "person.text.rectangle")
                                 }
                                 Button(role: .destructive) {
-                                    manager.hidePerson(person.fullPath)
+                                    store.hidePerson(person.fullPath)
                                 } label: {
                                     Label("Hide", systemImage: "eye.slash")
                                 }
@@ -302,14 +302,14 @@ struct CollectionsView: View {
 
     private var eventsList: some View {
         VStack(spacing: 0) {
-            ForEach(Array(manager.eventFolders.enumerated()), id: \.element.id) { idx, folder in
+            ForEach(Array(store.eventFolders.enumerated()), id: \.element.id) { idx, folder in
                 NavigationLink {
                     FolderGridView(title: folder.name, photos: folder.photos)
                 } label: {
                     eventRow(folder)
                 }
                 .buttonStyle(.plain)
-                if idx < manager.eventFolders.count - 1 {
+                if idx < store.eventFolders.count - 1 {
                     Divider()
                         .background(Design.separator)
                         .padding(.leading, 96)
@@ -364,9 +364,9 @@ struct CollectionsView: View {
 
     /// Label for the person → contact link context-menu entry. Reflects the
     /// current state so the menu doubles as status. Goes through
-    /// `manager.linkState` so we don't re-scan the contacts array per render.
+    /// `store.linkState` so we don't re-scan the contacts array per render.
     private func linkContextLabel(_ person: TagSuggestion) -> String {
-        switch manager.linkState(forPersonPath: person.fullPath, displayName: person.displayName) {
+        switch store.linkState(forPersonPath: person.fullPath, displayName: person.displayName) {
         case .unlinked:           return "Link to Contact"
         case .disabled:           return "Birthdays disabled"
         case .manual(let c):      return "Linked: \(c.fullName)"
@@ -412,10 +412,10 @@ struct CollectionsView: View {
 
 struct TagGridView: View {
     let tag: TagSuggestion
-    @EnvironmentObject var manager: GalleryManager
+    @Environment(GalleryStore.self) private var store
 
     private var photos: [PhotoFile] {
-        manager.search(query: "", requiredTags: [tag])
+        store.search(query: "", requiredTags: [tag])
     }
 
     private var isPersonTag: Bool {
@@ -437,16 +437,16 @@ struct TagGridView: View {
 struct PersonCard: View {
     let tag: TagSuggestion
     let featured: Bool
-    @EnvironmentObject var manager: GalleryManager
+    @Environment(GalleryStore.self) private var store
 
     private var coverPhoto: PhotoFile? {
-        manager.featuredPhoto(for: tag)
+        store.featuredPhoto(for: tag)
     }
 
     /// True when this person resolves to a contact (manual link or auto-match
     /// by name). False when explicitly unlinked or no contact matches.
     private var isLinkedToContact: Bool {
-        manager.effectiveContact(forPersonPath: tag.fullPath, displayName: tag.displayName) != nil
+        store.effectiveContact(forPersonPath: tag.fullPath, displayName: tag.displayName) != nil
     }
 
     var body: some View {
@@ -520,9 +520,9 @@ struct PersonCard: View {
 
 struct MemoryCardView: View {
     let memory: Memory
-    @EnvironmentObject var manager: GalleryManager
+    @Environment(GalleryStore.self) private var store
 
-    private var coverURL: URL? { manager.photo(byID: memory.coverPhotoID)?.url }
+    private var coverURL: URL? { store.photo(byID: memory.coverPhotoID)?.url }
 
     var body: some View {
         ZStack(alignment: .bottomLeading) {
@@ -567,13 +567,13 @@ struct MemoryCardView: View {
 
 struct MemoryGridView: View {
     let memory: Memory
-    @EnvironmentObject var manager: GalleryManager
+    @Environment(GalleryStore.self) private var store
 
     var body: some View {
         PhotoGridScreen(
             title: memory.title,
             subtitle: memory.subtitle,
-            photos: manager.photos(for: memory),
+            photos: store.photos(for: memory),
             playableMemory: memory
         )
     }

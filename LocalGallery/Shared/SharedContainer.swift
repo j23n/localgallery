@@ -22,7 +22,9 @@ enum SharedContainer {
     static let tagsURL: URL? = widgetDataDir?.appendingPathComponent("tags.json")
     static let memoriesURL: URL? = widgetDataDir?.appendingPathComponent("memories.json")
 
-    static let defaults: UserDefaults? = UserDefaults(suiteName: appGroupID)
+    /// `UserDefaults` is documented thread-safe but isn't `Sendable`, so the
+    /// global static needs `nonisolated(unsafe)` to compile under Swift 6.
+    nonisolated(unsafe) static let defaults: UserDefaults? = UserDefaults(suiteName: appGroupID)
 
     /// Idempotent — call before writing files. Widgets only read, so they
     /// don't need to invoke this.

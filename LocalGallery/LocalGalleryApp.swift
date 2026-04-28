@@ -47,7 +47,7 @@ extension View {
 /// `OrientationLock`) and registration of the once-a-day background refresh
 /// task that re-runs memory generation when the app isn't open. Registration
 /// must happen synchronously in `didFinishLaunchingWithOptions`, before the
-/// scene is connected — that's why this lives here and not on `GalleryManager`.
+/// scene is connected — that's why this lives here and not on `GalleryStore`.
 @MainActor
 final class AppDelegate: NSObject, UIApplicationDelegate {
     /// `BGTaskSchedulerPermittedIdentifiers` whitelists this exact string in
@@ -56,8 +56,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     nonisolated static let backgroundRefreshIdentifier = "com.localgallery.app.dailyMemories"
 
     /// Owns the BG-task → manager indirection. The `WindowGroup` attaches the
-    /// `GalleryManager` once SwiftUI builds the scene. We hold the service
-    /// here (rather than reaching for a `GalleryManager.shared` global) so the
+    /// `GalleryStore` once SwiftUI builds the scene. We hold the service
+    /// here (rather than reaching for a `GalleryStore.shared` global) so the
     /// BG handler has a stable, isolation-correct API to call.
     let memoryRefresh = MemoryRefreshService()
 
@@ -90,7 +90,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 
     /// Schedule the next background refresh ~24h out. iOS treats this as an
     /// earliest-bound — the actual run is opportunistic and may be skipped.
-    /// The foreground catch-up in `GalleryManager.generateMemoriesIfNeeded` is
+    /// The foreground catch-up in `GalleryStore.generateMemoriesIfNeeded` is
     /// the safety net for days iOS skips.
     ///
     /// `nonisolated` so the `didEnterBackgroundNotification` observer (a
@@ -167,7 +167,7 @@ enum OrientationLock {
 @main
 struct LocalGalleryApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @State private var galleryManager = GalleryManager()
+    @State private var galleryManager = GalleryStore()
     @State private var router = AppRouter()
 
     init() {
@@ -188,7 +188,7 @@ struct LocalGalleryApp: App {
                 // next entry).
                 //
                 // Trade-off vs the previous synchronous `Self.shared = self`
-                // in `GalleryManager.init()`: there is now a small additional
+                // in `GalleryStore.init()`: there is now a small additional
                 // window between `@State` materialisation and `.task` firing
                 // where a BG handler could see a manager-less service and
                 // no-op. In practice BG tasks are gated to ≥24h after
@@ -262,7 +262,7 @@ struct LocalGalleryApp: App {
 }
 
 struct ContentView: View {
-    @Environment(GalleryManager.self) private var manager
+    @Environment(GalleryStore.self) private var manager
     @Environment(AppRouter.self) private var router
 
     var body: some View {

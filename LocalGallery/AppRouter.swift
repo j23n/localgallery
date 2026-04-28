@@ -26,7 +26,7 @@ final class AppRouter {
     /// Memory id to push as a slideshow when memories finish generating.
     var pendingMemoryId: String?
 
-    func handle(_ url: URL, manager: GalleryManager) {
+    func handle(_ url: URL, manager: GalleryStore) {
         guard let link = WidgetDeepLink.parse(url) else { return }
         switch link {
         case .memory(let id):
@@ -43,7 +43,7 @@ final class AppRouter {
 
     /// Re-evaluate any queued deep link now that data may have loaded. Called
     /// by the views observing `manager.rootFolder` / `manager.memories`.
-    func consumePendingIfReady(manager: GalleryManager) {
+    func consumePendingIfReady(manager: GalleryStore) {
         if let id = pendingFolderId {
             applyFolder(id: id, manager: manager)
         }
@@ -52,7 +52,7 @@ final class AppRouter {
         }
     }
 
-    private func applyFolder(id: String, manager: GalleryManager) {
+    private func applyFolder(id: String, manager: GalleryStore) {
         guard let root = manager.rootFolder else {
             pendingFolderId = id
             return
@@ -72,7 +72,7 @@ final class AppRouter {
         }
     }
 
-    private func applyMemory(id: String, manager: GalleryManager) {
+    private func applyMemory(id: String, manager: GalleryStore) {
         if let memory = manager.memories.first(where: { $0.id == id }) {
             pendingMemoryId = nil
             collectionsPath = [.slideshow(memory)]

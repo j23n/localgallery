@@ -18,7 +18,7 @@ struct MemorySlideshowView: View {
     /// grid as a child of this view.
     var onSeeAll: ((Memory) -> Void)? = nil
 
-    @Environment(GalleryManager.self) private var manager
+    @Environment(GalleryStore.self) private var manager
     @Environment(\.dismiss) private var dismiss
 
     private let baseSlideDuration: Double = 5.0
@@ -307,7 +307,7 @@ struct MemorySlideshowView: View {
 private struct SlideshowImage: View {
     let url: URL
     let size: CGSize
-    @Environment(GalleryManager.self) private var manager
+    @Environment(GalleryStore.self) private var manager
     @State private var image: UIImage?
 
     var body: some View {

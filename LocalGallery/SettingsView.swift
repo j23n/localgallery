@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct SettingsView: View {
-    @Environment(GalleryManager.self) private var manager
+    @Environment(GalleryStore.self) private var manager
     @Environment(\.dismiss) private var dismiss
     @State private var showPicker = false
 
@@ -127,7 +127,7 @@ struct SettingsView: View {
 // MARK: - Hidden People sub-screen
 
 struct HiddenPeopleList: View {
-    @Environment(GalleryManager.self) private var manager
+    @Environment(GalleryStore.self) private var manager
 
     var body: some View {
         Group {
@@ -155,7 +155,7 @@ struct HiddenPeopleList: View {
 
 private struct HiddenPersonRow: View {
     let person: TagSuggestion
-    @Environment(GalleryManager.self) private var manager
+    @Environment(GalleryStore.self) private var manager
 
     private var featured: PhotoFile? {
         manager.photos(forTag: person).first

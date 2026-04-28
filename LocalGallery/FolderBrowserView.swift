@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct FolderBrowserView: View {
-    @Environment(GalleryManager.self) private var manager
+    @Environment(GalleryStore.self) private var manager
     var folder: PhotoFolder? = nil
     /// Only the root tab should show the gear. Child browsers leave it off.
     var isRoot: Bool = true

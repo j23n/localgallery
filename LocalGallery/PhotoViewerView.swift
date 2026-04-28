@@ -105,7 +105,7 @@ private extension UIView {
 
 struct PagingPhotoView: UIViewControllerRepresentable {
     let photos: [PhotoFile]
-    let manager: GalleryManager
+    let manager: GalleryStore
     /// Source of truth is the photo's id, not its index. A foreground rescan
     /// can insert/remove photos and shift indices — the index would silently
     /// land on a different photo, so we keep the id stable and re-resolve
@@ -206,7 +206,7 @@ struct PhotoViewerView: View {
     /// so a rescan that re-orders or splices `photos` doesn't silently land
     /// the user on a different image.
     @Binding var currentPhotoID: UUID
-    @Environment(GalleryManager.self) private var manager
+    @Environment(GalleryStore.self) private var manager
     @Environment(\.dismiss) private var dismiss
 
     @State private var isChromeVisible: Bool = true
@@ -496,7 +496,7 @@ struct ZoomableImageView: UIViewRepresentable {
 struct PhotoPageView: View {
     let photo: PhotoFile
     var initialThumbnail: UIImage? = nil
-    @Environment(GalleryManager.self) private var manager
+    @Environment(GalleryStore.self) private var manager
     @Binding var isChromeVisible: Bool
 
     @State private var thumbnail: UIImage?

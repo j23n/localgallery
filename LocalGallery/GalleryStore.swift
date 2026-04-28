@@ -6,7 +6,7 @@ import os
 
 @Observable
 @MainActor
-final class GalleryManager {
+final class GalleryStore {
     var rootFolder: PhotoFolder?
     var allPhotos: [PhotoFile] = []
     var isScanning: Bool = false

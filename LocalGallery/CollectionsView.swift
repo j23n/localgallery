@@ -10,7 +10,7 @@ enum CollectionsRoute: Hashable {
 
 struct CollectionsView: View {
     @Binding var path: [CollectionsRoute]
-    @Environment(GalleryManager.self) private var manager
+    @Environment(GalleryStore.self) private var manager
     @State private var showSettings = false
 
     // Person → contact linking sheet
@@ -412,7 +412,7 @@ struct CollectionsView: View {
 
 struct TagGridView: View {
     let tag: TagSuggestion
-    @Environment(GalleryManager.self) private var manager
+    @Environment(GalleryStore.self) private var manager
 
     private var photos: [PhotoFile] {
         manager.search(query: "", requiredTags: [tag])
@@ -437,7 +437,7 @@ struct TagGridView: View {
 struct PersonCard: View {
     let tag: TagSuggestion
     let featured: Bool
-    @Environment(GalleryManager.self) private var manager
+    @Environment(GalleryStore.self) private var manager
 
     private var coverPhoto: PhotoFile? {
         manager.featuredPhoto(for: tag)
@@ -520,7 +520,7 @@ struct PersonCard: View {
 
 struct MemoryCardView: View {
     let memory: Memory
-    @Environment(GalleryManager.self) private var manager
+    @Environment(GalleryStore.self) private var manager
 
     private var coverURL: URL? { manager.photo(byID: memory.coverPhotoID)?.url }
 
@@ -567,7 +567,7 @@ struct MemoryCardView: View {
 
 struct MemoryGridView: View {
     let memory: Memory
-    @Environment(GalleryManager.self) private var manager
+    @Environment(GalleryStore.self) private var manager
 
     var body: some View {
         PhotoGridScreen(

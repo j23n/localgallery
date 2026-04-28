@@ -29,7 +29,7 @@ struct ContactInfo: Identifiable, Hashable, Codable, Sendable {
 }
 
 /// Static wrapper around `CNContactStore`. Keeps Contacts.framework concerns
-/// out of `GalleryManager` and gives memory generation a Sendable snapshot to
+/// out of `GalleryStore` and gives memory generation a Sendable snapshot to
 /// work with.
 enum ContactsService {
     static func authorizationStatus() -> CNAuthorizationStatus {

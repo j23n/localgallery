@@ -16,14 +16,16 @@ final class ThumbnailService {
     private let thumbnailCache = NSCache<NSURL, UIImage>()
     private let fullImageCache = NSCache<NSURL, UIImage>()
 
-    private let thumbnailDiskCacheDir: URL = {
-        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("thumbnails", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
-    }()
+    private let thumbnailDiskCacheDir: URL
 
-    init() {
+    static var defaultDiskCacheDir: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("thumbnails", isDirectory: true)
+    }
+
+    init(thumbnailDir: URL = ThumbnailService.defaultDiskCacheDir) {
+        self.thumbnailDiskCacheDir = thumbnailDir
+        try? FileManager.default.createDirectory(at: thumbnailDir, withIntermediateDirectories: true)
         thumbnailCache.totalCostLimit = 100 * 1024 * 1024
         fullImageCache.totalCostLimit = 200 * 1024 * 1024
     }

@@ -2,6 +2,38 @@ import Foundation
 import Contacts
 import os
 
+/// Injectable surface that `GalleryStore` talks to for address-book access.
+/// `LiveContactsService` is the production wrapper around the static
+/// `ContactsService` helpers; tests can substitute a stub returning fixture
+/// contacts. View-layer helpers (`isAuthorized(_:)`, `authorizationStatus()`)
+/// keep calling the static `ContactsService` enum directly — they don't need
+/// the test seam.
+protocol ContactsServicing: Sendable {
+    func authorizationStatus() -> CNAuthorizationStatus
+    func requestAccess() async -> Bool
+    func loadContacts() async -> [ContactInfo]
+}
+
+struct LiveContactsService: ContactsServicing {
+    func authorizationStatus() -> CNAuthorizationStatus { ContactsService.authorizationStatus() }
+    func requestAccess() async -> Bool { await ContactsService.requestAccess() }
+    func loadContacts() async -> [ContactInfo] { await ContactsService.loadContacts() }
+}
+
+#if DEBUG
+/// Synchronous, deterministic stub — tests pre-load `contacts` and assert
+/// against memory generation downstream.
+struct StubContactsService: ContactsServicing {
+    var contacts: [ContactInfo] = []
+    var status: CNAuthorizationStatus = .authorized
+    func authorizationStatus() -> CNAuthorizationStatus { status }
+    func requestAccess() async -> Bool {
+        ContactsService.isAuthorized(status)
+    }
+    func loadContacts() async -> [ContactInfo] { contacts }
+}
+#endif
+
 /// Static wrapper around `CNContactStore`. Keeps Contacts.framework concerns
 /// out of `GalleryStore` and gives memory generation a Sendable snapshot to
 /// work with.

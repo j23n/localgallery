@@ -1,0 +1,46 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          xcrun simctl list devices available iPhone
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen
+
+      - name: Pick a simulator
+        id: pick
+        run: |
+          NAME=$(xcrun simctl list devices available -j \
+            | jq -r '.devices | to_entries
+                     | map(select(.key | contains("iOS")))
+                     | sort_by(.key) | reverse | .[0].value
+                     | map(select(.name | startswith("iPhone")))
+                     | sort_by(.name) | reverse | .[0].name')
+          echo "device_name=$NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Run tests
+        run: |
+          xcodebuild test \
+            -project LocalGallery.xcodeproj \
+            -scheme LocalGallery \
+            -destination "platform=iOS Simulator,name=${{ steps.pick.outputs.device_name }}" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+          | tee xcodebuild.log

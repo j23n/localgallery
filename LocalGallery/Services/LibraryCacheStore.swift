@@ -18,16 +18,15 @@ enum LibraryCacheStore {
         let allPhotos: [PhotoFile]
     }
 
-    private static var cacheURL: URL {
+    static var defaultURL: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("library_cache.json")
     }
 
     /// Encode and write atomically on a detached task. Fire-and-forget; the
     /// caller doesn't await completion (errors are logged).
-    static func save(rootFolder: PhotoFolder, allPhotos: [PhotoFile]) {
+    static func save(rootFolder: PhotoFolder, allPhotos: [PhotoFile], to url: URL = Self.defaultURL) {
         let payload = Payload(version: version, rootFolder: rootFolder, allPhotos: allPhotos)
-        let url = cacheURL
         Task.detached(priority: .utility) {
             do {
                 let data = try JSONEncoder().encode(payload)
@@ -39,9 +38,13 @@ enum LibraryCacheStore {
     }
 
     /// Synchronous load. Returns nil on miss / version mismatch / decode
-    /// error, after evicting any stale file.
-    static func load() -> (rootFolder: PhotoFolder, allPhotos: [PhotoFile])? {
-        let url = cacheURL
+    /// error, after evicting any stale file. On version mismatch the
+    /// memories cache at `memoriesURL` is also wiped so stale photo IDs
+    /// don't outlive the rescan that produces fresh SHA-256 IDs.
+    static func load(
+        from url: URL = Self.defaultURL,
+        memoriesURL: URL = MemoriesCacheStore.defaultURL
+    ) -> (rootFolder: PhotoFolder, allPhotos: [PhotoFile])? {
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         do {
             let data = try Data(contentsOf: url)
@@ -49,9 +52,7 @@ enum LibraryCacheStore {
             guard payload.version == version else {
                 Log.cache.warning("Version mismatch (\(payload.version) vs \(version)), discarding")
                 try? FileManager.default.removeItem(at: url)
-                // Memories contain photo IDs — wipe them too so stale IDs
-                // don't outlive the rescan that produces fresh SHA-256 IDs.
-                MemoriesCacheStore.clear()
+                MemoriesCacheStore.clear(at: memoriesURL)
                 return nil
             }
             Log.cache.info("Loaded \(payload.allPhotos.count) photos from cache v\(payload.version)")

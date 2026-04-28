@@ -55,7 +55,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     /// `nonisolated static func scheduleBackgroundRefresh()` can read it.
     nonisolated static let backgroundRefreshIdentifier = "com.localgallery.app.dailyMemories"
 
-    /// Owns the BG-task → manager indirection. The `WindowGroup` attaches the
+    /// Owns the BG-task → store indirection. The `WindowGroup` attaches the
     /// `GalleryStore` once SwiftUI builds the scene. We hold the service
     /// here (rather than reaching for a `GalleryStore.shared` global) so the
     /// BG handler has a stable, isolation-correct API to call.
@@ -110,7 +110,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     }
 
     /// Handler for the background refresh. Forwards to `MemoryRefreshService`
-    /// which runs the once-a-day memory regeneration on the attached manager
+    /// which runs the once-a-day memory regeneration on the attached store
     /// (or no-ops on a background-only launch where the WindowGroup never
     /// built). Always re-schedules the next run so a single skipped day
     /// doesn't kill the recurring schedule.
@@ -167,7 +167,7 @@ enum OrientationLock {
 @main
 struct LocalGalleryApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @State private var galleryManager = GalleryStore()
+    @State private var store = GalleryStore()
     @State private var router = AppRouter()
 
     init() {
@@ -178,10 +178,10 @@ struct LocalGalleryApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .environment(galleryManager)
+                .environment(store)
                 .environment(router)
                 .tint(Design.accentColor)
-                // Hand the manager to the BG-task service. Runs once per
+                // Hand the store to the BG-task service. Runs once per
                 // scene build; on a true background-only launch the
                 // WindowGroup doesn't build and the service stays detached
                 // (BG handler no-ops, foreground catch-up takes over on
@@ -190,24 +190,24 @@ struct LocalGalleryApp: App {
                 // Trade-off vs the previous synchronous `Self.shared = self`
                 // in `GalleryStore.init()`: there is now a small additional
                 // window between `@State` materialisation and `.task` firing
-                // where a BG handler could see a manager-less service and
+                // where a BG handler could see a store-less service and
                 // no-op. In practice BG tasks are gated to ≥24h after
                 // submission and the foreground catch-up covers any miss, so
                 // the window is benign.
                 .task {
-                    appDelegate.memoryRefresh.attach(galleryManager)
+                    appDelegate.memoryRefresh.attach(store)
                 }
                 .onOpenURL { url in
-                    router.handle(url, manager: galleryManager)
+                    router.handle(url, store: store)
                 }
                 // Cold-launch deep links (folder/memory) queue an id when the
                 // backing data isn't ready; consume them as soon as the data
                 // appears so the user lands on the right screen.
-                .onChange(of: galleryManager.rootFolder?.id) { _, _ in
-                    router.consumePendingIfReady(manager: galleryManager)
+                .onChange(of: store.rootFolder?.id) { _, _ in
+                    router.consumePendingIfReady(store: store)
                 }
-                .onChange(of: galleryManager.memories.count) { _, _ in
-                    router.consumePendingIfReady(manager: galleryManager)
+                .onChange(of: store.memories.count) { _, _ in
+                    router.consumePendingIfReady(store: store)
                 }
         }
     }
@@ -220,7 +220,7 @@ struct LocalGalleryApp: App {
         // are gaps where it can't reach a control: sheet presentations cross
         // a `UIPresentationController` boundary (and nested sheets compound
         // it — Settings → Linked Contacts → Contact picker), and during
-        // bursts of observed-state updates (e.g. `manager.rescan()` rewriting
+        // bursts of observed-state updates (e.g. `store.rescan()` rewriting
         // `allPhotos`/`allTags`/indexes at once) descendant Lists can rebuild
         // before the new tint context resolves. In any of those gaps the
         // underlying UIView falls through to `tintColor`, which inherits up
@@ -262,7 +262,7 @@ struct LocalGalleryApp: App {
 }
 
 struct ContentView: View {
-    @Environment(GalleryStore.self) private var manager
+    @Environment(GalleryStore.self) private var store
     @Environment(AppRouter.self) private var router
 
     var body: some View {
@@ -301,7 +301,7 @@ struct ContentView: View {
             .tag(AppRouter.Tab.photos)
         }
         .task {
-            await manager.restoreFolder()
+            await store.restoreFolder()
         }
     }
 }

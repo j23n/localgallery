@@ -3,7 +3,7 @@ import MapKit
 
 struct EXIFSheetView: View {
     let photo: PhotoFile
-    @Environment(GalleryStore.self) private var manager
+    @Environment(GalleryStore.self) private var store
     @State private var exifData: EXIFData?
     @State private var photoToolsData: PhotoToolsMetadata = PhotoToolsMetadata()
     @State private var isLoading = true
@@ -24,8 +24,8 @@ struct EXIFSheetView: View {
         }
         .presentationDetents([.medium, .large])
         .task {
-            async let exif = manager.loadEXIF(for: photo)
-            async let pt = manager.loadPhotoToolsMetadata(for: photo)
+            async let exif = store.loadEXIF(for: photo)
+            async let pt = store.loadPhotoToolsMetadata(for: photo)
             exifData = await exif
             photoToolsData = await pt
             isLoading = false

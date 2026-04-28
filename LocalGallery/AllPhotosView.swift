@@ -1,14 +1,14 @@
 import SwiftUI
 
 struct AllPhotosView: View {
-    @Environment(GalleryStore.self) private var manager
+    @Environment(GalleryStore.self) private var store
     @Environment(AppRouter.self) private var router
     @State private var seedTags: [TagSuggestion] = []
 
     var body: some View {
         Group {
-            if manager.allPhotos.isEmpty {
-                if manager.isScanning {
+            if store.allPhotos.isEmpty {
+                if store.isScanning {
                     ProgressView("Scanning…")
                 } else {
                     emptyState
@@ -16,7 +16,7 @@ struct AllPhotosView: View {
             } else {
                 PhotoGridScreen(
                     title: "Photos",
-                    photos: manager.sortedPhotos,
+                    photos: store.sortedPhotos,
                     isRoot: true,
                     showSearch: true,
                     showVisibleDateRange: true,
@@ -35,7 +35,7 @@ struct AllPhotosView: View {
     private func applyPendingTagFilter() {
         guard !router.pendingPhotosTagFilter.isEmpty else { return }
         let resolved = router.pendingPhotosTagFilter.compactMap { path in
-            manager.allTags.first { $0.fullPath == path }
+            store.allTags.first { $0.fullPath == path }
         }
         seedTags = resolved
         router.pendingPhotosTagFilter = []

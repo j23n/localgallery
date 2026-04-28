@@ -312,7 +312,7 @@ final class GalleryStore {
     }
 
     /// Resolved link state for a person tag — what the UI should display.
-    /// Forwards to `ContactLinker` which owns the indexes; the manager
+    /// Forwards to `ContactLinker` which owns the indexes; the Store
     /// passes in the observed `personContactLinks` dictionary.
     func linkState(forPersonPath path: String, displayName: String) -> ContactLinker.LinkState {
         contactLinker.linkState(forPersonPath: path, displayName: displayName, links: personContactLinks)

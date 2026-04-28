@@ -1,6 +1,18 @@
 import SwiftUI
 import UIKit
 
+/// Non-observed section visibility tracker. Mutating `counts` does NOT trigger
+/// SwiftUI body re-evaluation — only reassigning the @State reference would.
+/// This lets onAppear/onDisappear track section visibility silently during
+/// scrolling; the visible date-range string is synced to @State on a debounce.
+private final class SectionTracker {
+    var counts: [String: Int] = [:]
+    var visibleIDs: Set<String> {
+        Set(counts.compactMap { $0.value > 0 ? $0.key : nil })
+    }
+    func reset() { counts.removeAll() }
+}
+
 /// Unified photo grid used for All Photos, folder/event drill-ins, tag drill-ins,
 /// and memory "grid mode". Supports search, tag filtering, year scrubber,
 /// Select mode with share, and long-press menus — matching the Quiet design.
@@ -80,17 +92,14 @@ struct PhotoGridScreen: View {
     @State private var sectionsCache: [PhotoSection] = []
     @State private var yearsCache: [(year: String, sectionID: String)] = []
 
-    // Per-section count of currently-rendered photo cells. LazyVGrid only
-    // instantiates cells near the viewport, so a section's count is positive
-    // exactly while at least one of its photos is on (or near) screen — which
-    // is robust against tall sections whose header has scrolled off but
-    // whose photos are still visible. Used to compute the live date-range
-    // subtitle on the Photos tab.
-    @State private var visibleSectionCounts: [String: Int] = [:]
-
-    private var visibleSectionIDs: Set<String> {
-        Set(visibleSectionCounts.compactMap { $0.value > 0 ? $0.key : nil })
-    }
+    // Per-section count of currently-rendered photo cells. Stored in a
+    // reference type so mutations do NOT trigger body re-evaluation —
+    // critical for the 20k All Photos grid where per-cell onAppear would
+    // otherwise force SwiftUI to diff the entire ForEach tree every frame.
+    // The date-range @State string is synced on a debounce (~300ms).
+    @State private var sectionTracker = SectionTracker()
+    @State private var liveDateRange: String = ""
+    @State private var dateRangeUpdateTask: Task<Void, Never>?
 
     private func grid(isLandscape: Bool) -> GridLayoutConfig {
         GridLayoutConfig(sizeTier: sizeTier, isLandscape: isLandscape)
@@ -144,7 +153,7 @@ struct PhotoGridScreen: View {
                 : "Tap Share to send \(selected.count == 1 ? "this photo" : "these photos")"
         }
         if showVisibleDateRange {
-            return visibleDateRangeText
+            return liveDateRange
         }
         if isFiltered {
             let n = filtered.count
@@ -161,15 +170,25 @@ struct PhotoGridScreen: View {
         return !sub.isEmpty
     }
 
-    /// Date range spanning the photos in any currently-visible section. Reduces
-    /// over each section's pre-cached `dateRange` rather than re-flattening
-    /// photo dates on every body evaluation — important because viewer paging
-    /// (which writes through `viewerCurrentPhotoID`) re-renders this view on
-    /// every swipe.
-    private var visibleDateRangeText: String {
+    /// Debounced sync of the non-observed section tracker to the @State
+    /// `liveDateRange` string. At most one body re-evaluation per 300ms
+    /// instead of one per cell onAppear — eliminates the 20k-item ForEach
+    /// diff that was causing scroll stutter on the All Photos grid.
+    private func scheduleDateRangeUpdate() {
+        dateRangeUpdateTask?.cancel()
+        dateRangeUpdateTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            liveDateRange = computeDateRange()
+        }
+    }
+
+    /// Compute the date range from the non-observed section tracker.
+    private func computeDateRange() -> String {
+        let visible = sectionTracker.visibleIDs
         var minDate: Date?
         var maxDate: Date?
-        for section in sectionsCache where visibleSectionIDs.contains(section.id) {
+        for section in sectionsCache where visible.contains(section.id) {
             guard let range = section.dateRange else { continue }
             if minDate == nil || range.lowerBound < minDate! { minDate = range.lowerBound }
             if maxDate == nil || range.upperBound > maxDate! { maxDate = range.upperBound }
@@ -210,7 +229,11 @@ struct PhotoGridScreen: View {
                 ScrollView {
                     Color.clear.frame(height: 0).id("__top__")
 
-                    if hasSubtitleContent {
+                    // On the Photos tab the live date-range subtitle lives in
+                    // the toolbar .principal — keep it OUT of scroll content so
+                    // per-cell visibleSectionCounts mutations don't force
+                    // LazyVGrid layout invalidation every frame.
+                    if !showVisibleDateRange || selectMode, hasSubtitleContent {
                         inContentSubtitle(displaySubtitle ?? "")
                     }
 
@@ -238,15 +261,16 @@ struct PhotoGridScreen: View {
                                         gridCell(photo: photo, cellSize: cell)
                                             .onAppear {
                                                 guard showVisibleDateRange else { return }
-                                                visibleSectionCounts[section.id, default: 0] += 1
+                                                sectionTracker.counts[section.id, default: 0] += 1
+                                                scheduleDateRangeUpdate()
                                             }
                                             .onDisappear {
                                                 guard showVisibleDateRange else { return }
-                                                let next = (visibleSectionCounts[section.id] ?? 0) - 1
+                                                let next = (sectionTracker.counts[section.id] ?? 0) - 1
                                                 if next <= 0 {
-                                                    visibleSectionCounts.removeValue(forKey: section.id)
+                                                    sectionTracker.counts.removeValue(forKey: section.id)
                                                 } else {
-                                                    visibleSectionCounts[section.id] = next
+                                                    sectionTracker.counts[section.id] = next
                                                 }
                                             }
                                     }
@@ -322,7 +346,8 @@ struct PhotoGridScreen: View {
                 activeTags = initialTags
                 return
             }
-            visibleSectionCounts.removeAll()
+            sectionTracker.reset()
+            liveDateRange = ""
             await recomputeFilter()
         }
         .fullScreenCover(item: $viewerPhoto) { _ in

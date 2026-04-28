@@ -8,8 +8,9 @@ enum LibraryCacheStore {
     /// Bumping invalidates every existing cache. v13: force rescan so video
     /// dates read AVAsset.creationDate (videos used to skip enrichment and
     /// fall back to the filesystem date, which often equals the download
-    /// time on this device).
-    static let version = 15
+    /// time on this device). v16: stable IDs migrated from MD5 to SHA-256 —
+    /// old cached IDs are incompatible with new scan output.
+    static let version = 16
 
     private struct Payload: Codable, Sendable {
         let version: Int
@@ -48,6 +49,9 @@ enum LibraryCacheStore {
             guard payload.version == version else {
                 Log.cache.warning("Version mismatch (\(payload.version) vs \(version)), discarding")
                 try? FileManager.default.removeItem(at: url)
+                // Memories contain photo IDs — wipe them too so stale IDs
+                // don't outlive the rescan that produces fresh SHA-256 IDs.
+                MemoriesCacheStore.clear()
                 return nil
             }
             Log.cache.info("Loaded \(payload.allPhotos.count) photos from cache v\(payload.version)")

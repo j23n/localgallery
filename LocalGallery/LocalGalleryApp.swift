@@ -3,46 +3,6 @@ import AVFoundation
 import UIKit
 import BackgroundTasks
 
-// MARK: - Design Tokens (Quiet direction)
-
-enum Design {
-    // Warm, stock-adjacent palette (#FAF7F2 canvas, muted amber accent).
-    static let accentColor  = Color(red: 0.769, green: 0.541, blue: 0.243)  // #C48A3E
-    static let accentSoft   = Color(red: 0.769, green: 0.541, blue: 0.243).opacity(0.13)
-
-    static let bg           = Color(red: 0.980, green: 0.969, blue: 0.949)  // #FAF7F2
-    static let bgCard       = Color.white                                    // #FFFFFF
-    static let bgGrouped    = Color(red: 0.949, green: 0.929, blue: 0.898)  // #F2EDE5
-
-    static let ink          = Color(red: 0.110, green: 0.102, blue: 0.086)  // #1C1A16
-    static let ink2         = Color(red: 0.369, green: 0.341, blue: 0.302)  // #5E574D
-    static let ink3         = Color(red: 0.584, green: 0.553, blue: 0.510)  // #958D82
-    static let separator    = Color(red: 0.235, green: 0.216, blue: 0.176).opacity(0.10)
-
-    static let destructive  = Color(red: 0.698, green: 0.290, blue: 0.227)  // #B24A3A
-
-    static let cardRadius: CGFloat = 14
-    static let memoryRadius: CGFloat = 20
-
-    /// Newsreader italic stand-in (system serif italic) — used for memory titles.
-    static func serifItalic(_ size: CGFloat, weight: Font.Weight = .medium) -> Font {
-        .system(size: size, weight: weight, design: .serif).italic()
-    }
-}
-
-extension View {
-    /// Soft gradient fade at the top edge of the enclosing scroll view so
-    /// content dissolves into the nav bar (iOS 26+ — no-op on older OSes).
-    @ViewBuilder
-    func softTopScrollEdge() -> some View {
-        if #available(iOS 26.0, *) {
-            self.scrollEdgeEffectStyle(.soft, for: .top)
-        } else {
-            self
-        }
-    }
-}
-
 /// AppDelegate handles two things: per-screen orientation locking (used by
 /// `OrientationLock`) and registration of the once-a-day background refresh
 /// task that re-runs memory generation when the app isn't open. Registration
@@ -220,22 +180,26 @@ struct LocalGalleryApp: App {
         // are gaps where it can't reach a control: sheet presentations cross
         // a `UIPresentationController` boundary (and nested sheets compound
         // it — Settings → Linked Contacts → Contact picker), and during
-        // bursts of observed-state updates (e.g. `store.rescan()` rewriting
-        // `allPhotos`/`allTags`/indexes at once) descendant Lists can rebuild
-        // before the new tint context resolves. In any of those gaps the
-        // underlying UIView falls through to `tintColor`, which inherits up
-        // to the window — and the iOS default window tint is system blue.
+        // bursts of observed-state updates descendant Lists can rebuild before
+        // the new tint context resolves. In any of those gaps the underlying
+        // UIView falls through to `tintColor`, which inherits up to the window
+        // — and the iOS default window tint is system blue.
         //
-        // Pinning the UIKit appearance accent at app start sets the floor of
-        // that cascade so no SF Symbol in a Label/Toggle/NavigationLink can
-        // resolve to system blue, regardless of which sheet/nav context it
-        // lives in. SwiftUI `.tint()` modifiers continue to override where
-        // intentional (e.g. `.tint(.primary)` on the Folder row in Settings).
+        // The `@Observable` migration (#21) eliminated most rebuild-burst
+        // triggers (field-level granularity vs `@Published`'s whole-object
+        // invalidation), but the sheet-boundary tint gap is an iOS layout
+        // constraint independent of the observation framework. Verified still
+        // needed under iOS 18 + `@Observable`: Settings → Linked Contacts →
+        // Contact picker continues to resolve to system blue without this.
+        //
+        // SwiftUI `.tint()` modifiers continue to override where intentional
+        // (e.g. `.tint(.primary)` on the Folder row in Settings).
         UIView.appearance().tintColor = accent
         UIWindow.appearance().tintColor = accent
 
-        // Nav bar: transparent at scroll edge, translucent blur when content scrolls under.
-        // Matches stock apps (Photos, Messages) — no opaque band.
+        // Nav bar: transparent at scroll edge, translucent blur when content
+        // scrolls under. Matches stock apps (Photos, Messages) — no opaque band.
+        // Unrelated to @Observable; still required for the warm design treatment.
         let navStandard = UINavigationBarAppearance()
         navStandard.configureWithDefaultBackground()
         navStandard.shadowColor = .clear
@@ -251,7 +215,8 @@ struct LocalGalleryApp: App {
         UINavigationBar.appearance().compactAppearance = navStandard
         UINavigationBar.appearance().compactScrollEdgeAppearance = navEdge
 
-        // Tab bar: warm translucent
+        // Tab bar: warm translucent. SwiftUI TabView doesn't expose background
+        // color or separator without UIKit appearance; unrelated to @Observable.
         let tab = UITabBarAppearance()
         tab.configureWithOpaqueBackground()
         tab.backgroundColor = bg.withAlphaComponent(0.96)

@@ -13,7 +13,7 @@ struct PhotoFolder: Identifiable, Codable, Sendable, Hashable {
     var dateCreated: Date?
 
     /// Deterministic UUID derived from the folder URL path for stable identity across scans.
-    /// Uses SHA-256 (prefix-16 bytes, RFC 4122 version 5 layout) — matches localmusic convention.
+    /// SHA-256 truncated to 16 bytes with RFC 4122 variant + version-5 marker — namespace-less; matches localmusic.
     static func stableID(for url: URL) -> UUID {
         let digest = SHA256.hash(data: Data(("folder:" + url.standardized.path).utf8))
         var bytes = Array(digest.prefix(16))

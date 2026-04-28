@@ -56,6 +56,9 @@ struct PhotoGridScreen: View {
     @State private var selected: Set<UUID> = []
     @State private var hasSeededInitialTags = false
 
+    // Large title collapsed → show inline principal with date range
+    @State private var largeTitleCollapsed = false
+
     // Pinch-to-zoom grid size
     @State private var isPinching = false
     @State private var pinchBaseTier: Int = 0
@@ -268,6 +271,11 @@ struct PhotoGridScreen: View {
                     }
                 }
                 .scrollDismissesKeyboard(.interactively)
+                .onScrollGeometryChange(for: Bool.self) { geo in
+                    geo.contentOffset.y > 20
+                } action: { _, collapsed in
+                    largeTitleCollapsed = collapsed
+                }
                 .refreshable { await store.rescan() }
                 .overlay(alignment: .trailing) {
                     if yearsCache.count > 1 && !selectMode {
@@ -558,6 +566,10 @@ struct PhotoGridScreen: View {
                     .foregroundStyle(Design.ink)
                 }
                 .buttonStyle(.plain)
+                // Root uses .large title mode — fade the principal in only
+                // after the large title has scrolled away to avoid duplication.
+                .opacity(isRoot && !largeTitleCollapsed ? 0 : 1)
+                .animation(.easeInOut(duration: 0.15), value: largeTitleCollapsed)
             }
         }
 

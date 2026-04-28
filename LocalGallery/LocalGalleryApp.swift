@@ -201,7 +201,8 @@ struct LocalGalleryApp: App {
         // scrolls under. Matches stock apps (Photos, Messages) — no opaque band.
         // Unrelated to @Observable; still required for the warm design treatment.
         let navStandard = UINavigationBarAppearance()
-        navStandard.configureWithDefaultBackground()
+        navStandard.configureWithOpaqueBackground()
+        navStandard.backgroundColor = bg.withAlphaComponent(0.90)
         navStandard.shadowColor = .clear
         navStandard.titleTextAttributes = [.foregroundColor: UIColor(Design.ink)]
 

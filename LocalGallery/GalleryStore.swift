@@ -65,14 +65,14 @@ final class GalleryStore {
     /// Set to `false` at the end of `init()` so didSet observers can skip
     /// expensive side-effects (like cache clears) while restoring persisted
     /// state.
-    private var _isInitializing = true
+    @ObservationIgnored private var _isInitializing = true
 
-    private var isEnriching = false
+    @ObservationIgnored private var isEnriching = false
     /// In-flight scan, keyed by URL. Concurrent callers for the same URL await
     /// the existing task instead of starting a second traversal (app launch +
     /// willEnterForeground + pull-to-refresh can otherwise overlap).
-    private var activeScanTask: (url: URL, task: Task<Void, Never>)?
-    private var memoriesGeneratedDay: Date? {
+    @ObservationIgnored private var activeScanTask: (url: URL, task: Task<Void, Never>)?
+    @ObservationIgnored private var memoriesGeneratedDay: Date? {
         didSet { persistMemoriesGeneratedDay() }
     }
     private let bookmarks = BookmarkManager()
@@ -184,7 +184,7 @@ final class GalleryStore {
     /// from `memoriesGeneratedDay` (persisted on disk) so the very first
     /// foreground entry of a new day rebuilds the snapshot — without
     /// pessimistically forcing a regeneration on every cold launch.
-    private var lastWidgetExportDay: Date?
+    @ObservationIgnored private var lastWidgetExportDay: Date?
 
     private func refreshWidgetIfDayChanged() {
         let today = Calendar.current.startOfDay(for: Date())
@@ -508,9 +508,9 @@ final class GalleryStore {
     /// All unique tags across the library, sorted by frequency.
     private(set) var allTags: [TagSuggestion] = []
     /// Generation counter to cancel stale tag aggregation tasks.
-    private var tagBuildGeneration = 0
+    @ObservationIgnored private var tagBuildGeneration = 0
     /// Cached leaf folders (no subfolders, has photos).
-    private var _cachedLeafFolders: [PhotoFolder] = []
+    @ObservationIgnored private var _cachedLeafFolders: [PhotoFolder] = []
 
     /// Date-descending photo list. Forwards to `SearchIndex`; observation
     /// chains through because `SearchIndex` is `@Observable`.

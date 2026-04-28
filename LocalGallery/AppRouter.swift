@@ -26,15 +26,15 @@ final class AppRouter {
     /// Memory id to push as a slideshow when memories finish generating.
     var pendingMemoryId: String?
 
-    func handle(_ url: URL, manager: GalleryStore) {
+    func handle(_ url: URL, store: GalleryStore) {
         guard let link = WidgetDeepLink.parse(url) else { return }
         switch link {
         case .memory(let id):
             selectedTab = .collections
-            applyMemory(id: id, manager: manager)
+            applyMemory(id: id, store: store)
         case .folder(let id):
             selectedTab = .folders
-            applyFolder(id: id, manager: manager)
+            applyFolder(id: id, store: store)
         case .tags(let paths):
             selectedTab = .photos
             pendingPhotosTagFilter = paths
@@ -42,18 +42,18 @@ final class AppRouter {
     }
 
     /// Re-evaluate any queued deep link now that data may have loaded. Called
-    /// by the views observing `manager.rootFolder` / `manager.memories`.
-    func consumePendingIfReady(manager: GalleryStore) {
+    /// by the views observing `store.rootFolder` / `store.memories`.
+    func consumePendingIfReady(store: GalleryStore) {
         if let id = pendingFolderId {
-            applyFolder(id: id, manager: manager)
+            applyFolder(id: id, store: store)
         }
         if let id = pendingMemoryId {
-            applyMemory(id: id, manager: manager)
+            applyMemory(id: id, store: store)
         }
     }
 
-    private func applyFolder(id: String, manager: GalleryStore) {
-        guard let root = manager.rootFolder else {
+    private func applyFolder(id: String, store: GalleryStore) {
+        guard let root = store.rootFolder else {
             pendingFolderId = id
             return
         }
@@ -72,8 +72,8 @@ final class AppRouter {
         }
     }
 
-    private func applyMemory(id: String, manager: GalleryStore) {
-        if let memory = manager.memories.first(where: { $0.id == id }) {
+    private func applyMemory(id: String, store: GalleryStore) {
+        if let memory = store.memories.first(where: { $0.id == id }) {
             pendingMemoryId = nil
             collectionsPath = [.slideshow(memory)]
             return
@@ -81,7 +81,7 @@ final class AppRouter {
         // Memories haven't been generated yet OR this id no longer exists.
         // Queue the id only when memories are still empty (cold launch); if
         // they're populated and the id isn't there, the memory is gone.
-        if manager.memories.isEmpty {
+        if store.memories.isEmpty {
             pendingMemoryId = id
         } else {
             pendingMemoryId = nil

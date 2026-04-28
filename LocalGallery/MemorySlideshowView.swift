@@ -18,7 +18,7 @@ struct MemorySlideshowView: View {
     /// grid as a child of this view.
     var onSeeAll: ((Memory) -> Void)? = nil
 
-    @Environment(GalleryStore.self) private var manager
+    @Environment(GalleryStore.self) private var store
     @Environment(\.dismiss) private var dismiss
 
     private let baseSlideDuration: Double = 5.0
@@ -36,7 +36,7 @@ struct MemorySlideshowView: View {
     @State private var audio = SlideshowAudioController()
     @AppStorage("slideshowMusicTheme") private var storedTheme: String = SlideshowMusicTheme.wistful.rawValue
 
-    private var photos: [PhotoFile] { manager.photos(for: memory) }
+    private var photos: [PhotoFile] { store.photos(for: memory) }
     private var theme: SlideshowMusicTheme {
         SlideshowMusicTheme(rawValue: storedTheme) ?? .wistful
     }
@@ -307,7 +307,7 @@ struct MemorySlideshowView: View {
 private struct SlideshowImage: View {
     let url: URL
     let size: CGSize
-    @Environment(GalleryStore.self) private var manager
+    @Environment(GalleryStore.self) private var store
     @State private var image: UIImage?
 
     var body: some View {
@@ -321,7 +321,7 @@ private struct SlideshowImage: View {
         .frame(width: size.width, height: size.height)
         .clipped()
         .task(id: url) {
-            image = await manager.loadFullImage(for: url)
+            image = await store.loadFullImage(for: url)
         }
     }
 

@@ -4,14 +4,14 @@ import os
 
 /// Owns the date-sorted photo list, the per-photo search corpus, and the
 /// O(1) photo-by-ID lookup. `@Observable` so view reads chained through the
-/// Store (e.g. `manager.sortedPhotos`) re-render correctly when the index
+/// Store (e.g. `store.sortedPhotos`) re-render correctly when the index
 /// rebuilds.
 @Observable
 @MainActor
 final class SearchIndex {
-    /// Date-descending photo list. Backs `manager.sortedPhotos`.
+    /// Date-descending photo list. Backs `store.sortedPhotos`.
     private(set) var sortedPhotos: [PhotoFile] = []
-    /// `PhotoFile.id` → `PhotoFile`. Backs `manager.photo(byID:)`.
+    /// `PhotoFile.id` → `PhotoFile`. Backs `store.photo(byID:)`.
     private(set) var photoByID: [UUID: PhotoFile] = [:]
     /// Per-photo lowercased search corpus: filename + every tag leaf + every
     /// tag full path, joined by newline. Substring-matched in `search(...)`.

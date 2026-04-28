@@ -6,7 +6,7 @@ import os
 ///
 /// Single source of truth for "which URL are we currently scoped into?" — every
 /// scan, foreground refresh, and rescan reads it from here. The Store retains
-/// the manager and forwards picker / settings calls into it.
+/// this service and forwards picker / settings calls into it.
 @MainActor
 final class BookmarkManager {
     private let defaults: UserDefaults

@@ -105,7 +105,7 @@ private extension UIView {
 
 struct PagingPhotoView: UIViewControllerRepresentable {
     let photos: [PhotoFile]
-    let manager: GalleryStore
+    let store: GalleryStore
     /// Source of truth is the photo's id, not its index. A foreground rescan
     /// can insert/remove photos and shift indices — the index would silently
     /// land on a different photo, so we keep the id stable and re-resolve
@@ -169,10 +169,10 @@ struct PagingPhotoView: UIViewControllerRepresentable {
             let photo = parent.photos[idx]
             let view = PhotoPageView(
                 photo: photo,
-                initialThumbnail: parent.manager.cachedThumbnail(for: photo.url),
+                initialThumbnail: parent.store.cachedThumbnail(for: photo.url),
                 isChromeVisible: parent.$isChromeVisible
             )
-            .environment(parent.manager)
+            .environment(parent.store)
             return IndexedHostingController(photoID: photoID, rootView: AnyView(view))
         }
 
@@ -206,7 +206,7 @@ struct PhotoViewerView: View {
     /// so a rescan that re-orders or splices `photos` doesn't silently land
     /// the user on a different image.
     @Binding var currentPhotoID: UUID
-    @Environment(GalleryStore.self) private var manager
+    @Environment(GalleryStore.self) private var store
     @Environment(\.dismiss) private var dismiss
 
     @State private var isChromeVisible: Bool = true
@@ -241,7 +241,7 @@ struct PhotoViewerView: View {
             if !photos.isEmpty {
                 PagingPhotoView(
                     photos: photos,
-                    manager: manager,
+                    store: store,
                     currentPhotoID: $currentPhotoID,
                     isChromeVisible: $isChromeVisible
                 )
@@ -496,7 +496,7 @@ struct ZoomableImageView: UIViewRepresentable {
 struct PhotoPageView: View {
     let photo: PhotoFile
     var initialThumbnail: UIImage? = nil
-    @Environment(GalleryStore.self) private var manager
+    @Environment(GalleryStore.self) private var store
     @Binding var isChromeVisible: Bool
 
     @State private var thumbnail: UIImage?
@@ -582,7 +582,7 @@ struct PhotoPageView: View {
     }
 
     private func loadPhoto() async {
-        thumbnail = manager.cachedThumbnail(for: photo.url)
+        thumbnail = store.cachedThumbnail(for: photo.url)
         fullImage = nil
         isPlayingVideo = false
         videoPlayer?.pause()
@@ -593,10 +593,10 @@ struct PhotoPageView: View {
         isZoomed = false
 
         if thumbnail == nil {
-            thumbnail = await manager.thumbnail(for: photo.url, size: CGSize(width: 400, height: 400), isVideo: photo.isVideo)
+            thumbnail = await store.thumbnail(for: photo.url, size: CGSize(width: 400, height: 400), isVideo: photo.isVideo)
         }
         if !photo.isVideo {
-            fullImage = await manager.loadFullImage(for: photo.url)
+            fullImage = await store.loadFullImage(for: photo.url)
         }
     }
 

@@ -82,6 +82,8 @@ final class GalleryManager {
     private let fullImageCache = NSCache<NSURL, UIImage>()
     private let bookmarks = BookmarkManager()
     private let contactLinker = ContactLinker()
+    private let searchService = SearchIndex()
+    private let tagService = TagIndex()
     /// NotificationCenter observer tokens. Set once in `init()` (on main),
     /// read once in `deinit` (on whatever thread released the last reference).
     /// `@ObservationIgnored` so the `@Observable` macro doesn't synthesize
@@ -1063,96 +1065,31 @@ final class GalleryManager {
 
     // MARK: - Sorted / Search / Tags
 
-    /// Pre-sorted array, rebuilt when allPhotos changes
-    private var _sortedPhotos: [PhotoFile] = []
-    /// Lowercase search corpus per photo ID for fast substring matching
-    private var searchIndex: [UUID: String] = [:]
-    /// All unique tags across the library, sorted by frequency
+    /// All unique tags across the library, sorted by frequency.
     private(set) var allTags: [TagSuggestion] = []
-    /// Generation counter to cancel stale tag aggregation tasks
+    /// Generation counter to cancel stale tag aggregation tasks.
     private var tagBuildGeneration = 0
-    /// Tag -> photos index for fast collection lookups
-    private var _photosForTag: [String: [PhotoFile]] = [:]
-    /// Photo ID -> PhotoFile lookup
-    private var _photoByID: [UUID: PhotoFile] = [:]
-    /// Cached leaf folders (no subfolders, has photos)
+    /// Cached leaf folders (no subfolders, has photos).
     private var _cachedLeafFolders: [PhotoFolder] = []
 
-    var sortedPhotos: [PhotoFile] { _sortedPhotos }
+    /// Date-descending photo list. Forwards to `SearchIndex`; observation
+    /// chains through because `SearchIndex` is `@Observable`.
+    var sortedPhotos: [PhotoFile] { searchService.sortedPhotos }
 
-    /// O(1) photo lookup by ID
-    func photo(byID id: UUID) -> PhotoFile? { _photoByID[id] }
+    /// O(1) photo lookup by ID. Forwards to `SearchIndex`.
+    func photo(byID id: UUID) -> PhotoFile? { searchService.photo(byID: id) }
 
-    /// O(1) photos for a given tag
+    /// O(1) photos for a given tag. Forwards to `TagIndex`.
     func photos(forTag tag: TagSuggestion) -> [PhotoFile] {
-        _photosForTag[tag.fullPath.lowercased()] ?? []
-    }
-
-    func sortPhotos(_ photos: [PhotoFile]) -> [PhotoFile] {
-        photos.sorted { ($0.dateTaken ?? .distantPast) > ($1.dateTaken ?? .distantPast) }
+        tagService.photos(forTag: tag)
     }
 
     private func rebuildSortAndIndex() {
         let t = CFAbsoluteTimeGetCurrent()
-        _sortedPhotos = sortPhotos(allPhotos)
-        _photoByID = Dictionary(allPhotos.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        searchService.build(allPhotos: allPhotos)
+        tagService.build(allPhotos: allPhotos)
         let withTags = allPhotos.filter { !$0.hierarchicalTags.isEmpty }.count
         let withDates = allPhotos.filter { $0.dateTaken != nil }.count
-
-        // Build search index and tag-to-photos index in one pass.
-        // Corpus = filename + every tag leaf + every tag full path, so substring
-        // search matches both "rome" and "italy/lazio/rome".
-        //
-        // For Places/* we ALSO index every parent prefix as a virtual tag — a
-        // photo tagged Places/Argentina/.../Montserrat counts toward Argentina,
-        // the region, and the city. Lets the suggestion list surface "Argentina"
-        // (with the country icon) when the user types it, and the resulting
-        // tag-filter pulls up every photo nested under that prefix.
-        var newSearchIndex: [UUID: String] = [:]
-        var tagPhotos: [String: [PhotoFile]] = [:]
-        // Canonical-cased path keyed by lowercased path, so virtual prefix tags
-        // get nicely-cased displayName/fullPath even when no leaf photo carries
-        // that exact intermediate path.
-        var canonicalPath: [String: String] = [:]
-        for photo in allPhotos {
-            var terms: [String] = [photo.filename]
-            for tag in photo.hierarchicalTags {
-                terms.append(tag.displayName)
-                terms.append(tag.fullPath)
-            }
-            newSearchIndex[photo.id] = terms.joined(separator: "\n").lowercased()
-            // Track which keys we've already credited this photo to so we
-            // don't double-count when a photo carries both a leaf tag and an
-            // explicit parent tag (e.g. Places/Italy AND Places/Italy/Lazio/Rome).
-            var keysCreditedForPhoto = Set<String>()
-            for tag in photo.hierarchicalTags {
-                let segments = tag.fullPath.split(separator: "/").map(String.init)
-                let isPlaces = tag.namespace?.lowercased() == "places"
-                let isHierarchical = segments.count > 1
-                let leafKey = tag.fullPath.lowercased()
-                if keysCreditedForPhoto.insert(leafKey).inserted {
-                    tagPhotos[leafKey, default: []].append(photo)
-                }
-                canonicalPath[leafKey] = tag.fullPath
-                // For Places/* (and any other multi-level path), also index every
-                // proper prefix so parent levels become first-class tags.
-                if isPlaces && isHierarchical {
-                    for depth in 2..<segments.count {
-                        let prefixSegments = Array(segments.prefix(depth))
-                        let prefixPath = prefixSegments.joined(separator: "/")
-                        let key = prefixPath.lowercased()
-                        if keysCreditedForPhoto.insert(key).inserted {
-                            tagPhotos[key, default: []].append(photo)
-                        }
-                        if canonicalPath[key] == nil {
-                            canonicalPath[key] = prefixPath
-                        }
-                    }
-                }
-            }
-        }
-        searchIndex = newSearchIndex
-        _photosForTag = tagPhotos
 
         // Cache leaf folders and pre-compute event folders
         _cachedLeafFolders = rootFolder.map { Self.collectLeafFolders($0) } ?? []
@@ -1167,52 +1104,24 @@ final class GalleryManager {
         // Aggregate global tag list + topPeople in background to avoid blocking scroll
         tagBuildGeneration += 1
         let generation = tagBuildGeneration
-        let tagPhotosSnapshot = tagPhotos
-        let canonicalPathSnapshot = canonicalPath
+        let tagPhotosSnapshot = tagService.photosForTag
+        let canonicalPathSnapshot = tagService.canonicalPath
         Task.detached(priority: .utility) {
-            // Build a TagSuggestion for every key in tagPhotos — including the
-            // virtual Places/* prefixes that no photo carries exactly. We can
-            // construct a HierarchicalTag from the canonical path for each key.
-            let tags: [TagSuggestion] = tagPhotosSnapshot.compactMap { entry -> TagSuggestion? in
-                guard let path = canonicalPathSnapshot[entry.key] else { return nil }
-                let tag = HierarchicalTag(raw: path)
-                return TagSuggestion(
-                    id: tag.fullPath.lowercased(),
-                    displayName: tag.displayName,
-                    fullPath: tag.fullPath,
-                    namespace: tag.namespace,
-                    count: entry.value.count
-                )
-            }
-            .sorted { $0.count > $1.count }
-
-            // Sort people by recent-activity then count. Show all people, not just 8 —
-            // pinning / featuring happens downstream in visiblePeople.
-            let peopleTags = tags.filter { $0.namespace?.lowercased() == "people" }
-            let oneYearAgo = Calendar.current.date(byAdding: .year, value: -1, to: Date()) ?? Date()
-            let scoredPeople: [(tag: TagSuggestion, hasRecent: Bool)] = peopleTags.map { person in
-                let photos = tagPhotosSnapshot[person.fullPath.lowercased()] ?? []
-                let hasRecent = photos.contains { ($0.dateTaken ?? .distantPast) > oneYearAgo }
-                return (person, hasRecent)
-            }
-            let computedPeople = scoredPeople
-                .sorted { a, b in
-                    if a.hasRecent != b.hasRecent { return a.hasRecent }
-                    return a.tag.count > b.tag.count
-                }
-                .map(\.tag)
+            let (tags, people) = TagIndex.aggregateTagsAndPeople(
+                photosForTag: tagPhotosSnapshot,
+                canonicalPath: canonicalPathSnapshot
+            )
 
             await MainActor.run { [weak self] in
                 guard let self, self.tagBuildGeneration == generation else { return }
                 self.allTags = tags
-                self.topPeople = computedPeople
-                Log.index.info("Tags: \(tags.count) unique, \(computedPeople.count) people")
+                self.topPeople = people
+                Log.index.info("Tags: \(tags.count) unique, \(people.count) people")
                 // Tag aggregation populates the widget Tags picker — re-export
                 // so the catalog reflects the latest set.
                 self.exportWidgetSnapshot()
             }
         }
-
     }
 
     /// Background-task entry point. Refreshes contacts (in case the user added
@@ -1288,51 +1197,7 @@ final class GalleryManager {
     }
 
     func search(query: String, requiredTags: [TagSuggestion] = []) -> [PhotoFile] {
-        var results = _sortedPhotos
-
-        // Apply AND filter for each required tag. Places/* matches as a path
-        // prefix so filtering by "Places/Argentina" surfaces every photo nested
-        // under Argentina, not just ones tagged exactly at country level.
-        for tag in requiredTags {
-            let tagPath = tag.fullPath.lowercased()
-            let isPlaces = tag.namespace?.lowercased() == "places"
-            results = results.filter { photo in
-                photo.hierarchicalTags.contains { ht in
-                    let hp = ht.fullPath.lowercased()
-                    if hp == tagPath { return true }
-                    if isPlaces, hp.hasPrefix(tagPath + "/") { return true }
-                    return false
-                }
-            }
-        }
-
-        guard !query.isEmpty else {
-            if !requiredTags.isEmpty {
-                Log.search.debug("tags:\(requiredTags.map(\.displayName)) → \(results.count) matches")
-            }
-            return results
-        }
-
-        let q = query.lowercased()
-        // If query matches a known tag path exactly, filter by that tag.
-        let matchedTag = allTags.first { $0.fullPath.lowercased() == q }
-        if let matchedTag {
-            let isPlaces = matchedTag.namespace?.lowercased() == "places"
-            results = results.filter { photo in
-                photo.hierarchicalTags.contains { ht in
-                    let hp = ht.fullPath.lowercased()
-                    if hp == q { return true }
-                    if isPlaces, hp.hasPrefix(q + "/") { return true }
-                    return false
-                }
-            }
-        } else {
-            results = results.filter { photo in
-                searchIndex[photo.id]?.contains(q) ?? false
-            }
-        }
-        Log.search.debug("\"\(query)\" tags:\(requiredTags.map(\.displayName)) → \(results.count) matches\(matchedTag != nil ? " (exact tag)" : "")")
-        return results
+        searchService.search(query: query, requiredTags: requiredTags, allTags: allTags)
     }
 
     // MARK: - Collections Helpers
@@ -1384,7 +1249,7 @@ final class GalleryManager {
     /// The photo chosen as the card image for a person, or the most recent tagged
     /// photo if none was explicitly set.
     func featuredPhoto(for tag: TagSuggestion) -> PhotoFile? {
-        if let id = featuredPhotoByPerson[tag.fullPath], let photo = _photoByID[id] {
+        if let id = featuredPhotoByPerson[tag.fullPath], let photo = searchService.photo(byID: id) {
             return photo
         }
         return photos(forTag: tag).first
@@ -1460,7 +1325,7 @@ final class GalleryManager {
 
     /// Resolve photo IDs from a memory back to PhotoFile instances.
     func photos(for memory: Memory) -> [PhotoFile] {
-        memory.photoIDs.compactMap { _photoByID[$0] }
+        memory.photoIDs.compactMap { searchService.photo(byID: $0) }
     }
 
     /// One-shot diagnostic dump covering the inputs `generateMemories` consumes:

@@ -88,8 +88,11 @@ struct PhotoGridScreen: View {
     }
 
     // Cheap identity for the photos input: count + first/last date catches
-    // both re-scans (count changes) and enrichment (dates change).
-    private struct FilterKey: Equatable {
+    // both re-scans (count changes) and enrichment (dates change). Exposed
+    // as internal so unit tests can build a FilterKey without going through
+    // the SwiftUI view — `private` would make it unreachable from the test
+    // bundle even with `@testable import`.
+    struct FilterKey: Equatable {
         let count: Int
         let firstDate: Date?
         let lastDate: Date?

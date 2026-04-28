@@ -1,8 +1,5 @@
 import Foundation
 import UIKit
-import ImageIO
-import UniformTypeIdentifiers
-import AVFoundation
 import Contacts
 import Observation
 import os
@@ -83,6 +80,7 @@ final class GalleryManager {
     private let searchService = SearchIndex()
     private let tagService = TagIndex()
     private let thumbnailService = ThumbnailService()
+    private let widgetExport = WidgetExportScheduler()
     /// NotificationCenter observer tokens. Set once in `init()` (on main),
     /// read once in `deinit` (on whatever thread released the last reference).
     /// `@ObservationIgnored` so the `@Observable` macro doesn't synthesize
@@ -712,13 +710,8 @@ final class GalleryManager {
     ///
     /// Birthday resolution happens here on the main actor — we walk every
     /// People/* tag through `effectiveContact(forPersonPath:displayName:)` so
-    /// both manual links and the auto-match-by-name fallback are honored, and
-    /// keep `Contacts.framework` out of the exporter.
-    /// In-flight debounced export. Successive calls within the coalesce window
-    /// cancel the previous task so only the newest snapshot (with the latest
-    /// `allPhotos` / `allTags` / `memories`) actually runs.
-    private var pendingWidgetExport: Task<Void, Never>?
-
+    /// both manual links and the auto-match-by-name fallback are honored,
+    /// keeping `Contacts.framework` out of the exporter.
     func exportWidgetSnapshot() {
         let cal = Calendar.current
         let today = cal.dateComponents([.month, .day], from: Date())
@@ -735,23 +728,14 @@ final class GalleryManager {
                 ))
             }
         }
-        let inputs = WidgetSnapshotExporter.Inputs(
+        widgetExport.schedule(WidgetSnapshotExporter.Inputs(
             allPhotos: allPhotos,
             memories: memories,
             allTags: allTags,
             rootFolder: rootFolder,
             leafFolders: _cachedLeafFolders,
             todayBirthdays: birthdays
-        )
-        // 200ms coalesce: a single scan often fires this 3× in quick
-        // succession (post-scan + post-tag-aggregation + post-memory-regen).
-        // Cancel the prior task so we run once with the freshest state.
-        pendingWidgetExport?.cancel()
-        pendingWidgetExport = Task.detached(priority: .utility) {
-            try? await Task.sleep(nanoseconds: 200_000_000)
-            guard !Task.isCancelled else { return }
-            await WidgetSnapshotExporter.shared.export(inputs)
-        }
+        ))
     }
 
     var leafFolders: [PhotoFolder] { _cachedLeafFolders }

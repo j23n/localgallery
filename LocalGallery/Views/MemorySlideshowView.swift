@@ -26,6 +26,7 @@ struct MemorySlideshowView: View {
     private let pauseHoldDelay: Double = 0.2
 
     @State private var index: Int = 0
+    @State private var underlayIndex: Int = 0
     @State private var progress: Double = 0
     @State private var isPaused: Bool = false
     @State private var slideStart: Date = Date()
@@ -49,7 +50,7 @@ struct MemorySlideshowView: View {
                     Color.black
 
                     if !photos.isEmpty {
-                        let prev = photos[(index - 1 + photos.count) % photos.count]
+                        let prev = photos[underlayIndex % photos.count]
                         let cur  = photos[index]
 
                         // Underneath = prev (held centered) so we always have
@@ -244,6 +245,7 @@ struct MemorySlideshowView: View {
 
     private func goPrev() {
         guard !photos.isEmpty else { return }
+        underlayIndex = index
         withAnimation(.easeInOut(duration: 0.55)) {
             index = (index - 1 + photos.count) % photos.count
         }
@@ -252,6 +254,7 @@ struct MemorySlideshowView: View {
 
     private func goNext() {
         guard !photos.isEmpty else { return }
+        underlayIndex = index
         withAnimation(.easeInOut(duration: 0.55)) {
             index = (index + 1) % photos.count
         }
@@ -285,6 +288,7 @@ struct MemorySlideshowView: View {
                 progress = p
                 if p >= 1 {
                     progress = 0
+                    underlayIndex = index
                     withAnimation(.easeInOut(duration: 0.55)) {
                         index = (index + 1) % photos.count
                     }

@@ -27,10 +27,17 @@ struct SettingsView: View {
                     } label: {
                         Label("Reload Library", systemImage: "arrow.clockwise")
                     }
+                    .disabled(store.isScanning)
 
                     if let lastSync = store.lastSyncedAt {
-                        LabeledContent("Last Synced") {
-                            Text(lastSync, style: .relative)
+                        LabeledContent("Last Synced", value: lastSync, format: .dateTime)
+                    }
+
+                    if store.isScanning {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                            Text("Scanning folder…")
+                                .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
                     }
@@ -70,13 +77,6 @@ struct SettingsView: View {
                     LabeledContent("Version", value: appVersion)
                 }
 
-                Section {
-                    Text("LocalGallery — read-only viewer")
-                        .font(.footnote)
-                        .foregroundStyle(.tertiary)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .listRowBackground(Color.clear)
-                }
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
@@ -118,9 +118,7 @@ struct SettingsView: View {
     }
 
     private var appVersion: String {
-        let short = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0"
-        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1"
-        return "\(short) (\(build))"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"
     }
 }
 

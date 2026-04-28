@@ -61,7 +61,7 @@ struct TagsWidget: Widget {
     var body: some WidgetConfiguration {
         AppIntentConfiguration(kind: kind, intent: TagsWidgetIntent.self, provider: TagsProvider()) { entry in
             TagsWidgetEntryView(entry: entry)
-                .containerBackground(for: .widget) { Color.black }
+                .containerBackground(for: .widget) { WidgetBackgroundImage(image: entry.image) }
         }
         .configurationDisplayName("Tags")
         .description("Rotating photo from your library matching the chosen tags.")
@@ -150,7 +150,6 @@ struct TagsWidgetEntryView: View {
             )
         } else {
             let hero = WidgetHeroView(
-                image: entry.image,
                 title: entry.label,
                 subtitle: entry.ref?.date.map(WidgetDateFormat.shared.string(from:))
             )

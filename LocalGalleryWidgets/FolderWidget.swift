@@ -56,7 +56,7 @@ struct FolderWidget: Widget {
     var body: some WidgetConfiguration {
         AppIntentConfiguration(kind: kind, intent: FolderWidgetIntent.self, provider: FolderProvider()) { entry in
             FolderWidgetEntryView(entry: entry)
-                .containerBackground(for: .widget) { Color.black }
+                .containerBackground(for: .widget) { WidgetBackgroundImage(image: entry.image) }
         }
         .configurationDisplayName("Folder")
         .description("Rotating photo from a folder of your choice.")
@@ -127,7 +127,6 @@ struct FolderWidgetEntryView: View {
     var body: some View {
         if let id = entry.folderId, entry.ref != nil {
             let hero = WidgetHeroView(
-                image: entry.image,
                 title: entry.folderName ?? "",
                 subtitle: entry.ref?.date.map(WidgetDateFormat.shared.string(from:))
             )

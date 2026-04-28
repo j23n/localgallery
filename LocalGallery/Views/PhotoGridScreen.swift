@@ -30,6 +30,7 @@ struct PhotoGridScreen: View {
     var initialTags: [TagSuggestion] = []
 
     @Environment(GalleryStore.self) private var store
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
     @AppStorage("gridSizeTier") private var sizeTier: Int = 0
 
     @State private var query: String = ""
@@ -53,6 +54,7 @@ struct PhotoGridScreen: View {
     // Select mode
     @State private var selectMode = false
     @State private var selected: Set<UUID> = []
+    @State private var hasSeededInitialTags = false
 
     // Share sheet (share an arbitrary list of URLs)
     @State private var shareURLs: [URL]?
@@ -193,7 +195,7 @@ struct PhotoGridScreen: View {
     var body: some View {
         GeometryReader { geo in
             let width = geo.size.width
-            let isLandscape = geo.size.width > geo.size.height
+            let isLandscape = verticalSizeClass == .compact
             let grid = grid(isLandscape: isLandscape)
             let cell = grid.cellSize(for: width)
 
@@ -201,10 +203,7 @@ struct PhotoGridScreen: View {
                 ScrollView {
                     Color.clear.frame(height: 0).id("__top__")
 
-                    // Static subtitle line directly under the system large
-                    // title — only shown when not using the pinned visible-
-                    // date-range bar (which lives in safeAreaInset).
-                    if !showVisibleDateRange && hasSubtitleContent {
+                    if hasSubtitleContent {
                         inContentSubtitle(displaySubtitle ?? "")
                     }
 
@@ -265,7 +264,6 @@ struct PhotoGridScreen: View {
                     }
                 }
                 .scrollDismissesKeyboard(.interactively)
-                .softTopScrollEdge()
                 .refreshable { await store.rescan() }
                 .overlay(alignment: .trailing) {
                     if yearsCache.count > 1 && !selectMode {
@@ -280,35 +278,31 @@ struct PhotoGridScreen: View {
                 .onChange(of: scrollToTopTrigger) {
                     withAnimation { proxy.scrollTo("__top__", anchor: .top) }
                 }
+                .simultaneousGesture(
+                    MagnificationGesture()
+                        .onEnded { scale in
+                            if scale > 1.15 {
+                                sizeTier = max(0, sizeTier - 1)
+                            } else if scale < 0.85 {
+                                sizeTier = min(GridLayoutConfig.tierCount - 1, sizeTier + 1)
+                            }
+                        }
+                )
             }
         }
         .background(Design.bg)
         .navigationTitle(displayTitle)
         .navigationBarTitleDisplayMode(isRoot ? .large : .inline)
         .toolbar { toolbarContent }
-        .safeAreaInset(edge: .top, spacing: 0) {
-            // Pinned date-range bar for the Photos tab — sits between the nav
-            // bar and the scroll content so the range stays visible (and
-            // updates) as the user scrolls through their library. The bar's
-            // height is reserved unconditionally (when this flag is on) so
-            // the grid doesn't shift down a frame after the first section
-            // reports its `onAppear`.
-            if showVisibleDateRange {
-                pinnedSubtitleBar(displaySubtitle ?? "")
-            }
-        }
         .task(id: filterKey) {
-            // Seed tags on first appearance when a deep link supplied them.
-            // Re-mounts (via the parent's `.id(...)` whenever seedTags
-            // changes) reset @State, so the `activeTags.isEmpty` check is
-            // the only guard we need against re-seeding over user edits.
-            if !initialTags.isEmpty && activeTags.isEmpty {
+            // Seed only once per deep-link mount. Using a flag rather than
+            // `activeTags.isEmpty` prevents re-seeding when the user removes
+            // all tag chips (which also makes activeTags empty).
+            if !initialTags.isEmpty && !hasSeededInitialTags {
+                hasSeededInitialTags = true
                 activeTags = initialTags
                 return
             }
-            // Stale section counts would survive a filter change otherwise —
-            // sections are re-keyed but the old IDs linger until SwiftUI
-            // recycles the cells, briefly polluting the date range.
             visibleSectionCounts.removeAll()
             await recomputeFilter()
         }
@@ -341,25 +335,6 @@ struct PhotoGridScreen: View {
             .padding(.horizontal, 20)
             .padding(.top, 4)
             .padding(.bottom, 8)
-    }
-
-    private func pinnedSubtitleBar(_ text: String) -> some View {
-        // Render a non-breaking space when empty so the bar reserves its
-        // height before the first section's `onAppear` populates the date
-        // range — without this, the grid shifts down a frame on launch.
-        Text(text.isEmpty ? "\u{00A0}" : text)
-            .font(.system(size: 12, weight: .medium, design: .rounded))
-            .foregroundStyle(Design.ink2)
-            .lineLimit(1)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 20)
-            .padding(.vertical, 6)
-            .background(.ultraThinMaterial)
-            .overlay(alignment: .bottom) {
-                Rectangle()
-                    .fill(Design.separator)
-                    .frame(height: 0.5)
-            }
     }
 
     private var tagPills: some View {
@@ -517,6 +492,12 @@ struct PhotoGridScreen: View {
                 } label: {
                     Label("Share", systemImage: "square.and.arrow.up")
                 }
+                Button {
+                    selectMode = true
+                    selected.insert(photo.id)
+                } label: {
+                    Label("Select", systemImage: "checkmark.circle")
+                }
                 if let person = featureContextPerson {
                     Button {
                         store.setFeaturedPhoto(personPath: person.fullPath, photoID: photo.id)
@@ -539,15 +520,33 @@ struct PhotoGridScreen: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .topBarLeading) {
-            // Only Cancel lives on the leading side now — the gear button
-            // moved to the trailing group so the title is unambiguously
-            // left-aligned beside the system large title.
             if selectMode {
                 Button("Cancel") {
                     selectMode = false
                     selected.removeAll()
                 }
                 .foregroundStyle(Design.accentColor)
+            }
+        }
+
+        if showVisibleDateRange && !selectMode {
+            ToolbarItem(placement: .principal) {
+                Button {
+                    scrollToTopTrigger.toggle()
+                } label: {
+                    VStack(spacing: 1) {
+                        Text(title)
+                            .font(.headline)
+                            .fontWeight(.semibold)
+                        if let sub = displaySubtitle, !sub.isEmpty {
+                            Text(sub)
+                                .font(.caption2)
+                                .foregroundStyle(Design.ink2)
+                        }
+                    }
+                    .foregroundStyle(Design.ink)
+                }
+                .buttonStyle(.plain)
             }
         }
 
@@ -569,23 +568,6 @@ struct PhotoGridScreen: View {
                     .labelStyle(.titleAndIcon)
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Design.accentColor)
-                }
-
-                Button {
-                    selectMode = true
-                    selected.removeAll()
-                } label: {
-                    Image(systemName: "checkmark.circle")
-                }
-
-                Button { scrollToTopTrigger.toggle() } label: {
-                    Image(systemName: "arrow.up")
-                }
-
-                Button {
-                    sizeTier = (sizeTier + 1) % GridLayoutConfig.tierCount
-                } label: {
-                    Image(systemName: GridLayoutConfig(sizeTier: sizeTier, isLandscape: false).gridIconName)
                 }
 
                 if isRoot {
@@ -660,8 +642,9 @@ struct PhotoGridScreen: View {
         // Places/* are virtual parent tags — no photo carries them exactly,
         // but every nested leaf (Places/Argentina/Buenos Aires/...) should
         // match. Match by prefix for Places, exact otherwise.
-        let snapshotRequiredTags: [(path: String, isPlaces: Bool)] = activeTags.map {
-            ($0.fullPath.lowercased(), $0.namespace?.lowercased() == "places")
+        let snapshotRequiredTags: [(path: String, isPrefixMatch: Bool)] = activeTags.map {
+            let ns = $0.namespace?.lowercased()
+            return ($0.fullPath.lowercased(), ns == "places" || ns == "objects" || ns == "scenes")
         }
 
         let result: (filtered: [PhotoFile], sections: [PhotoSection], years: [(String, String)]) =
@@ -674,7 +657,7 @@ struct PhotoGridScreen: View {
                     return snapshotRequiredTags.allSatisfy { required in
                         photoPaths.contains { hp in
                             if hp == required.path { return true }
-                            if required.isPlaces, hp.hasPrefix(required.path + "/") { return true }
+                            if required.isPrefixMatch, hp.hasPrefix(required.path + "/") { return true }
                             return false
                         }
                     }

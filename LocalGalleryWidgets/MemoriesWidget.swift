@@ -7,7 +7,7 @@ struct MemoriesWidget: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: kind, provider: MemoriesProvider()) { entry in
             MemoriesWidgetEntryView(entry: entry)
-                .containerBackground(for: .widget) { Color.black }
+                .containerBackground(for: .widget) { WidgetBackgroundImage(image: entry.image) }
         }
         .configurationDisplayName("Memories")
         .description("On this day, years ago, and birthdays from your library.")
@@ -73,7 +73,6 @@ struct MemoriesWidgetEntryView: View {
     @ViewBuilder
     private func heroLink(item: MemorySnapshotItem) -> some View {
         let hero = WidgetHeroView(
-            image: entry.image,
             title: item.title,
             subtitle: item.subtitle,
             glyph: item.kind == .birthday ? "gift.fill" : nil

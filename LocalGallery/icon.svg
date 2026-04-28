@@ -1,100 +1,59 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#1a1a2e"/>
-      <stop offset="100%" stop-color="#16213e"/>
+    <!-- Orange background -->
+    <linearGradient id="bg" x1="0" y1="0" x2="1024" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#E8871E"/>
+      <stop offset="100%" stop-color="#B05A0A"/>
     </linearGradient>
-    <linearGradient id="folder1" x1="0" y1="0" x2="0.3" y2="1">
-      <stop offset="0%" stop-color="#e94560"/>
-      <stop offset="100%" stop-color="#c23152"/>
+    <!-- Neutral beige folder -->
+    <linearGradient id="folderBody" x1="512" y1="320" x2="512" y2="810" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#F5EADB"/>
+      <stop offset="100%" stop-color="#E2CDAF"/>
     </linearGradient>
-    <linearGradient id="folder2" x1="0" y1="0" x2="0.3" y2="1">
-      <stop offset="0%" stop-color="#f5a623"/>
-      <stop offset="100%" stop-color="#e8931f"/>
+    <linearGradient id="folderTab" x1="300" y1="220" x2="300" y2="320" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FAF2E8"/>
+      <stop offset="100%" stop-color="#EEDDCA"/>
     </linearGradient>
-    <linearGradient id="folder3" x1="0" y1="0" x2="0.3" y2="1">
-      <stop offset="0%" stop-color="#0f3460"/>
-      <stop offset="100%" stop-color="#533483"/>
+    <!-- Sky gradient for photo -->
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#5DADE2"/>
+      <stop offset="100%" stop-color="#AED6F1"/>
     </linearGradient>
-    <linearGradient id="photoShine" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="rgba(255,255,255,0.15)"/>
-      <stop offset="100%" stop-color="rgba(255,255,255,0)"/>
-    </linearGradient>
-    <clipPath id="roundedIcon">
-      <rect width="1024" height="1024" rx="224" ry="224"/>
-    </clipPath>
+    <filter id="folderShadow">
+      <feDropShadow dx="0" dy="8" stdDeviation="20" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+    <filter id="polaroidShadow">
+      <feDropShadow dx="0" dy="6" stdDeviation="12" flood-color="#000" flood-opacity="0.3"/>
+    </filter>
   </defs>
 
-  <g clip-path="url(#roundedIcon)">
-    <!-- Background -->
-    <rect width="1024" height="1024" fill="url(#bg)"/>
+  <!-- Background -->
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+  <ellipse cx="512" cy="540" rx="380" ry="300" fill="#fff" opacity="0.06"/>
 
-    <!-- Subtle grid texture -->
-    <g opacity="0.04" stroke="#ffffff" stroke-width="1">
-      <line x1="0" y1="256" x2="1024" y2="256"/>
-      <line x1="0" y1="512" x2="1024" y2="512"/>
-      <line x1="0" y1="768" x2="1024" y2="768"/>
-      <line x1="256" y1="0" x2="256" y2="1024"/>
-      <line x1="512" y1="0" x2="512" y2="1024"/>
-      <line x1="768" y1="0" x2="768" y2="1024"/>
-    </g>
+  <!-- FOLDER -->
+  <g filter="url(#folderShadow)">
+    <path d="M140,320 L140,255 Q140,220 175,220 L375,220 Q405,220 418,250 L445,320" fill="url(#folderTab)"/>
+    <rect x="112" y="320" width="800" height="490" rx="32" fill="url(#folderBody)"/>
+  </g>
 
-    <!-- Back folder (deep purple/blue) -->
-    <g transform="translate(152, 280)">
-      <!-- Tab -->
-      <path d="M0,60 Q0,20 40,20 L180,20 Q200,20 210,40 L240,80 Q250,100 270,100 L680,100 Q720,100 720,140 L720,520 Q720,560 680,560 L40,560 Q0,560 0,520 Z" fill="url(#folder3)" opacity="0.5"/>
-    </g>
+  <!-- POLAROID (lip on left, slightly tilted) -->
+  <g filter="url(#polaroidShadow)" transform="rotate(-2, 512, 565)">
+    <!-- White frame -->
+    <rect x="242" y="375" width="540" height="380" rx="4" fill="#FFFFFF"/>
+    <rect x="242" y="375" width="540" height="380" rx="4" fill="none" stroke="#E8E4E0" stroke-width="1"/>
 
-    <!-- Middle folder (amber) -->
-    <g transform="translate(172, 310)">
-      <!-- Tab -->
-      <path d="M0,60 Q0,20 40,20 L180,20 Q200,20 210,40 L240,80 Q250,100 270,100 L680,100 Q720,100 720,140 L720,520 Q720,560 680,560 L40,560 Q0,560 0,520 Z" fill="url(#folder2)" opacity="0.6"/>
-    </g>
+    <!-- Photo area (offset right, leaving thick left lip) -->
+    <rect x="332" y="399" width="426" height="332" rx="2" fill="url(#sky)"/>
 
-    <!-- Front folder (coral/red) — the main one -->
-    <g transform="translate(192, 340)">
-      <!-- Folder tab -->
-      <path d="M0,60 Q0,20 40,20 L170,20 Q190,20 200,40 L230,80 Q240,100 260,100 L640,100 Q680,100 680,100 L680,100" fill="url(#folder1)" opacity="0.9"/>
-      <!-- Folder body -->
-      <rect x="0" y="80" width="680" height="420" rx="40" ry="40" fill="url(#folder1)"/>
-
-      <!-- Photo thumbnails inside the folder -->
-      <!-- Row 1 -->
-      <rect x="48" y="130" width="175" height="145" rx="12" fill="#e8d5b7" opacity="0.9"/>
-      <rect x="248" y="130" width="175" height="145" rx="12" fill="#87CEEB" opacity="0.9"/>
-      <rect x="448" y="130" width="185" height="145" rx="12" fill="#98D8AA" opacity="0.9"/>
-
-      <!-- Row 2 -->
-      <rect x="48" y="300" width="175" height="145" rx="12" fill="#DDA0DD" opacity="0.9"/>
-      <rect x="248" y="300" width="175" height="145" rx="12" fill="#F4A460" opacity="0.9"/>
-      <rect x="448" y="300" width="185" height="145" rx="12" fill="#B0C4DE" opacity="0.9"/>
-
-      <!-- Tiny mountain/landscape icons in photos -->
-      <!-- Photo 1: warm landscape -->
-      <path d="M48,255 L100,200 L135,230 L170,190 L223,255 Z" fill="#c4956a" opacity="0.5"/>
-      <circle cx="185" cy="155" r="18" fill="#f0c040" opacity="0.5"/>
-
-      <!-- Photo 2: sky scene -->
-      <path d="M248,255 L310,195 L350,225 L390,185 L423,255 Z" fill="#5fa8d3" opacity="0.4"/>
-
-      <!-- Photo 3: green landscape -->
-      <path d="M448,255 L510,200 L560,230 L600,195 L633,255 Z" fill="#6ab87a" opacity="0.4"/>
-
-      <!-- Photo 4: abstract -->
-      <circle cx="135" cy="365" r="35" fill="#c080c0" opacity="0.3"/>
-
-      <!-- Photo 5: warm tones -->
-      <path d="M248,425 L310,360 L350,390 L390,350 L423,425 Z" fill="#d48840" opacity="0.4"/>
-
-      <!-- Photo 6: cool -->
-      <path d="M448,425 L510,370 L560,400 L600,365 L633,425 Z" fill="#8aa8c8" opacity="0.4"/>
-
-      <!-- Shine overlay on folder -->
-      <rect x="0" y="80" width="680" height="420" rx="40" ry="40" fill="url(#photoShine)"/>
-    </g>
-
-    <!-- Floating accent dot -->
-    <circle cx="820" cy="200" r="24" fill="#e94560" opacity="0.3"/>
-    <circle cx="780" cy="240" r="12" fill="#f5a623" opacity="0.25"/>
+    <!-- Landscape scene inside photo -->
+    <!-- Sun -->
+    <circle cx="670" cy="445" r="30" fill="#F4D03F" opacity="0.8"/>
+    <!-- Far mountains -->
+    <path d="M332,640 L410,560 L470,600 L540,530 L610,580 L680,540 L758,640 Z" fill="#5B8C5A" opacity="0.5"/>
+    <!-- Near hills -->
+    <path d="M332,700 L400,620 L470,665 L545,600 L620,650 L690,610 L758,700 Z" fill="#4A7C49" opacity="0.7"/>
+    <!-- Ground -->
+    <rect x="332" y="685" width="426" height="46" fill="#6AAF6A" opacity="0.6"/>
   </g>
 </svg>

@@ -4,8 +4,8 @@ import SwiftUI
 
 enum Design {
     // Warm, stock-adjacent palette (#FAF7F2 canvas, muted amber accent).
-    static let accentColor  = Color(red: 0.769, green: 0.541, blue: 0.243)  // #C48A3E
-    static let accentSoft   = Color(red: 0.769, green: 0.541, blue: 0.243).opacity(0.13)
+    static let accentColor  = Color("AccentColor")
+    static let accentSoft   = Color("AccentColor").opacity(0.13)
 
     static let bg           = Color(red: 0.980, green: 0.969, blue: 0.949)  // #FAF7F2
     static let bgCard       = Color.white                                    // #FFFFFF

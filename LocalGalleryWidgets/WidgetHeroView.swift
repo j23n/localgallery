@@ -1,55 +1,49 @@
 import SwiftUI
 import WidgetKit
 
-/// Single hero-photo layout used by all three widgets across all sizes.
-/// Differs only in font sizing per family.
+/// Full-bleed background for use inside `.containerBackground(for: .widget)`.
+/// Renders the photo edge-to-edge with a bottom gradient scrim so the caption
+/// text in the content layer remains readable. When `image` is nil, shows a
+/// dark gradient placeholder.
+struct WidgetBackgroundImage: View {
+    let image: UIImage?
+
+    var body: some View {
+        if let image {
+            Image(uiImage: image)
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .overlay(alignment: .bottom) {
+                    LinearGradient(
+                        colors: [Color.black.opacity(0), Color.black.opacity(0.6)],
+                        startPoint: .top, endPoint: .bottom
+                    )
+                    .frame(height: 120)
+                }
+        } else {
+            LinearGradient(
+                colors: [Color(white: 0.18), Color(white: 0.08)],
+                startPoint: .top, endPoint: .bottom
+            )
+        }
+    }
+}
+
+/// Caption overlay rendered in the widget's content layer (not containerBackground).
+/// Shows title, optional subtitle, and an optional SF Symbol glyph above the title.
 struct WidgetHeroView: View {
     @Environment(\.widgetFamily) private var family
-    let image: UIImage?
     let title: String
     let subtitle: String?
-    /// When non-nil, an SF Symbol is rendered above the title (e.g. "gift" for birthdays).
     let glyph: String?
 
-    init(image: UIImage?, title: String, subtitle: String? = nil, glyph: String? = nil) {
-        self.image = image
+    init(title: String, subtitle: String? = nil, glyph: String? = nil) {
         self.title = title
         self.subtitle = subtitle
         self.glyph = glyph
     }
 
     var body: some View {
-        ZStack(alignment: .bottomLeading) {
-            background
-            captionOverlay
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .clipped()
-    }
-
-    @ViewBuilder
-    private var background: some View {
-        if let image {
-            // `.fill` + explicit max-frame + `.clipped()` is the canonical
-            // edge-to-edge pattern. Without the frame, SwiftUI may resolve the
-            // image's intrinsic size and leave the widget's black container
-            // background visible as letterbox bars when the source aspect
-            // ratio differs from the widget family's.
-            Image(uiImage: image)
-                .resizable()
-                .aspectRatio(contentMode: .fill)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .clipped()
-        } else {
-            LinearGradient(
-                colors: [Color(white: 0.18), Color(white: 0.08)],
-                startPoint: .top, endPoint: .bottom
-            )
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-    }
-
-    private var captionOverlay: some View {
         VStack(alignment: .leading, spacing: 2) {
             Spacer(minLength: 0)
             if let glyph {
@@ -71,16 +65,7 @@ struct WidgetHeroView: View {
             }
         }
         .padding(captionPadding)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            LinearGradient(
-                colors: [Color.black.opacity(0), Color.black.opacity(0.55)],
-                startPoint: .top, endPoint: .bottom
-            )
-            .frame(height: gradientHeight)
-            .frame(maxHeight: .infinity, alignment: .bottom)
-            .allowsHitTesting(false)
-        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
     }
 
     private var titleFont: Font {
@@ -111,14 +96,6 @@ struct WidgetHeroView: View {
         case .systemSmall:  return EdgeInsets(top: 8, leading: 10, bottom: 8, trailing: 10)
         case .systemMedium: return EdgeInsets(top: 10, leading: 14, bottom: 12, trailing: 14)
         default:            return EdgeInsets(top: 12, leading: 18, bottom: 16, trailing: 18)
-        }
-    }
-
-    private var gradientHeight: CGFloat {
-        switch family {
-        case .systemSmall:  return 60
-        case .systemMedium: return 80
-        default:            return 120
         }
     }
 }

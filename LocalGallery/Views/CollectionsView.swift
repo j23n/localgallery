@@ -522,7 +522,10 @@ struct MemoryCardView: View {
     let memory: Memory
     @Environment(GalleryStore.self) private var store
 
-    private var coverURL: URL? { store.photo(byID: memory.coverPhotoID)?.url }
+    private var coverURL: URL? {
+        if let url = store.photo(byID: memory.coverPhotoID)?.url { return url }
+        return memory.photoIDs.lazy.compactMap { store.photo(byID: $0)?.url }.first
+    }
 
     var body: some View {
         ZStack(alignment: .bottomLeading) {

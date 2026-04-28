@@ -308,22 +308,24 @@ actor WidgetSnapshotExporter {
             }
         }
 
-        // 3. Fallback: if nothing applies today, surface a "Recent" item so the
-        //    widget never goes empty for users with photos in their library.
+        // 3. Fallback: use any other stored memory (trip, person, folder, etc.)
+        //    so the widget always shows real content when memories exist.
         if items.isEmpty {
-            let recents = topRecentPhotos(from: allPhotos, limit: 8)
-                .map { makeRef(photo: $0, folderIdByURL: folderIdByURL) }
-            if !recents.isEmpty {
-                items.append(MemorySnapshotItem(
-                    id: "recent",
-                    kind: .other,
-                    title: "Recently",
-                    subtitle: "From your library",
-                    photoRefs: recents,
-                    validFrom: startOfToday,
-                    validTo: startOfTomorrow,
-                    priority: 10
-                ))
+            let fallback = memories.first { $0.type != .onThisDay && $0.type != .yearsAgo }
+            if let fallback {
+                let refs = orderedRefs(for: fallback, photoByID: photoByID, folderIdByURL: folderIdByURL)
+                if !refs.isEmpty {
+                    items.append(MemorySnapshotItem(
+                        id: fallback.id,
+                        kind: .other,
+                        title: fallback.title,
+                        subtitle: fallback.subtitle,
+                        photoRefs: refs,
+                        validFrom: startOfToday,
+                        validTo: startOfTomorrow,
+                        priority: 10
+                    ))
+                }
             }
         }
 

@@ -38,7 +38,10 @@ final class TagIndex {
                     tagPhotos[leafKey, default: []].append(photo)
                 }
                 canonical[leafKey] = tag.fullPath
-                if isPlaces && isHierarchical {
+                let isHierarchicalNamespace = isPlaces
+                    || tag.namespace?.lowercased() == "objects"
+                    || tag.namespace?.lowercased() == "scenes"
+                if isHierarchicalNamespace && isHierarchical {
                     for depth in 2..<segments.count {
                         let prefixSegments = Array(segments.prefix(depth))
                         let prefixPath = prefixSegments.joined(separator: "/")

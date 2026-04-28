@@ -537,6 +537,11 @@ struct MemoryCardView: View {
                 Rectangle()
                     .fill(Design.bgGrouped)
                     .frame(width: 264, height: 328)
+                    .overlay {
+                        Image(systemName: "photo.on.rectangle")
+                            .font(.system(size: 36, weight: .light))
+                            .foregroundStyle(Design.ink3)
+                    }
             }
 
             LinearGradient(

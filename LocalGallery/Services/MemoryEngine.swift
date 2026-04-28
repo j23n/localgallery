@@ -136,7 +136,7 @@ enum MemoryEngine {
                     photoIDs: ids,
                     coverPhotoID: ids.last!,
                     dateRange: first...last,
-                    score: Double(years.count) * 4.0 + Double(ids.count) * 0.5,
+                    score: Double(years.count) * 4.0 + Double(ids.count) * 0.5 + 20.0,
                     yearsAgo: nil, personName: name
                 ))
             }
@@ -163,7 +163,7 @@ enum MemoryEngine {
                     photoIDs: ids,
                     coverPhotoID: ids[ids.count / 3],
                     dateRange: first...last,
-                    score: Double(ids.count) * 0.8 + spanBonus * 2.0,
+                    score: Double(ids.count) * 0.4 + spanBonus * 1.0,
                     yearsAgo: nil, personName: nil
                 ))
             }
@@ -247,7 +247,7 @@ enum MemoryEngine {
                 )
             }
 
-            // Sort by score, then greedily select top 20 with overlap penalty.
+            // Sort by score, then greedily select top 10 with overlap penalty.
             // Sub-trips are intentionally inside their parent trip's photo set,
             // so they bypass the overlap filter — losing them defeats the goal
             // of surfacing finer-grained legs of long journeys.
@@ -264,7 +264,7 @@ enum MemoryEngine {
                 }
                 selected.append(candidate)
                 usedPhotoIDs.formUnion(candidateSet)
-                if selected.count >= 20 { break }
+                if selected.count >= 10 { break }
             }
 
             return selected
@@ -499,7 +499,7 @@ enum MemoryEngine {
             photoIDs: ids,
             coverPhotoID: ids[ids.count / 3],
             dateRange: first...last,
-            score: Double(ids.count) * 1.5 + Double(days) * 2.0 + 8.0,
+            score: Double(ids.count) * 1.5 + Double(days) * 2.0 + 18.0,
             yearsAgo: nil, personName: nil
         ))
 

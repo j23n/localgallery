@@ -16,19 +16,19 @@ final class GalleryStore {
     private(set) var eventFolders: [PhotoFolder] = []
 
     var folderSortOrder: FolderSortOrder = .nameAscending {
-        didSet { UserDefaults.standard.set(folderSortOrder.rawValue, forKey: "folderSortOrder") }
+        didSet { defaults.set(folderSortOrder.rawValue, forKey: "folderSortOrder") }
     }
 
     var hiddenPeople: Set<String> = [] {
-        didSet { UserDefaults.standard.set(Array(hiddenPeople), forKey: "hiddenPeople") }
+        didSet { defaults.set(Array(hiddenPeople), forKey: "hiddenPeople") }
     }
     /// Person tag paths that are "featured" — sorted to the front of the People rail
     /// and decorated with a star. Stored under the legacy `pinnedPeople` key.
     var featuredPeople: [String] = [] {
-        didSet { UserDefaults.standard.set(featuredPeople, forKey: "pinnedPeople") }
+        didSet { defaults.set(featuredPeople, forKey: "pinnedPeople") }
     }
     var hiddenMemories: Set<String> = [] {
-        didSet { UserDefaults.standard.set(Array(hiddenMemories), forKey: "hiddenMemories") }
+        didSet { defaults.set(Array(hiddenMemories), forKey: "hiddenMemories") }
     }
     /// Per-person featured photo ID. Keyed by person tag fullPath (case-sensitive).
     var featuredPhotoByPerson: [String: UUID] = [:] {
@@ -56,7 +56,7 @@ final class GalleryStore {
     var birthdayMemoriesEnabled: Bool = true {
         didSet {
             guard oldValue != birthdayMemoriesEnabled, !_isInitializing else { return }
-            UserDefaults.standard.set(birthdayMemoriesEnabled, forKey: "birthdayMemoriesEnabled")
+            defaults.set(birthdayMemoriesEnabled, forKey: "birthdayMemoriesEnabled")
             // Force a regenerate so today's rail reflects the toggle change
             // immediately rather than waiting for the daily gate.
             forceRegenerateMemories()
@@ -75,12 +75,20 @@ final class GalleryStore {
     @ObservationIgnored private var memoriesGeneratedDay: Date? {
         didSet { persistMemoriesGeneratedDay() }
     }
-    private let bookmarks = BookmarkManager()
-    private let contactLinker = ContactLinker()
-    private let searchService = SearchIndex()
-    private let tagService = TagIndex()
-    private let thumbnailService = ThumbnailService()
-    private let widgetExport = WidgetExportScheduler()
+    @ObservationIgnored private let bookmarks: BookmarkManager
+    @ObservationIgnored private let contactLinker = ContactLinker()
+    @ObservationIgnored private let searchService = SearchIndex()
+    @ObservationIgnored private let tagService = TagIndex()
+    @ObservationIgnored private let thumbnailService: ThumbnailService
+    @ObservationIgnored private let widgetExport = WidgetExportScheduler()
+
+    // MARK: Injected seams (test-overridable; production uses `.production` /
+    // `.standard` defaults so existing call sites are unchanged).
+
+    @ObservationIgnored private let paths: GalleryPaths
+    @ObservationIgnored let defaults: UserDefaults
+    @ObservationIgnored let clock: any Clock
+    @ObservationIgnored private let contactsService: any ContactsServicing
     /// NotificationCenter observer tokens. Set once in `init()` (on main),
     /// read once in `deinit` (on whatever thread released the last reference).
     /// `@ObservationIgnored` so the `@Observable` macro doesn't synthesize
@@ -91,32 +99,44 @@ final class GalleryStore {
     @ObservationIgnored private nonisolated(unsafe) var significantTimeChangeObserver: Any?
     @ObservationIgnored private nonisolated(unsafe) var contactStoreObserver: Any?
 
-    init() {
-        if let raw = UserDefaults.standard.string(forKey: "folderSortOrder"),
+    init(
+        paths: GalleryPaths = .production,
+        defaults: UserDefaults = .standard,
+        clock: any Clock = SystemClock(),
+        contactsService: any ContactsServicing = LiveContactsService()
+    ) {
+        self.paths = paths
+        self.defaults = defaults
+        self.clock = clock
+        self.contactsService = contactsService
+        self.bookmarks = BookmarkManager(defaults: defaults, bookmarkKey: paths.bookmarkKey)
+        self.thumbnailService = ThumbnailService(thumbnailDir: paths.thumbnailDir)
+
+        if let raw = defaults.string(forKey: "folderSortOrder"),
            let order = FolderSortOrder(rawValue: raw) {
             folderSortOrder = order
         }
-        if let hidden = UserDefaults.standard.array(forKey: "hiddenPeople") as? [String] {
+        if let hidden = defaults.array(forKey: "hiddenPeople") as? [String] {
             hiddenPeople = Set(hidden)
         }
-        if let pinned = UserDefaults.standard.array(forKey: "pinnedPeople") as? [String] {
+        if let pinned = defaults.array(forKey: "pinnedPeople") as? [String] {
             featuredPeople = pinned
         }
-        if let hiddenMem = UserDefaults.standard.array(forKey: "hiddenMemories") as? [String] {
+        if let hiddenMem = defaults.array(forKey: "hiddenMemories") as? [String] {
             hiddenMemories = Set(hiddenMem)
         }
-        if let dict = UserDefaults.standard.dictionary(forKey: "featuredPhotoByPerson") as? [String: String] {
+        if let dict = defaults.dictionary(forKey: "featuredPhotoByPerson") as? [String: String] {
             featuredPhotoByPerson = dict.compactMapValues { UUID(uuidString: $0) }
         }
-        if let raw = UserDefaults.standard.object(forKey: "memoriesGeneratedDay") as? Date {
+        if let raw = defaults.object(forKey: "memoriesGeneratedDay") as? Date {
             memoriesGeneratedDay = raw
         }
-        if let data = UserDefaults.standard.data(forKey: "personContactLinks"),
+        if let data = defaults.data(forKey: "personContactLinks"),
            let dict = try? JSONDecoder().decode([String: PersonLink].self, from: data) {
             personContactLinks = dict
         }
-        if UserDefaults.standard.object(forKey: "birthdayMemoriesEnabled") != nil {
-            birthdayMemoriesEnabled = UserDefaults.standard.bool(forKey: "birthdayMemoriesEnabled")
+        if defaults.object(forKey: "birthdayMemoriesEnabled") != nil {
+            birthdayMemoriesEnabled = defaults.bool(forKey: "birthdayMemoriesEnabled")
         }
         loadMemoriesCache()
 
@@ -187,7 +207,7 @@ final class GalleryStore {
     @ObservationIgnored private var lastWidgetExportDay: Date?
 
     private func refreshWidgetIfDayChanged() {
-        let today = Calendar.current.startOfDay(for: Date())
+        let today = Calendar.current.startOfDay(for: clock.now())
         let reference = lastWidgetExportDay ?? memoriesGeneratedDay
         if let reference, Calendar.current.isDate(reference, inSameDayAs: today) {
             return
@@ -231,37 +251,37 @@ final class GalleryStore {
 
     private func saveCache() {
         guard let root = rootFolder else { return }
-        LibraryCacheStore.save(rootFolder: root, allPhotos: allPhotos)
+        LibraryCacheStore.save(rootFolder: root, allPhotos: allPhotos, to: paths.libraryCacheURL)
     }
 
     private func saveMemoriesCache() {
-        MemoriesCacheStore.save(memories)
+        MemoriesCacheStore.save(memories, to: paths.memoriesCacheURL)
     }
 
     private func loadMemoriesCache() {
-        if let cached = MemoriesCacheStore.load() {
+        if let cached = MemoriesCacheStore.load(from: paths.memoriesCacheURL) {
             self.memories = cached
         }
     }
 
     private func persistMemoriesGeneratedDay() {
         if let day = memoriesGeneratedDay {
-            UserDefaults.standard.set(day, forKey: "memoriesGeneratedDay")
+            defaults.set(day, forKey: "memoriesGeneratedDay")
         } else {
-            UserDefaults.standard.removeObject(forKey: "memoriesGeneratedDay")
+            defaults.removeObject(forKey: "memoriesGeneratedDay")
         }
     }
 
     private func persistFeaturedPhotoByPerson() {
         let stringDict = featuredPhotoByPerson.mapValues { $0.uuidString }
-        UserDefaults.standard.set(stringDict, forKey: "featuredPhotoByPerson")
+        defaults.set(stringDict, forKey: "featuredPhotoByPerson")
     }
 
     private func persistPersonContactLinks() {
         // PersonLink is an enum with associated values, so it round-trips
         // through JSON rather than a flat UserDefaults dict.
         guard let data = try? JSONEncoder().encode(personContactLinks) else { return }
-        UserDefaults.standard.set(data, forKey: "personContactLinks")
+        defaults.set(data, forKey: "personContactLinks")
     }
 
     // MARK: - Contacts
@@ -269,7 +289,7 @@ final class GalleryStore {
     /// Prompt for Contacts access and load on grant. Safe to call repeatedly.
     @discardableResult
     func requestContactsAccess() async -> Bool {
-        let granted = await ContactsService.requestAccess()
+        let granted = await contactsService.requestAccess()
         if granted { await loadContacts() }
         return granted
     }
@@ -280,7 +300,7 @@ final class GalleryStore {
     /// rebuild so the change surfaces without waiting for the daily gate.
     func loadContacts() async {
         let previous = contacts
-        let loaded = await ContactsService.loadContacts()
+        let loaded = await contactsService.loadContacts()
         contacts = loaded
         if ContactLinker.birthdayRelevantSignature(loaded) != ContactLinker.birthdayRelevantSignature(previous) {
             forceRegenerateMemories()
@@ -327,8 +347,11 @@ final class GalleryStore {
     }
 
     @discardableResult
-    private func loadCache() -> Bool {
-        guard let cached = LibraryCacheStore.load() else { return false }
+    internal func loadCache() -> Bool {
+        guard let cached = LibraryCacheStore.load(
+            from: paths.libraryCacheURL,
+            memoriesURL: paths.memoriesCacheURL
+        ) else { return false }
         self.rootFolder = cached.rootFolder
         self.allPhotos = cached.allPhotos
         rebuildSortAndIndex()
@@ -524,7 +547,7 @@ final class GalleryStore {
         tagService.photos(forTag: tag)
     }
 
-    private func rebuildSortAndIndex() {
+    internal func rebuildSortAndIndex() {
         let t = CFAbsoluteTimeGetCurrent()
         searchService.build(allPhotos: allPhotos)
         tagService.build(allPhotos: allPhotos)
@@ -546,10 +569,12 @@ final class GalleryStore {
         let generation = tagBuildGeneration
         let tagPhotosSnapshot = tagService.photosForTag
         let canonicalPathSnapshot = tagService.canonicalPath
+        let nowSnapshot = clock.now()
         Task.detached(priority: .utility) {
             let (tags, people) = TagIndex.aggregateTagsAndPeople(
                 photosForTag: tagPhotosSnapshot,
-                canonicalPath: canonicalPathSnapshot
+                canonicalPath: canonicalPathSnapshot,
+                now: nowSnapshot
             )
 
             await MainActor.run { [weak self] in
@@ -584,7 +609,7 @@ final class GalleryStore {
         // the gate after running so the next foreground entry doesn't re-do
         // the same work. Without this we'd regenerate twice per day on any
         // session where BG ran first.
-        let today = Calendar.current.startOfDay(for: Date())
+        let today = Calendar.current.startOfDay(for: clock.now())
         let alreadyToday = memoriesGeneratedDay.map { Calendar.current.isDate($0, inSameDayAs: today) } ?? false
         if alreadyToday {
             Log.bg.info("Memories already generated today; skipping BG regeneration")
@@ -608,8 +633,8 @@ final class GalleryStore {
 
     /// Trigger memory generation once per day. Called after scan (if no enrichment needed)
     /// or after enrichment completes, so memories always reflect the freshest EXIF/tag/GPS data.
-    private func generateMemoriesIfNeeded() {
-        let today = Calendar.current.startOfDay(for: Date())
+    internal func generateMemoriesIfNeeded() {
+        let today = Calendar.current.startOfDay(for: clock.now())
         let memoriesStale = memoriesGeneratedDay.map { !Calendar.current.isDate($0, inSameDayAs: today) } ?? true
         let memoriesEmpty = memories.isEmpty
         guard (memoriesStale || memoriesEmpty), !allPhotos.isEmpty else { return }
@@ -714,7 +739,7 @@ final class GalleryStore {
     /// keeping `Contacts.framework` out of the exporter.
     func exportWidgetSnapshot() {
         let cal = Calendar.current
-        let today = cal.dateComponents([.month, .day], from: Date())
+        let today = cal.dateComponents([.month, .day], from: clock.now())
         var birthdays: [WidgetSnapshotExporter.BirthdayResolution] = []
         if birthdayMemoriesEnabled {
             for tag in allTags where tag.namespace?.lowercased() == "people" {
@@ -766,7 +791,8 @@ final class GalleryStore {
             contacts: self.contacts,
             personContactLinks: self.personContactLinks,
             contactsByLowerName: self.contactLinker.contactsByLowerName,
-            birthdaysEnabled: self.birthdayMemoriesEnabled
+            birthdaysEnabled: self.birthdayMemoriesEnabled,
+            now: self.clock.now()
         )
 
         let elapsed = (CFAbsoluteTimeGetCurrent() - t) * 1000

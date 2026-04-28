@@ -51,8 +51,9 @@ extension View {
 @MainActor
 final class AppDelegate: NSObject, UIApplicationDelegate {
     /// `BGTaskSchedulerPermittedIdentifiers` whitelists this exact string in
-    /// the Info.plist; both must stay in sync.
-    static let backgroundRefreshIdentifier = "com.localgallery.app.dailyMemories"
+    /// the Info.plist; both must stay in sync. `nonisolated` so the
+    /// `nonisolated static func scheduleBackgroundRefresh()` can read it.
+    nonisolated static let backgroundRefreshIdentifier = "com.localgallery.app.dailyMemories"
 
     /// Owns the BG-task → manager indirection. The `WindowGroup` attaches the
     /// `GalleryManager` once SwiftUI builds the scene. We hold the service
@@ -91,7 +92,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     /// earliest-bound — the actual run is opportunistic and may be skipped.
     /// The foreground catch-up in `GalleryManager.generateMemoriesIfNeeded` is
     /// the safety net for days iOS skips.
-    static func scheduleBackgroundRefresh() {
+    ///
+    /// `nonisolated` so the `didEnterBackgroundNotification` observer (a
+    /// `@Sendable` closure) and the `BGAppRefreshTask` handler can call it
+    /// without hopping back to MainActor — neither needs MainActor state.
+    nonisolated static func scheduleBackgroundRefresh() {
         let request = BGAppRefreshTaskRequest(identifier: backgroundRefreshIdentifier)
         request.earliestBeginDate = Date(timeIntervalSinceNow: 24 * 60 * 60)
         do {
@@ -134,6 +139,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     }
 }
 
+@MainActor
 enum OrientationLock {
     static var current: UIInterfaceOrientationMask = .all
 

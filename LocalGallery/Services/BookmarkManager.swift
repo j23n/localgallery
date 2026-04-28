@@ -11,7 +11,11 @@ import os
 final class BookmarkManager {
     private let defaults: UserDefaults
     private let bookmarkKey: String
-    private(set) var activeURL: URL?
+    /// `nonisolated(unsafe)` so the implicit-nonisolated deinit can read it
+    /// to balance the final `stopAccessingSecurityScopedResource`. Mutations
+    /// happen only from `@MainActor` methods on this instance, so reads from
+    /// deinit observe a stable last-written value.
+    private(set) nonisolated(unsafe) var activeURL: URL?
 
     init(defaults: UserDefaults = .standard, bookmarkKey: String = "rootFolderBookmark") {
         self.defaults = defaults

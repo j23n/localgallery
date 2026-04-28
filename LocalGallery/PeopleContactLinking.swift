@@ -499,7 +499,10 @@ struct LinkedContactsList: View {
         return fmt.string(from: date)
     }
 
-    private func isBirthdayToday(_ contact: ContactInfo) -> Bool {
+    /// `nonisolated` so the synchronous `.sorted` closure (which doesn't
+    /// inherit View's MainActor isolation) can call this. Pure function over
+    /// Sendable inputs — no MainActor state read.
+    private nonisolated func isBirthdayToday(_ contact: ContactInfo) -> Bool {
         guard let m = contact.birthday?.month, let d = contact.birthday?.day else { return false }
         let today = Calendar.current.dateComponents([.month, .day], from: Date())
         return today.month == m && today.day == d

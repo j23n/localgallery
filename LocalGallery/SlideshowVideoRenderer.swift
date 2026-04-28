@@ -151,6 +151,15 @@ enum SlideshowVideoRenderer {
         return pb
     }
 
+    /// `CVPixelBuffer` (a `CVBuffer` class) isn't `Sendable`, but in this
+    /// renderer the buffer is owned by exactly one task and accessed serially
+    /// on the writer queue (locked via `CVPixelBufferLockBaseAddress`). This
+    /// wrapper is the documented escape hatch for handing it across the
+    /// `queue.async` `@Sendable` boundary under Swift 6 strict concurrency.
+    private struct UnsafeSendable<T>: @unchecked Sendable {
+        let value: T
+    }
+
     /// Draws `bottom` (opaque) then `top` blended at `alpha` on top, aspect-fill centered.
     private static func draw(
         into pixelBuffer: CVPixelBuffer,
@@ -160,8 +169,10 @@ enum SlideshowVideoRenderer {
         canvas: CGSize,
         queue: DispatchQueue
     ) async throws {
+        let pb = UnsafeSendable(value: pixelBuffer)
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             queue.async {
+                let pixelBuffer = pb.value
                 CVPixelBufferLockBaseAddress(pixelBuffer, [])
                 defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, []) }
 

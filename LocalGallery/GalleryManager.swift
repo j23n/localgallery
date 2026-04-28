@@ -81,9 +81,15 @@ final class GalleryManager {
     private let thumbnailCache = NSCache<NSURL, UIImage>()
     private let fullImageCache = NSCache<NSURL, UIImage>()
     private let bookmarks = BookmarkManager()
-    private var foregroundObserver: Any?
-    private var significantTimeChangeObserver: Any?
-    private var contactStoreObserver: Any?
+    /// NotificationCenter observer tokens. Set once in `init()` (on main),
+    /// read once in `deinit` (on whatever thread released the last reference).
+    /// `@ObservationIgnored` so the `@Observable` macro doesn't synthesize
+    /// `_foregroundObserver` etc. for these (they aren't view state).
+    /// `nonisolated(unsafe)` lets the implicit-nonisolated deinit access them;
+    /// `Any?` isn't `Sendable`, hence the `(unsafe)`.
+    @ObservationIgnored private nonisolated(unsafe) var foregroundObserver: Any?
+    @ObservationIgnored private nonisolated(unsafe) var significantTimeChangeObserver: Any?
+    @ObservationIgnored private nonisolated(unsafe) var contactStoreObserver: Any?
 
     private let thumbnailDiskCacheDir: URL = {
         let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
@@ -675,7 +681,7 @@ final class GalleryManager {
 
     /// Read capture date from video metadata
     private nonisolated static func readVideoDate(url: URL) async -> Date? {
-        let asset = AVAsset(url: url)
+        let asset = AVURLAsset(url: url)
         guard let creationDate = try? await asset.load(.creationDate),
               let dateValue = try? await creationDate.load(.dateValue) else {
             return nil
@@ -955,17 +961,21 @@ final class GalleryManager {
         }
 
         let enrichedPhotos: [PhotoFile] = await Task.detached(priority: .background) {
-            let fm = FileManager.default
             var result = photos
             let staleIndices = result.indices.filter { result[$0].enrichedFileDate == nil }
 
-            // Enrich stale photos in parallel using TaskGroup
+            // Enrich stale photos in parallel using TaskGroup. Read each
+            // `photo` from `result` *outside* the addTask closure so the
+            // closure captures only `let` values — Swift 6's sending check
+            // won't let us cross the task boundary while a mutable var is
+            // still in scope above. `FileManager.default` is referenced
+            // inline inside the closure for the same reason.
             let batchResults: [EnrichedResult] = await withTaskGroup(of: EnrichedResult?.self) { group in
                 for idx in staleIndices {
+                    let photo = result[idx]
                     group.addTask {
                         guard !Task.isCancelled else { return nil }
-                        let photo = result[idx]
-                        let modDate = (try? fm.attributesOfItem(atPath: photo.url.path)[.modificationDate]) as? Date
+                        let modDate = (try? FileManager.default.attributesOfItem(atPath: photo.url.path)[.modificationDate]) as? Date
 
                         if photo.isVideo {
                             // Videos: use AVAsset.creationDate (embedded capture date)
@@ -2248,12 +2258,12 @@ final class GalleryManager {
         try Task.checkCancellation()
 
         if isVideo {
-            let asset = AVAsset(url: url)
+            let asset = AVURLAsset(url: url)
             let generator = AVAssetImageGenerator(asset: asset)
             generator.appliesPreferredTrackTransform = true
             generator.maximumSize = CGSize(width: maxPixelSize, height: maxPixelSize)
             try Task.checkCancellation()
-            guard let cgImage = try? generator.copyCGImage(at: .zero, actualTime: nil) else {
+            guard let cgImage = try? await generator.image(at: .zero).image else {
                 return nil
             }
             try Task.checkCancellation()

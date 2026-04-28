@@ -27,8 +27,9 @@ actor WidgetSnapshotExporter {
 
     /// Day-only formatter reused across exports — `ISO8601DateFormatter()` is
     /// expensive to allocate, and we only need a stable date string for the
-    /// content fingerprint.
-    private static let dayKeyFormatter: ISO8601DateFormatter = {
+    /// content fingerprint. Apple documents `ISO8601DateFormatter` as
+    /// thread-safe; `nonisolated(unsafe)` documents that invariant for Swift 6.
+    private nonisolated(unsafe) static let dayKeyFormatter: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withFullDate]
         return f

@@ -4,6 +4,38 @@ import ImageIO
 import AVFoundation
 import os
 
+// MARK: - Decode concurrency limiter
+
+/// Async counting semaphore — gates concurrent ImageIO / AVAsset thumbnail
+/// decodes so fast scrolling doesn't exhaust the IOSurface pool (the
+/// `CMPhotoJFIFUtilities -17102` / `IOSurface creation failed` errors).
+private actor DecodeLimiter {
+    private let limit: Int
+    private var active = 0
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(limit: Int) { self.limit = limit }
+
+    func acquire() async {
+        if active < limit {
+            active += 1
+            return
+        }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func release() {
+        if !waiters.isEmpty {
+            waiters.removeFirst().resume()
+        } else {
+            active -= 1
+        }
+    }
+}
+
+/// File-level instance — `Sendable` because actors are always `Sendable`.
+private let decodeLimiter = DecodeLimiter(limit: 4)
+
 /// Owns the in-memory and on-disk thumbnail caches plus the full-resolution
 /// image cache used by the viewer/slideshow. Generation runs on detached
 /// tasks via `nonisolated static` helpers so cooperative cancellation works
@@ -73,55 +105,89 @@ final class ThumbnailService {
         try Task.checkCancellation()
 
         // Try disk cache first (compare modification dates).
+        // Load via ImageIO with ShouldCacheImmediately so the returned
+        // UIImage has decoded pixel data. UIImage(data:) would create a
+        // *lazy* image whose JPEG decode is deferred to the render pipeline,
+        // where it runs unbounded and exhausts the IOSurface pool during
+        // fast scrolling (the CMPhotoJFIFUtilities -17102 cascade).
         if FileManager.default.fileExists(atPath: diskPath.path) {
             let sourceModDate = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
             let cacheModDate = (try? diskPath.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
             if let src = sourceModDate, let cache = cacheModDate, cache >= src,
-               let data = try? Data(contentsOf: diskPath),
-               let image = UIImage(data: data) {
-                return image
+               let source = CGImageSourceCreateWithURL(diskPath as CFURL, nil),
+               let cgImage = CGImageSourceCreateImageAtIndex(
+                   source, 0,
+                   [kCGImageSourceShouldCacheImmediately: true] as CFDictionary
+               ) {
+                return UIImage(cgImage: cgImage)
             }
         }
 
         try Task.checkCancellation()
 
-        if isVideo {
-            let asset = AVURLAsset(url: url)
-            let generator = AVAssetImageGenerator(asset: asset)
-            generator.appliesPreferredTrackTransform = true
-            generator.maximumSize = CGSize(width: maxPixelSize, height: maxPixelSize)
-            try Task.checkCancellation()
-            guard let cgImage = try? await generator.image(at: .zero).image else {
-                return nil
-            }
-            try Task.checkCancellation()
-            if let jpegData = opaqueJPEGData(from: cgImage, quality: 0.7) {
-                try? jpegData.write(to: diskPath, options: .atomic)
-            }
-            return UIImage(cgImage: cgImage)
-        } else {
-            let options: [CFString: Any] = [kCGImageSourceShouldCache: false]
-            guard let source = CGImageSourceCreateWithURL(url as CFURL, options as CFDictionary) else {
-                return nil
-            }
-            try Task.checkCancellation()
-            let thumbOptions: [CFString: Any] = [
-                kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceShouldCacheImmediately: true
-            ]
-            guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbOptions as CFDictionary) else {
-                return nil
-            }
-            try Task.checkCancellation()
+        // Gate the expensive decode — at most `decodeLimiter.limit`
+        // concurrent ImageIO / AVAsset operations to avoid IOSurface
+        // exhaustion during fast scrolling.
+        await decodeLimiter.acquire()
 
-            // Write to disk cache (fire-and-forget).
-            if let jpegData = opaqueJPEGData(from: cgImage, quality: 0.7) {
-                try? jpegData.write(to: diskPath, options: .atomic)
+        do {
+            try Task.checkCancellation()
+            let result: UIImage?
+            if isVideo {
+                result = try await decodeVideo(url: url, maxPixelSize: maxPixelSize, diskPath: diskPath)
+            } else {
+                result = try await decodeImage(url: url, maxPixelSize: maxPixelSize, diskPath: diskPath)
             }
-            return UIImage(cgImage: cgImage)
+            await decodeLimiter.release()
+            return result
+        } catch {
+            await decodeLimiter.release()
+            throw error
         }
+    }
+
+    // MARK: - Decode helpers (run inside the concurrency gate)
+
+    private nonisolated static func decodeVideo(
+        url: URL, maxPixelSize: CGFloat, diskPath: URL
+    ) async throws -> UIImage? {
+        let asset = AVURLAsset(url: url)
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: maxPixelSize, height: maxPixelSize)
+        try Task.checkCancellation()
+        guard let cgImage = try? await generator.image(at: .zero).image else {
+            return nil
+        }
+        try Task.checkCancellation()
+        if let jpegData = opaqueJPEGData(from: cgImage, quality: 0.7) {
+            try? jpegData.write(to: diskPath, options: .atomic)
+        }
+        return UIImage(cgImage: cgImage)
+    }
+
+    private nonisolated static func decodeImage(
+        url: URL, maxPixelSize: CGFloat, diskPath: URL
+    ) async throws -> UIImage? {
+        let options: [CFString: Any] = [kCGImageSourceShouldCache: false]
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, options as CFDictionary) else {
+            return nil
+        }
+        try Task.checkCancellation()
+        let thumbOptions: [CFString: Any] = [
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true
+        ]
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbOptions as CFDictionary) else {
+            return nil
+        }
+        try Task.checkCancellation()
+        if let jpegData = opaqueJPEGData(from: cgImage, quality: 0.7) {
+            try? jpegData.write(to: diskPath, options: .atomic)
+        }
+        return UIImage(cgImage: cgImage)
     }
 
     /// JPEG-encode a CGImage after flattening onto an opaque bitmap — avoids

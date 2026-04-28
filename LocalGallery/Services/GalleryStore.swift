@@ -682,7 +682,14 @@ final class GalleryStore {
     }
 
     var visibleMemories: [Memory] {
-        memories.filter { !hiddenMemories.contains($0.id) }
+        memories.filter { memory in
+            guard !hiddenMemories.contains(memory.id) else { return false }
+            // Hide memories whose photo IDs are entirely stale (e.g. folder
+            // moved since the memory was generated, changing SHA-256 UUIDs).
+            // Mirror the same resolution order as MemoryCardView's coverURL.
+            if searchService.photo(byID: memory.coverPhotoID) != nil { return true }
+            return memory.photoIDs.contains { searchService.photo(byID: $0) != nil }
+        }
     }
 
     var hiddenPeopleTags: [TagSuggestion] {

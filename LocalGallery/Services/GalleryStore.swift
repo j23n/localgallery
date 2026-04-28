@@ -387,9 +387,9 @@ final class GalleryStore {
         await scanFolder(at: url, silent: hadCache)
     }
 
-    func rescan() async {
+    func rescan(silent: Bool = true) async {
         guard let url = bookmarks.activeURL else { return }
-        await scanFolder(at: url, silent: false)
+        await scanFolder(at: url, silent: silent)
     }
 
     // MARK: - Folder Scanning (Iterative)

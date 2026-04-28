@@ -308,10 +308,12 @@ actor WidgetSnapshotExporter {
             }
         }
 
-        // 3. Fallback: use any other stored memory (trip, person, folder, etc.)
-        //    so the widget always shows real content when memories exist.
+        // 3. Fallback: use the first trip/person/folder/density memory so the widget
+        //    always shows real content. Opt-in so new MemoryTypes don't silently
+        //    appear here without a deliberate decision.
         if items.isEmpty {
-            let fallback = memories.first { $0.type != .onThisDay && $0.type != .yearsAgo }
+            let evergreen: Set<MemoryType> = [.trip, .personOverTime, .folderEvent, .photoDensity, .birthday]
+            let fallback = memories.first { evergreen.contains($0.type) }
             if let fallback {
                 let refs = orderedRefs(for: fallback, photoByID: photoByID, folderIdByURL: folderIdByURL)
                 if !refs.isEmpty {

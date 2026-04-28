@@ -56,6 +56,10 @@ struct PhotoGridScreen: View {
     @State private var selected: Set<UUID> = []
     @State private var hasSeededInitialTags = false
 
+    // Pinch-to-zoom grid size
+    @State private var isPinching = false
+    @State private var pinchBaseTier: Int = 0
+
     // Share sheet (share an arbitrary list of URLs)
     @State private var shareURLs: [URL]?
 
@@ -280,13 +284,20 @@ struct PhotoGridScreen: View {
                 }
                 .simultaneousGesture(
                     MagnificationGesture()
-                        .onEnded { scale in
-                            if scale > 1.15 {
-                                sizeTier = max(0, sizeTier - 1)
-                            } else if scale < 0.85 {
-                                sizeTier = min(GridLayoutConfig.tierCount - 1, sizeTier + 1)
+                        .onChanged { scale in
+                            if !isPinching {
+                                isPinching = true
+                                pinchBaseTier = sizeTier
                             }
+                            let delta: Int
+                            if scale > 1.5 { delta = -2 }
+                            else if scale > 1.15 { delta = -1 }
+                            else if scale < 0.67 { delta = 2 }
+                            else if scale < 0.85 { delta = 1 }
+                            else { delta = 0 }
+                            sizeTier = max(0, min(GridLayoutConfig.tierCount - 1, pinchBaseTier + delta))
                         }
+                        .onEnded { _ in isPinching = false }
                 )
             }
         }
@@ -639,12 +650,10 @@ struct PhotoGridScreen: View {
     private func recomputeFilter() async {
         let snapshotPhotos = photos
         let snapshotQuery = query.trimmingCharacters(in: .whitespaces).lowercased()
-        // Places/* are virtual parent tags — no photo carries them exactly,
-        // but every nested leaf (Places/Argentina/Buenos Aires/...) should
-        // match. Match by prefix for Places, exact otherwise.
+        // Hierarchical namespaces (Places, Objects, Scenes) use prefix matching —
+        // selecting a parent tag matches all its nested leaves.
         let snapshotRequiredTags: [(path: String, isPrefixMatch: Bool)] = activeTags.map {
-            let ns = $0.namespace?.lowercased()
-            return ($0.fullPath.lowercased(), ns == "places" || ns == "objects" || ns == "scenes")
+            ($0.fullPath.lowercased(), TagNamespace.matchesByPrefix($0.namespace))
         }
 
         let result: (filtered: [PhotoFile], sections: [PhotoSection], years: [(String, String)]) =

@@ -18,6 +18,7 @@ enum FolderScanner {
         let enrichedFileDate: Date?
         let gpsLatitude: Double?
         let gpsLongitude: Double?
+        let faceRegions: [FaceRegion]
     }
 
     struct Result: Sendable {
@@ -159,7 +160,8 @@ enum FolderScanner {
                             countryCode: cached?.countryCode,
                             enrichedFileDate: stale ? nil : cachedEnrichedDate,
                             gpsLatitude: cached?.gpsLatitude,
-                            gpsLongitude: cached?.gpsLongitude
+                            gpsLongitude: cached?.gpsLongitude,
+                            faceRegions: cached?.faceRegions ?? []
                         ))
                     }
                     // Standalone videos only (no matching image)

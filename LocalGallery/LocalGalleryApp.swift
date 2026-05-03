@@ -156,6 +156,12 @@ struct LocalGalleryApp: App {
                 // the window is benign.
                 .task {
                     appDelegate.memoryRefresh.attach(store)
+                    // Pre-render the six slideshow music themes so the first
+                    // memory open doesn't pay the synth cost on the main
+                    // actor. Idempotent — already-cached themes are skipped.
+                    Task.detached(priority: .background) {
+                        await SlideshowMusicCache.prewarmAll()
+                    }
                 }
                 .onOpenURL { url in
                     router.handle(url, store: store)

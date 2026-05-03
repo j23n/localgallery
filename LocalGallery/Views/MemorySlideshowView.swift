@@ -28,18 +28,29 @@ struct MemorySlideshowView: View {
     @State private var index: Int = 0
     @State private var underlayIndex: Int = 0
     @State private var progress: Double = 0
+    /// Continuous slideshow position used by the progress bar:
+    /// `Double(index) + sub-slide progress`. Updated monotonically so the bar
+    /// never dips when we advance — without this, the brief moment after we
+    /// reset `progress = 0` but before `index` increments inside the
+    /// `withAnimation` block renders the bar at 0.
+    @State private var barPosition: Double = 0
     @State private var isPaused: Bool = false
     @State private var slideStart: Date = Date()
     @State private var timer: Timer?
     @State private var goToGrid: Bool = false
     @State private var slideDuration: Double = 5.0
     @State private var showThemePicker: Bool = false
+    @State private var showShareSheet: Bool = false
     @State private var audio = SlideshowAudioController()
     @AppStorage("slideshowMusicTheme") private var storedTheme: String = SlideshowMusicTheme.wistful.rawValue
 
     private var photos: [PhotoFile] { store.photos(for: memory) }
     private var theme: SlideshowMusicTheme {
         SlideshowMusicTheme(rawValue: storedTheme) ?? .wistful
+    }
+    private var currentPhoto: PhotoFile? {
+        guard photos.indices.contains(index) else { return nil }
+        return photos[index]
     }
 
     var body: some View {
@@ -95,16 +106,44 @@ struct MemorySlideshowView: View {
             ))
             .presentationDetents([.medium])
         }
+        .sheet(isPresented: $showShareSheet) {
+            if let photo = currentPhoto {
+                ShareSheet(items: [photo.url])
+            }
+        }
         .onAppear {
             OrientationLock.lock(.portrait, rotateTo: .portrait)
             audio.play(theme: theme)
             startTimer()
+            store.markMemorySeen(memory.id)
         }
         .onDisappear {
             OrientationLock.lock(.all)
             audio.stop()
             stopTimer()
         }
+    }
+
+    @ViewBuilder
+    private func pillView(date: String?, location: String?) -> some View {
+        VStack(spacing: 1) {
+            if let date {
+                Text(date)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+            }
+            if let location {
+                Text(location)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.78))
+                    .lineLimit(1)
+            }
+        }
+        .multilineTextAlignment(.center)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Color.white.opacity(0.14), in: Capsule())
     }
 
     // MARK: - Tap + hold zone
@@ -128,7 +167,7 @@ struct MemorySlideshowView: View {
     // MARK: - Chrome
 
     private var topBar: some View {
-        HStack(alignment: .center) {
+        HStack(alignment: .center, spacing: 8) {
             Button {
                 dismiss()
             } label: {
@@ -141,27 +180,30 @@ struct MemorySlideshowView: View {
 
             Spacer()
 
-            Button {
-                showThemePicker = true
-            } label: {
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(Color(red: 0.561, green: 0.769, blue: 0.608))
-                        .frame(width: 6, height: 6)
-                    Text("Playing · \(theme.displayName.lowercased())")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.white)
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundStyle(.white.opacity(0.7))
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(Color.white.opacity(0.14), in: Capsule())
+            if let lines = currentPhoto.flatMap(PhotoChrome.pillLines(for:)) {
+                pillView(date: lines.date, location: lines.location)
             }
-            .buttonStyle(.plain)
 
             Spacer()
+
+            Menu {
+                Button {
+                    showThemePicker = true
+                } label: {
+                    Label("Music: \(theme.displayName)", systemImage: "music.note")
+                }
+                Button {
+                    showShareSheet = true
+                } label: {
+                    Label("Share photo", systemImage: "square.and.arrow.up")
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 36, height: 36)
+                    .background(Color.white.opacity(0.16), in: Circle())
+            }
 
             Button {
                 if let onSeeAll {
@@ -191,7 +233,7 @@ struct MemorySlideshowView: View {
 
     private var bottomChrome: some View {
         let total = max(photos.count, 1)
-        let overall = (Double(index) + min(progress, 1)) / Double(total)
+        let overall = barPosition / Double(total)
 
         return VStack(alignment: .leading, spacing: 6) {
             // Reserve a fixed slot above the title so the caption block doesn't
@@ -263,6 +305,9 @@ struct MemorySlideshowView: View {
 
     private func resetSlide() {
         progress = 0
+        // Snap bar to the new index so the progress bar tracks the post-jump
+        // position immediately rather than re-animating from 0.
+        barPosition = Double(index)
         slideDuration = nextDuration()
         slideStart = Date()
     }
@@ -278,6 +323,7 @@ struct MemorySlideshowView: View {
         stopTimer()
         slideDuration = nextDuration()
         slideStart = Date().addingTimeInterval(-progress * slideDuration)
+        barPosition = Double(index) + progress
         let t = Timer.scheduledTimer(withTimeInterval: 0.04, repeats: true) { _ in
             Task { @MainActor in
                 guard !isPaused, !photos.isEmpty else {
@@ -286,12 +332,18 @@ struct MemorySlideshowView: View {
                 }
                 let p = min(1.0, Date().timeIntervalSince(slideStart) / slideDuration)
                 progress = p
+                barPosition = Double(index) + p
                 if p >= 1 {
                     progress = 0
                     underlayIndex = index
+                    let nextIndex = (index + 1) % photos.count
                     withAnimation(.easeInOut(duration: 0.55)) {
-                        index = (index + 1) % photos.count
+                        index = nextIndex
                     }
+                    // Snap bar to the new index to avoid the progress bar
+                    // animating backward to 0 then forward to 1/N during the
+                    // photo crossfade.
+                    barPosition = Double(nextIndex)
                     slideDuration = nextDuration()
                     slideStart = Date()
                 }

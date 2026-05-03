@@ -1,13 +1,12 @@
 import Foundation
 import AVFoundation
 
-/// One of six "thematic music" options surfaced in the slideshow's top pill.
+/// One of six "thematic music" options surfaced in the slideshow's more menu.
 /// Stored via `@AppStorage("slideshowMusicTheme")` so the choice persists.
 ///
-/// We synthesize each theme on the fly with `AVAudioEngine` rather than ship
-/// audio assets — every theme is built from a few sine partials over a slow
-/// chord progression, distinguished by key, register, and tempo. The result
-/// is unobtrusive ambient pad music that sits behind the photos.
+/// Each theme combines a chord progression and key with a distinct **timbre**
+/// (partial mix, attack envelope, LFO, detune, optional arpeggio) so the six
+/// options sound meaningfully different — not just key-shifted pads.
 enum SlideshowMusicTheme: String, CaseIterable, Identifiable, Sendable {
     case wistful
     case bright
@@ -33,11 +32,11 @@ enum SlideshowMusicTheme: String, CaseIterable, Identifiable, Sendable {
     var blurb: String {
         switch self {
         case .wistful: return "Slow minor pad"
-        case .bright:  return "Open major chords"
+        case .bright:  return "Open major pad with shimmer"
         case .hush:    return "Quiet airy drone"
-        case .folk:    return "Mixolydian warmth"
-        case .drift:   return "Floating lydian"
-        case .hymn:    return "Reverent dorian"
+        case .folk:    return "Plucked arpeggios"
+        case .drift:   return "Wide-detuned chorus pad"
+        case .hymn:    return "Reverent organ chords"
         }
     }
 
@@ -49,7 +48,7 @@ enum SlideshowMusicTheme: String, CaseIterable, Identifiable, Sendable {
         case .hush:    return 65 // F4
         case .folk:    return 62 // D4
         case .drift:   return 67 // G4
-        case .hymn:    return 64 // E4
+        case .hymn:    return 52 // E3 — organ in lower register
         }
     }
 
@@ -67,8 +66,8 @@ enum SlideshowMusicTheme: String, CaseIterable, Identifiable, Sendable {
             // Fmaj7 – Dm7 – Bb – Gm
             return [(0, [0, 4, 7, 11]), (-3, [0, 3, 7, 10]), (5, [0, 4, 7]), (2, [0, 3, 7])]
         case .folk:
-            // D – A – G – Dsus4
-            return [(0, [0, 4, 7]), (7, [0, 4, 7]), (5, [0, 4, 7]), (0, [0, 5, 7])]
+            // D – A – G – Dsus4 (broken into 4-note arpeggios)
+            return [(0, [0, 4, 7, 12]), (7, [0, 4, 7, 12]), (5, [0, 4, 7, 12]), (0, [0, 5, 7, 12])]
         case .drift:
             // Gmaj7 – Aadd9 – Em9 – Cmaj7 (lydian-ish color)
             return [(0, [0, 4, 7, 11]), (2, [0, 4, 7, 14]), (-3, [0, 3, 7, 10, 14]), (-7, [0, 4, 7, 11])]
@@ -78,23 +77,326 @@ enum SlideshowMusicTheme: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
-    /// Seconds per chord — slower themes feel more contemplative.
+    /// Seconds per chord. Folk uses a tighter cycle so the arpeggios feel
+    /// rhythmic rather than meandering.
     fileprivate var chordDuration: Double {
         switch self {
         case .wistful: return 6.0
         case .bright:  return 4.5
         case .hush:    return 7.0
-        case .folk:    return 5.0
+        case .folk:    return 4.0
         case .drift:   return 7.5
         case .hymn:    return 6.5
         }
     }
+
+    fileprivate var timbre: Timbre {
+        switch self {
+        case .wistful:
+            return Timbre(
+                partials: [Partial(multiplier: 1.0, gain: 1.0), Partial(multiplier: 0.5, gain: 0.45)],
+                attack: 3.0,
+                lfoFrequency: 0.07, lfoDepth: 0.22,
+                detune: 0.04,
+                arp: nil,
+                outputGain: 0.45
+            )
+        case .bright:
+            return Timbre(
+                partials: [
+                    Partial(multiplier: 1.0, gain: 1.0),
+                    Partial(multiplier: 2.0, gain: 0.32),
+                    Partial(multiplier: 3.0, gain: 0.16)
+                ],
+                attack: 1.5,
+                lfoFrequency: 0.12, lfoDepth: 0.18,
+                detune: 0.0,
+                arp: nil,
+                outputGain: 0.40
+            )
+        case .hush:
+            return Timbre(
+                partials: [Partial(multiplier: 1.0, gain: 0.55), Partial(multiplier: 0.5, gain: 0.30)],
+                attack: 5.0,
+                lfoFrequency: 0.04, lfoDepth: 0.40,
+                detune: 0.0,
+                arp: nil,
+                outputGain: 0.28 // significantly quieter than other themes
+            )
+        case .folk:
+            return Timbre(
+                partials: [
+                    Partial(multiplier: 1.0, gain: 1.0),
+                    Partial(multiplier: 2.0, gain: 0.35),
+                    Partial(multiplier: 3.0, gain: 0.16)
+                ],
+                attack: 0.02, // pluck — near-instant attack
+                lfoFrequency: 0.0, lfoDepth: 0.0, // no breathing; rhythm carries it
+                detune: 0.0,
+                arp: ArpConfig(interval: 0.5, decay: 1.6),
+                outputGain: 0.55
+            )
+        case .drift:
+            return Timbre(
+                partials: [
+                    Partial(multiplier: 1.0, gain: 1.0),
+                    Partial(multiplier: 0.5, gain: 0.40),
+                    Partial(multiplier: 2.0, gain: 0.18)
+                ],
+                attack: 4.0,
+                lfoFrequency: 0.05, lfoDepth: 0.25,
+                detune: 0.15, // chorusy
+                arp: nil,
+                outputGain: 0.42
+            )
+        case .hymn:
+            return Timbre(
+                partials: [
+                    Partial(multiplier: 1.0, gain: 1.0),
+                    Partial(multiplier: 2.0, gain: 0.70),
+                    Partial(multiplier: 3.0, gain: 0.45),
+                    Partial(multiplier: 4.0, gain: 0.22)
+                ],
+                attack: 0.5,
+                lfoFrequency: 0.0, lfoDepth: 0.0, // organ — steady, no breathing
+                detune: 0.0,
+                arp: nil,
+                outputGain: 0.45
+            )
+        }
+    }
 }
+
+// MARK: - Timbre
+
+fileprivate struct Partial: Sendable {
+    /// Multiplier on the fundamental — 1.0 = fundamental, 2.0 = octave above,
+    /// 0.5 = octave below.
+    let multiplier: Double
+    let gain: Float
+}
+
+fileprivate struct ArpConfig: Sendable {
+    /// Seconds between arp note onsets.
+    let interval: Double
+    /// Seconds for each note's exponential amplitude decay.
+    let decay: Double
+}
+
+fileprivate struct Timbre: Sendable {
+    let partials: [Partial]
+    /// Seconds for the per-chord amplitude swell at chord start.
+    let attack: Double
+    /// LFO frequency in Hz; 0 disables breathing.
+    let lfoFrequency: Double
+    /// LFO modulation depth (0..1). Centred at 1; depth 0.2 means amplitude
+    /// breathes between 0.8× and 1.0×.
+    let lfoDepth: Float
+    /// Detune in semitones — voices are spread ±detune/2 around the chord
+    /// tone for a chorus effect.
+    let detune: Float
+    /// Optional arpeggiator. When set, only one chord tone plays at a time,
+    /// cycling through the chord intervals every `interval` seconds.
+    let arp: ArpConfig?
+    /// Final output scaler. Lets quieter themes (hush) sit in the mix.
+    let outputGain: Float
+}
+
+// MARK: - Pure synthesis
+
+/// Stateless renderer that produces one full progression cycle as raw float32
+/// PCM samples. Pure — runs anywhere, including off-MainActor — so the disk
+/// pre-warm task can build all six themes in the background without touching
+/// the player.
+enum SlideshowMusicSynth: Sendable {
+    static let sampleRate: Double = 44_100
+
+    /// Render one looped progression cycle for `theme` at `sampleRate`.
+    static func render(theme: SlideshowMusicTheme, sampleRate: Double = sampleRate) -> [Float] {
+        let chordSeconds = theme.chordDuration
+        let chordCount = theme.progression.count
+        let totalSeconds = chordSeconds * Double(chordCount)
+        let frameCount = Int(totalSeconds * sampleRate)
+        var out = [Float](repeating: 0, count: frameCount)
+
+        let timbre = theme.timbre
+        let chordSamples = Int(chordSeconds * sampleRate)
+        let crossfadeSamples = timbre.arp == nil ? chordSamples / 4 : 0
+
+        for i in 0..<frameCount {
+            let chordIdx = i / chordSamples
+            let withinChord = i % chordSamples
+            let curr = theme.progression[chordIdx]
+            let next = theme.progression[(chordIdx + 1) % chordCount]
+            let currMidi = theme.rootMidi + curr.0
+            let nextMidi = theme.rootMidi + next.0
+
+            let t = Double(i) / sampleRate
+            let chordT = Double(withinChord) / sampleRate
+            var sample: Float = 0
+
+            if let arp = timbre.arp {
+                let noteIdx = Int(chordT / arp.interval)
+                let noteStart = Double(noteIdx) * arp.interval
+                let noteT = chordT - noteStart
+                if noteIdx < curr.1.count * 4 {
+                    let interval = curr.1[noteIdx % curr.1.count]
+                    sample += pluckSample(
+                        midi: currMidi + interval,
+                        time: t,
+                        noteT: noteT,
+                        decay: arp.decay,
+                        timbre: timbre
+                    )
+                }
+            } else {
+                var wCurr: Float = chordEnvelope(chordT: chordT, attack: timbre.attack)
+                var wNext: Float = 0
+                if withinChord >= chordSamples - crossfadeSamples {
+                    let crossT = Float(withinChord - (chordSamples - crossfadeSamples)) / Float(crossfadeSamples)
+                    wCurr *= (1 - crossT)
+                    wNext = crossT * chordEnvelope(chordT: 0, attack: 0.05)
+                }
+                sample += padChord(midiRoot: currMidi, intervals: curr.1, time: t, timbre: timbre) * wCurr
+                if wNext > 0 {
+                    sample += padChord(midiRoot: nextMidi, intervals: next.1, time: t, timbre: timbre) * wNext
+                }
+            }
+
+            if timbre.lfoFrequency > 0 {
+                let lfo = Float(1.0 - Double(timbre.lfoDepth)) + timbre.lfoDepth * Float(0.5 + 0.5 * sin(2 * .pi * timbre.lfoFrequency * t))
+                sample *= lfo
+            }
+            out[i] = tanh(sample) * timbre.outputGain
+        }
+        return out
+    }
+
+    fileprivate static func chordEnvelope(chordT: Double, attack: Double) -> Float {
+        guard attack > 0 else { return 1 }
+        if chordT >= attack { return 1 }
+        return Float(chordT / attack)
+    }
+
+    fileprivate static func padChord(midiRoot: Int, intervals: [Int], time: Double, timbre: Timbre) -> Float {
+        var s: Float = 0
+        for interval in intervals {
+            let baseFreq = midiToHz(midiRoot + interval)
+            s += voice(baseFreq: baseFreq, time: time, timbre: timbre)
+        }
+        return s / Float(max(1, intervals.count))
+    }
+
+    fileprivate static func pluckSample(
+        midi: Int, time: Double, noteT: Double, decay: Double, timbre: Timbre
+    ) -> Float {
+        guard noteT >= 0 else { return 0 }
+        let baseFreq = midiToHz(midi)
+        let attack = chordEnvelope(chordT: noteT, attack: timbre.attack)
+        let decayEnv = Float(exp(-noteT / decay))
+        return voice(baseFreq: baseFreq, time: time, timbre: timbre) * attack * decayEnv
+    }
+
+    fileprivate static func voice(baseFreq: Double, time: Double, timbre: Timbre) -> Float {
+        let detuneVoices: [Double]
+        if timbre.detune > 0 {
+            let half = Double(timbre.detune) / 2
+            detuneVoices = [0.0, half, -half]
+        } else {
+            detuneVoices = [0.0]
+        }
+        var s: Float = 0
+        for cents in detuneVoices {
+            let freq = baseFreq * pow(2.0, cents / 12.0)
+            for partial in timbre.partials {
+                let f = freq * partial.multiplier
+                s += Float(sin(2 * .pi * f * time)) * partial.gain
+            }
+        }
+        let voiceCount = Float(detuneVoices.count)
+        let partialGainSum = timbre.partials.map(\.gain).reduce(0, +)
+        return s / max(1, voiceCount * partialGainSum)
+    }
+
+    fileprivate static func midiToHz(_ midi: Int) -> Double {
+        440.0 * pow(2.0, Double(midi - 69) / 12.0)
+    }
+}
+
+// MARK: - Disk cache
+
+/// On-disk cache of pre-rendered theme PCM data. Each theme writes a raw
+/// float32 mono buffer to `Caches/slideshow-music/<theme>-v<N>.pcm`. The file
+/// is just the sample bytes — the format is implied by the cache version.
+///
+/// Pre-warmed once at app launch via `prewarmAll()` on a low-priority detached
+/// task so subsequent `play(theme:)` calls memcpy from disk instead of
+/// re-running the synth loop.
+enum SlideshowMusicCache {
+    /// Bump when synthesis changes substantively to invalidate stale .pcm files.
+    static let version = 1
+    static let sampleRate: Double = SlideshowMusicSynth.sampleRate
+
+    static var cacheDirectory: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("slideshow-music", isDirectory: true)
+    }
+
+    static func cachedFileURL(for theme: SlideshowMusicTheme) -> URL {
+        cacheDirectory.appendingPathComponent("\(theme.rawValue)-v\(version).pcm")
+    }
+
+    /// Load cached samples, or nil on miss.
+    static func loadSamples(for theme: SlideshowMusicTheme) -> [Float]? {
+        let url = cachedFileURL(for: theme)
+        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe),
+              data.count > 0,
+              data.count % MemoryLayout<Float>.size == 0
+        else { return nil }
+        let count = data.count / MemoryLayout<Float>.size
+        return data.withUnsafeBytes { raw in
+            Array(UnsafeBufferPointer(start: raw.bindMemory(to: Float.self).baseAddress, count: count))
+        }
+    }
+
+    /// Persist `samples` for `theme`. Atomic write so a crashed render leaves
+    /// no half-written file behind.
+    static func write(samples: [Float], for theme: SlideshowMusicTheme) {
+        try? FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+        let url = cachedFileURL(for: theme)
+        let data = samples.withUnsafeBufferPointer { Data(buffer: $0) }
+        do {
+            try data.write(to: url, options: .atomic)
+        } catch {
+            // Swift 6 strict concurrency: capture URL outside the autoclosure.
+            let path = url.path
+            Log.ui.warning("Failed to write music cache \(path): \(error.localizedDescription)")
+        }
+    }
+
+    /// Render every theme that doesn't already have a current cache file.
+    /// Safe to call multiple times — already-cached themes are skipped.
+    static func prewarmAll() async {
+        await Task.detached(priority: .background) {
+            for theme in SlideshowMusicTheme.allCases {
+                let url = cachedFileURL(for: theme)
+                if FileManager.default.fileExists(atPath: url.path) { continue }
+                let start = CFAbsoluteTimeGetCurrent()
+                let samples = SlideshowMusicSynth.render(theme: theme)
+                write(samples: samples, for: theme)
+                let elapsed = (CFAbsoluteTimeGetCurrent() - start) * 1000
+                Log.ui.info("Pre-rendered music theme '\(theme.rawValue)' (\(samples.count) samples) in \(String(format: "%.0f", elapsed))ms")
+            }
+        }.value
+    }
+}
+
+// MARK: - Player
 
 /// Drives ambient pad audio for the memory slideshow. Built around a single
 /// `AVAudioEngine` + `AVAudioPlayerNode` that loops a generated PCM buffer.
-/// Theme switches rebuild the buffer in place; the engine keeps running so
-/// playback doesn't gap when the user picks a new theme mid-slideshow.
+/// Theme switches load the buffer from `SlideshowMusicCache` (synthesizing
+/// in-line as a fallback if the cache file isn't there yet).
 @MainActor
 final class SlideshowMusicPlayer {
     private let engine = AVAudioEngine()
@@ -115,8 +417,7 @@ final class SlideshowMusicPlayer {
     func play(theme: SlideshowMusicTheme) {
         if currentTheme == theme && isRunning { return }
         currentTheme = theme
-        // Rebuild buffer for the new theme.
-        guard let buffer = renderBuffer(for: theme) else { return }
+        guard let buffer = loadOrSynthBuffer(for: theme) else { return }
         if !engine.isRunning {
             do { try engine.start() } catch { return }
         }
@@ -132,70 +433,26 @@ final class SlideshowMusicPlayer {
         isRunning = false
     }
 
-    // MARK: Synthesis
-
-    /// Renders one full progression cycle as a single PCM buffer that we'll
-    /// loop. Each chord crossfades into the next, and a slow LFO modulates
-    /// amplitude so the pad breathes instead of sitting at constant volume.
-    private func renderBuffer(for theme: SlideshowMusicTheme) -> AVAudioPCMBuffer? {
-        let sampleRate = format.sampleRate
-        let chordSeconds = theme.chordDuration
-        let chordCount = theme.progression.count
-        let totalSeconds = chordSeconds * Double(chordCount)
-        let frameCount = AVAudioFrameCount(totalSeconds * sampleRate)
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else { return nil }
-        buffer.frameLength = frameCount
-        guard let channel = buffer.floatChannelData?[0] else { return nil }
-
-        let chordSamples = Int(chordSeconds * sampleRate)
-        let crossfadeSamples = chordSamples / 4
-        let lfoFrequency = 0.07 // very slow breathing, ~14s per cycle
-
-        for i in 0..<Int(frameCount) {
-            let chordIdx = i / chordSamples
-            let withinChord = i % chordSamples
-            let curr = theme.progression[chordIdx]
-            let next = theme.progression[(chordIdx + 1) % chordCount]
-            let currMidi = theme.rootMidi + curr.0
-            let nextMidi = theme.rootMidi + next.0
-
-            // Crossfade weights between current and next chord at the tail.
-            var wCurr: Float = 1
-            var wNext: Float = 0
-            if withinChord >= chordSamples - crossfadeSamples {
-                let t = Float(withinChord - (chordSamples - crossfadeSamples)) / Float(crossfadeSamples)
-                wCurr = 1 - t
-                wNext = t
-            }
-
-            let t = Double(i) / sampleRate
-            var sample: Float = 0
-            sample += synth(midiRoot: currMidi, intervals: curr.1, time: t) * wCurr
-            sample += synth(midiRoot: nextMidi, intervals: next.1, time: t) * wNext
-
-            // Slow amplitude LFO so the pad breathes; never goes to zero.
-            let lfo = Float(0.78 + 0.22 * sin(2 * .pi * lfoFrequency * t))
-            sample *= lfo
-            // Soft clip to avoid harsh peaks if partials align.
-            sample = tanh(sample)
-            channel[i] = sample * 0.45
+    /// Disk-backed first, in-line synth as fallback. Caches the synthesized
+    /// samples so the next slideshow open doesn't re-render either.
+    private func loadOrSynthBuffer(for theme: SlideshowMusicTheme) -> AVAudioPCMBuffer? {
+        if let samples = SlideshowMusicCache.loadSamples(for: theme),
+           let buffer = makeBuffer(from: samples) {
+            return buffer
         }
-        return buffer
+        let samples = SlideshowMusicSynth.render(theme: theme, sampleRate: format.sampleRate)
+        SlideshowMusicCache.write(samples: samples, for: theme)
+        return makeBuffer(from: samples)
     }
 
-    /// Produces one sample at `time` for a chord defined by a root midi note
-    /// plus a list of interval offsets. Each note is two stacked sine partials
-    /// (fundamental + octave-down sub) so the pad has body without sounding
-    /// like a single lonely beep.
-    private func synth(midiRoot: Int, intervals: [Int], time: Double) -> Float {
-        var s: Float = 0
-        for interval in intervals {
-            let midi = midiRoot + interval
-            let freq = 440.0 * pow(2.0, Double(midi - 69) / 12.0)
-            let fundamental = sin(2 * .pi * freq * time)
-            let sub = sin(2 * .pi * (freq / 2) * time) * 0.45
-            s += Float(fundamental + sub)
+    private func makeBuffer(from samples: [Float]) -> AVAudioPCMBuffer? {
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count)),
+              let channel = buffer.floatChannelData?[0]
+        else { return nil }
+        buffer.frameLength = AVAudioFrameCount(samples.count)
+        samples.withUnsafeBufferPointer { src in
+            channel.update(from: src.baseAddress!, count: samples.count)
         }
-        return s / Float(max(1, intervals.count) * 2)
+        return buffer
     }
 }

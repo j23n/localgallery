@@ -30,9 +30,28 @@ final class GalleryStore {
     var hiddenMemories: Set<String> = [] {
         didSet { defaults.set(Array(hiddenMemories), forKey: "hiddenMemories") }
     }
+    /// Memory IDs the user has tapped into (opened the slideshow). Keyed by
+    /// memory ID → last-seen date. Memories seen within ~6 months are
+    /// deprioritised so the rail stays fresh.
+    @ObservationIgnored var seenMemoryIDs: [String: Date] = [:] {
+        didSet { persistSeenMemoryIDs() }
+    }
     /// Per-person featured photo ID. Keyed by person tag fullPath (case-sensitive).
     var featuredPhotoByPerson: [String: UUID] = [:] {
         didSet { persistFeaturedPhotoByPerson() }
+    }
+
+    /// Person tag fullPath ("People/<name>") that represents the current user.
+    /// Excluded from "with X, Y, Z" trip-title suffixes so memories don't read
+    /// "Chile with Anna, Bob & me". Empty string = unset.
+    var mePersonPath: String = "" {
+        didSet {
+            guard oldValue != mePersonPath, !_isInitializing else { return }
+            defaults.set(mePersonPath, forKey: "mePersonPath")
+            // Trip titles depend on this — regenerate so the change surfaces
+            // immediately instead of waiting for the daily gate.
+            forceRegenerateMemories()
+        }
     }
 
     /// Contacts loaded from the system address book. Empty until the user grants
@@ -135,8 +154,15 @@ final class GalleryStore {
            let dict = try? JSONDecoder().decode([String: PersonLink].self, from: data) {
             personContactLinks = dict
         }
+        if let data = defaults.data(forKey: "seenMemoryIDs"),
+           let dict = try? JSONDecoder().decode([String: Date].self, from: data) {
+            seenMemoryIDs = dict
+        }
         if defaults.object(forKey: "birthdayMemoriesEnabled") != nil {
             birthdayMemoriesEnabled = defaults.bool(forKey: "birthdayMemoriesEnabled")
+        }
+        if let raw = defaults.string(forKey: "mePersonPath") {
+            mePersonPath = raw
         }
         loadMemoriesCache()
 
@@ -284,6 +310,11 @@ final class GalleryStore {
         defaults.set(data, forKey: "personContactLinks")
     }
 
+    private func persistSeenMemoryIDs() {
+        guard let data = try? JSONEncoder().encode(seenMemoryIDs) else { return }
+        defaults.set(data, forKey: "seenMemoryIDs")
+    }
+
     // MARK: - Contacts
 
     /// Prompt for Contacts access and load on grant. Safe to call repeatedly.
@@ -312,7 +343,7 @@ final class GalleryStore {
     /// the contact's birthday).
     func linkPerson(_ personPath: String, toContactID contactID: String) {
         personContactLinks[personPath] = .manual(contactID: contactID)
-        Log.contacts.info("Linked '\(personPath, privacy: .public)' to contact \(contactID, privacy: .public)")
+        Log.contacts.info("Linked '\(personPath)' to contact \(contactID)")
         forceRegenerateMemories()
     }
 
@@ -320,14 +351,14 @@ final class GalleryStore {
     /// auto-match by name does not re-apply.
     func unlinkPerson(_ personPath: String) {
         personContactLinks[personPath] = .disabled
-        Log.contacts.info("Unlinked '\(personPath, privacy: .public)' (auto-match disabled)")
+        Log.contacts.info("Unlinked '\(personPath)' (auto-match disabled)")
         forceRegenerateMemories()
     }
 
     /// Forget any manual override — auto-match by name resumes for this person.
     func resetPersonLink(_ personPath: String) {
         personContactLinks.removeValue(forKey: personPath)
-        Log.contacts.info("Reset link for '\(personPath, privacy: .public)' (auto-match restored)")
+        Log.contacts.info("Reset link for '\(personPath)' (auto-match restored)")
         forceRegenerateMemories()
     }
 
@@ -421,7 +452,8 @@ final class GalleryStore {
                     countryCode: photo.countryCode,
                     enrichedFileDate: photo.enrichedFileDate,
                     gpsLatitude: photo.gpsLatitude,
-                    gpsLongitude: photo.gpsLongitude
+                    gpsLongitude: photo.gpsLongitude,
+                    faceRegions: photo.faceRegions
                 ))
             },
             uniquingKeysWith: { _, b in b }
@@ -618,30 +650,35 @@ final class GalleryStore {
         memoriesGeneratedDay = today
         let snapshot = allPhotos
         let leaves = _cachedLeafFolders
-        await generateMemories(from: snapshot, leafFolders: leaves)
+        let daySeed = WidgetDayKey.string(for: today)
+        await generateMemories(from: snapshot, leafFolders: leaves, seed: daySeed)
     }
 
     /// Clear the once-per-day gate + cached memories and immediately re-run detection.
     /// Wired to a long-press on the "Memories" section header in CollectionsView.
+    /// Uses a time-based seed so each tap gives a fresh selection.
     func forceRegenerateMemories() {
         memoriesGeneratedDay = nil
         memories = []
         MemoriesCacheStore.clear()
         Log.memory.info("Force-regenerating memories")
-        generateMemoriesIfNeeded()
+        generateMemoriesIfNeeded(seed: "\(clock.now().timeIntervalSinceReferenceDate)")
     }
 
     /// Trigger memory generation once per day. Called after scan (if no enrichment needed)
     /// or after enrichment completes, so memories always reflect the freshest EXIF/tag/GPS data.
-    internal func generateMemoriesIfNeeded() {
-        let today = Calendar.current.startOfDay(for: clock.now())
-        let memoriesStale = memoriesGeneratedDay.map { !Calendar.current.isDate($0, inSameDayAs: today) } ?? true
+    internal func generateMemoriesIfNeeded(seed: String? = nil) {
+        let cal = Calendar.current
+        let now = clock.now()
+        let today = cal.startOfDay(for: now)
+        let memoriesStale = memoriesGeneratedDay.map { !cal.isDate($0, inSameDayAs: today) } ?? true
         let memoriesEmpty = memories.isEmpty
         guard (memoriesStale || memoriesEmpty), !allPhotos.isEmpty else { return }
         memoriesGeneratedDay = today
         let snapshot = allPhotos
         let leaves = _cachedLeafFolders
-        Task { await generateMemories(from: snapshot, leafFolders: leaves) }
+        let daySeed = seed ?? WidgetDayKey.string(for: today)
+        Task { await generateMemories(from: snapshot, leafFolders: leaves, seed: daySeed) }
     }
 
     func sortFolders(_ folders: [PhotoFolder]) -> [PhotoFolder] {
@@ -718,13 +755,59 @@ final class GalleryStore {
         }
     }
 
-    /// The photo chosen as the card image for a person, or the most recent tagged
-    /// photo if none was explicitly set.
+    func isMe(_ path: String) -> Bool {
+        !mePersonPath.isEmpty && mePersonPath == path
+    }
+
+    func markAsMe(_ path: String) {
+        mePersonPath = path
+    }
+
+    func unmarkAsMe() {
+        mePersonPath = ""
+    }
+
+    /// The photo chosen as the card image for a person. When the user hasn't
+    /// pinned a specific photo, picks the best automatic candidate using
+    /// `featuredPhotoScore` — large face region + recent date.
     func featuredPhoto(for tag: TagSuggestion) -> PhotoFile? {
         if let id = featuredPhotoByPerson[tag.fullPath], let photo = searchService.photo(byID: id) {
             return photo
         }
-        return photos(forTag: tag).first
+        let candidates = photos(forTag: tag)
+        guard !candidates.isEmpty else { return nil }
+        let now = clock.now()
+        let displayLower = tag.displayName.lowercased()
+        return candidates.max { a, b in
+            featuredPhotoScore(a, personDisplayLower: displayLower, now: now)
+                < featuredPhotoScore(b, personDisplayLower: displayLower, now: now)
+        }
+    }
+
+    /// Score a candidate cover photo for a person. Region area dominates so
+    /// close-up portraits beat wide shots; recency is a tiebreaker for photos
+    /// without region data (or with similar-sized regions).
+    private func featuredPhotoScore(_ photo: PhotoFile, personDisplayLower: String, now: Date) -> Double {
+        let matched = photo.faceRegions.first { region in
+            (region.name?.lowercased() ?? "") == personDisplayLower
+        }
+        let area = matched.map { $0.width * $0.height } ?? 0
+        let recencyDays: Double
+        if let date = photo.dateTaken {
+            recencyDays = max(0, now.timeIntervalSince(date) / 86_400)
+        } else {
+            recencyDays = 10_000
+        }
+        // Linear decay over 5 years; clamps to [0, 1].
+        let recency = max(0, 1 - recencyDays / (365 * 5))
+        return area * 100 + recency * 10
+    }
+
+    /// Face region matching `tag.displayName` on a candidate cover photo.
+    /// Returned for `PersonThumbnailView` so it can crop to the face.
+    func faceRegion(for photo: PhotoFile, person displayName: String) -> FaceRegion? {
+        let lower = displayName.lowercased()
+        return photo.faceRegions.first { ($0.name?.lowercased() ?? "") == lower }
     }
 
     func setFeaturedPhoto(personPath: String, photoID: UUID) {
@@ -732,6 +815,7 @@ final class GalleryStore {
     }
 
     func hideMemory(_ id: String) { hiddenMemories.insert(id) }
+    func markMemorySeen(_ id: String) { seenMemoryIDs[id] = clock.now() }
     func unhideMemory(_ id: String) { hiddenMemories.remove(id) }
 
     // MARK: - Widget Snapshot
@@ -786,7 +870,7 @@ final class GalleryStore {
         memory.photoIDs.compactMap { searchService.photo(byID: $0) }
     }
 
-    private func generateMemories(from allPhotos: [PhotoFile], leafFolders: [PhotoFolder]) async {
+    private func generateMemories(from allPhotos: [PhotoFile], leafFolders: [PhotoFolder], seed: String = "") async {
         let t = CFAbsoluteTimeGetCurrent()
 
         MemoryEngine.logMemoryInputSummary(allPhotos: allPhotos)
@@ -799,7 +883,10 @@ final class GalleryStore {
             personContactLinks: self.personContactLinks,
             contactsByLowerName: self.contactLinker.contactsByLowerName,
             birthdaysEnabled: self.birthdayMemoriesEnabled,
-            now: self.clock.now()
+            mePersonPath: self.mePersonPath,
+            now: self.clock.now(),
+            seed: seed,
+            seenMemoryIDs: self.seenMemoryIDs
         )
 
         let elapsed = (CFAbsoluteTimeGetCurrent() - t) * 1000

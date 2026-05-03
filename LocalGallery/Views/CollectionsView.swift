@@ -271,6 +271,13 @@ struct CollectionsView: View {
                             .buttonStyle(.plain)
                             .contextMenu {
                                 let isFeatured = store.isFeatured(person.fullPath)
+                                let isMe = store.isMe(person.fullPath)
+                                Button {
+                                    if isMe { store.unmarkAsMe() } else { store.markAsMe(person.fullPath) }
+                                } label: {
+                                    Label(isMe ? "Unmark as Me" : "Mark as Me",
+                                          systemImage: isMe ? "person.crop.circle.badge.xmark" : "person.crop.circle.badge.checkmark")
+                                }
                                 Button {
                                     store.toggleFeaturePerson(person.fullPath)
                                 } label: {
@@ -360,6 +367,7 @@ struct CollectionsView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
+        .contentShape(Rectangle())
     }
 
     /// Label for the person → contact link context-menu entry. Reflects the
@@ -452,9 +460,11 @@ struct PersonCard: View {
     var body: some View {
         ZStack(alignment: .bottomLeading) {
             if let photo = coverPhoto {
-                ThumbnailView(url: photo.url, size: 128)
-                    .frame(width: 128, height: 128)
-                    .clipped()
+                PersonThumbnailView(
+                    url: photo.url,
+                    region: store.faceRegion(for: photo, person: tag.displayName),
+                    size: 128
+                )
             } else {
                 Rectangle()
                     .fill(Design.bgGrouped)

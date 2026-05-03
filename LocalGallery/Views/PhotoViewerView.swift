@@ -5,9 +5,15 @@ import AVKit
 
 // MARK: - Swipe-down dismiss (UIKit gesture — doesn't conflict with TabView paging)
 
+/// Vertical-pan installer with a side-aware action: downward past 150pt
+/// dismisses the viewer; upward past 150pt opens the EXIF/info drawer
+/// (mirrors Apple Photos' swipe-up-for-info gesture). Downward pans drive
+/// `offset` for the rubber-band dim, upward pans don't slide the photo —
+/// the drawer is what moves.
 struct SwipeToDismissGestureInstaller: UIViewRepresentable {
     @Binding var offset: CGFloat
     var onDismiss: () -> Void
+    var onShowInfo: () -> Void
 
     func makeUIView(context: Context) -> UIView {
         let view = UIView()
@@ -32,6 +38,7 @@ struct SwipeToDismissGestureInstaller: UIViewRepresentable {
     func updateUIView(_ uiView: UIView, context: Context) {
         context.coordinator.offsetBinding = $offset
         context.coordinator.onDismiss = onDismiss
+        context.coordinator.onShowInfo = onShowInfo
     }
 
     static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
@@ -41,18 +48,20 @@ struct SwipeToDismissGestureInstaller: UIViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(offset: $offset, onDismiss: onDismiss)
+        Coordinator(offset: $offset, onDismiss: onDismiss, onShowInfo: onShowInfo)
     }
 
     class Coordinator: NSObject, UIGestureRecognizerDelegate {
         var offsetBinding: Binding<CGFloat>
         var onDismiss: () -> Void
+        var onShowInfo: () -> Void
         var panGesture: UIPanGestureRecognizer?
         weak var hostView: UIView?
 
-        init(offset: Binding<CGFloat>, onDismiss: @escaping () -> Void) {
+        init(offset: Binding<CGFloat>, onDismiss: @escaping () -> Void, onShowInfo: @escaping () -> Void) {
             self.offsetBinding = offset
             self.onDismiss = onDismiss
+            self.onShowInfo = onShowInfo
         }
 
         @objc func handlePan(_ gesture: UIPanGestureRecognizer) {
@@ -62,9 +71,15 @@ struct SwipeToDismissGestureInstaller: UIViewRepresentable {
                 if dy > 0 {
                     offsetBinding.wrappedValue = dy
                 }
+                // Upward pan doesn't move the photo — the drawer moves.
             case .ended, .cancelled:
                 if dy > 150 {
                     onDismiss()
+                } else if dy < -150 {
+                    onShowInfo()
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        offsetBinding.wrappedValue = 0
+                    }
                 } else {
                     withAnimation(.easeOut(duration: 0.2)) {
                         offsetBinding.wrappedValue = 0
@@ -75,11 +90,11 @@ struct SwipeToDismissGestureInstaller: UIViewRepresentable {
             }
         }
 
-        // Only begin for clearly downward vertical pans
+        // Begin for either-direction vertical pans (down → dismiss, up → info).
         func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
             guard let pan = gestureRecognizer as? UIPanGestureRecognizer else { return false }
             let v = pan.velocity(in: pan.view)
-            return v.y > 0 && abs(v.y) > abs(v.x) * 2.0
+            return abs(v.y) > abs(v.x) * 2.0
         }
 
         // Allow TabView's scroll gesture to work simultaneously
@@ -221,9 +236,14 @@ struct PhotoViewerView: View {
         photos.firstIndex(where: { $0.id == currentPhotoID })
     }
 
+    /// Live re-resolution via `store.photo(byID:)`: the `photos` array is
+    /// captured at sheet-present time, so any enrichment that landed since
+    /// (Places tags, country code) wouldn't surface in the snapshot. Fall
+    /// back to the snapshot when the store has dropped the id.
     private var currentPhoto: PhotoFile? {
         guard let idx = currentIndex else { return nil }
-        return photos[idx]
+        let snapshot = photos[idx]
+        return store.photo(byID: snapshot.id) ?? snapshot
     }
 
     var body: some View {
@@ -306,7 +326,8 @@ struct PhotoViewerView: View {
         .background(
             SwipeToDismissGestureInstaller(
                 offset: $dismissOffset,
-                onDismiss: { dismiss() }
+                onDismiss: { dismiss() },
+                onShowInfo: { showEXIF = true }
             )
             .frame(width: 0, height: 0)
         )
@@ -330,41 +351,40 @@ struct PhotoViewerView: View {
     // MARK: Chrome
 
     private var topBar: some View {
-        HStack(alignment: .center, spacing: 8) {
-            Button { dismiss() } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 36, height: 36)
-                    .background(.white.opacity(0.15), in: Circle())
-            }
-
-            Spacer()
-
+        ZStack {
+            // Centred pill — anchored to screen mid regardless of the X
+            // button. Fixed width + reserved second line so the pill stays
+            // the same size whether or not a given photo has location data.
             if let photo = currentPhoto, let lines = PhotoChrome.pillLines(for: photo) {
                 VStack(spacing: 1) {
-                    if let date = lines.date {
-                        Text(date)
-                            .font(.system(size: 11.5, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .lineLimit(1)
-                    }
-                    if let location = lines.location {
-                        Text(location)
-                            .font(.system(size: 10.5, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.78))
-                            .lineLimit(1)
-                    }
+                    Text(lines.date ?? " ")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Text(lines.location ?? " ")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.78))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                 }
                 .multilineTextAlignment(.center)
+                .frame(width: PhotoChrome.pillWidth)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
                 .background(.white.opacity(0.14), in: Capsule())
             }
 
-            Spacer()
-
-            Color.clear.frame(width: 36, height: 36)
+            HStack {
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 36, height: 36)
+                        .background(.white.opacity(0.15), in: Circle())
+                }
+                Spacer()
+            }
         }
         .padding(.horizontal)
         .padding(.top, 8)
@@ -698,22 +718,28 @@ struct PhotoPageView: View {
                 }
             }
             .frame(width: geo.size.width, height: geo.size.height)
-            .onLongPressGesture(minimumDuration: 0.3, pressing: { pressing in
-                guard let liveURL = photo.livePhotoVideoURL else { return }
-                // Suppress live playback while the still is zoomed in —
-                // otherwise a hold to pan the zoomed image would superimpose
-                // a fitted-frame video on top of the zoomed content.
-                if pressing && isZoomed { return }
-                if pressing {
+            // Live-photo press-and-hold. The `pressing` callback fires
+            // *immediately* on touch start (before `minimumDuration`), so
+            // anything heavyweight (start playback, hide chrome) MUST live in
+            // `perform` — the recognised long-press — or every quick tap on a
+            // live photo races the chrome toggle: pressing(true) hides
+            // chrome, then ZoomableImageView's delayed singleTap toggles it
+            // back. `pressing(false)` only stops playback, never starts it.
+            .onLongPressGesture(
+                minimumDuration: 0.3,
+                maximumDistance: 50,
+                perform: {
+                    guard let liveURL = photo.livePhotoVideoURL, !isZoomed else { return }
                     let player = AVPlayer(url: liveURL)
                     livePlayer = player
                     player.play()
                     withAnimation(.easeIn(duration: 0.15)) { isPlayingLive = true }
                     isChromeVisible = false
-                } else {
-                    stopLivePlayback()
+                },
+                onPressingChanged: { pressing in
+                    if !pressing { stopLivePlayback() }
                 }
-            }, perform: {})
+            )
         }
         .task(id: photo.id) {
             await loadPhoto()

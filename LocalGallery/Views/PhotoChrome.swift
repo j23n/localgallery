@@ -1,9 +1,16 @@
+import CoreGraphics
 import Foundation
 
 /// Helpers for rendering the date+location pill that appears in both the
 /// photo viewer's top bar and the memory slideshow's top bar. Pure functions
 /// over a `PhotoFile` so the Store doesn't need to be involved.
 enum PhotoChrome {
+    /// Fixed pill width used in both the memory slideshow and the photo
+    /// viewer. Wide enough for "5 May 2024" / "Reykjavík, Iceland"-class
+    /// labels; longer city/country strings truncate with an ellipsis rather
+    /// than reflowing the surrounding chrome.
+    static let pillWidth: CGFloat = 200
+
     /// Two-line pill content: date on top, location below. Either field may
     /// be nil, in which case the corresponding line is omitted by the caller.
     /// Returns nil only when the photo has neither.

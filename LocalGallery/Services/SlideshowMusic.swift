@@ -376,17 +376,30 @@ enum SlideshowMusicCache {
 
     /// Render every theme that doesn't already have a current cache file.
     /// Safe to call multiple times — already-cached themes are skipped.
+    /// `.utility` priority so the work actually completes promptly after
+    /// app launch (`.background` was getting deferred long enough that the
+    /// first slideshow open still hit the inline-synth fallback).
     static func prewarmAll() async {
-        await Task.detached(priority: .background) {
+        await Task.detached(priority: .utility) {
+            let total = SlideshowMusicTheme.allCases.count
+            var rendered = 0
+            var skipped = 0
+            let overall = CFAbsoluteTimeGetCurrent()
             for theme in SlideshowMusicTheme.allCases {
                 let url = cachedFileURL(for: theme)
-                if FileManager.default.fileExists(atPath: url.path) { continue }
+                if FileManager.default.fileExists(atPath: url.path) {
+                    skipped += 1
+                    continue
+                }
                 let start = CFAbsoluteTimeGetCurrent()
                 let samples = SlideshowMusicSynth.render(theme: theme)
                 write(samples: samples, for: theme)
+                rendered += 1
                 let elapsed = (CFAbsoluteTimeGetCurrent() - start) * 1000
-                Log.ui.info("Pre-rendered music theme '\(theme.rawValue)' (\(samples.count) samples) in \(String(format: "%.0f", elapsed))ms")
+                Log.ui.info("Music: rendered '\(theme.rawValue)' (\(samples.count) samples) in \(String(format: "%.0f", elapsed))ms")
             }
+            let overallElapsed = (CFAbsoluteTimeGetCurrent() - overall) * 1000
+            Log.ui.info("Music prewarm: \(rendered) rendered, \(skipped) cached, \(total) total in \(String(format: "%.0f", overallElapsed))ms")
         }.value
     }
 }

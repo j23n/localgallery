@@ -127,20 +127,21 @@ struct MemorySlideshowView: View {
     @ViewBuilder
     private func pillView(date: String?, location: String?) -> some View {
         VStack(spacing: 1) {
-            if let date {
-                Text(date)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-            }
-            if let location {
-                Text(location)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.78))
-                    .lineLimit(1)
-            }
+            // Reserve both lines so the pill height stays constant whether or
+            // not a given photo has location data.
+            Text(date ?? " ")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Text(location ?? " ")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.white.opacity(0.78))
+                .lineLimit(1)
+                .truncationMode(.tail)
         }
         .multilineTextAlignment(.center)
+        .frame(width: PhotoChrome.pillWidth)
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .background(Color.white.opacity(0.14), in: Capsule())
@@ -167,57 +168,52 @@ struct MemorySlideshowView: View {
     // MARK: - Chrome
 
     private var topBar: some View {
-        HStack(alignment: .center, spacing: 8) {
-            Button {
-                dismiss()
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 36, height: 36)
-                    .background(Color.white.opacity(0.16), in: Circle())
-            }
-
-            Spacer()
-
+        ZStack {
+            // Centred pill — anchored to screen mid regardless of corner buttons.
             if let lines = currentPhoto.flatMap(PhotoChrome.pillLines(for:)) {
                 pillView(date: lines.date, location: lines.location)
             }
 
-            Spacer()
-
-            Menu {
+            HStack {
                 Button {
-                    showThemePicker = true
+                    dismiss()
                 } label: {
-                    Label("Music: \(theme.displayName)", systemImage: "music.note")
+                    Image(systemName: "xmark")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 36, height: 36)
+                        .background(Color.white.opacity(0.16), in: Circle())
                 }
-                Button {
-                    showShareSheet = true
-                } label: {
-                    Label("Share photo", systemImage: "square.and.arrow.up")
-                }
-            } label: {
-                Image(systemName: "ellipsis")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 36, height: 36)
-                    .background(Color.white.opacity(0.16), in: Circle())
-            }
 
-            Button {
-                if let onSeeAll {
-                    onSeeAll(memory)
-                } else {
-                    goToGrid = true
+                Spacer()
+
+                Menu {
+                    Button {
+                        if let onSeeAll {
+                            onSeeAll(memory)
+                        } else {
+                            goToGrid = true
+                        }
+                    } label: {
+                        Label("See all photos", systemImage: "square.grid.2x2")
+                    }
+                    Button {
+                        showThemePicker = true
+                    } label: {
+                        Label("Music: \(theme.displayName)", systemImage: "music.note")
+                    }
+                    Button {
+                        showShareSheet = true
+                    } label: {
+                        Label("Share photo", systemImage: "square.and.arrow.up")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 36, height: 36)
+                        .background(Color.white.opacity(0.16), in: Circle())
                 }
-            } label: {
-                Text("See all")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 7)
-                    .background(Color.white.opacity(0.16), in: Capsule())
             }
         }
         .padding(.horizontal, 16)

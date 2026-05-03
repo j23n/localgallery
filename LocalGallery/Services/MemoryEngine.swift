@@ -37,6 +37,28 @@ enum MemoryEngine {
         return "\(formatDateRange(range.lowerBound, range.upperBound)) · \(countText)"
     }
 
+    // MARK: - Cluster Key
+
+    /// Memories that share a cluster key are mutually exclusive in a single
+    /// rail render and share a cool-down: a trip parent (`trip-<key>`) and
+    /// its sub-trips (`subtrip-<key>-<seg>`) all collapse to `trip-<key>`,
+    /// so only one surfaces per generation and the others stay penalised
+    /// for a few days. Every other memory id is its own cluster.
+    static func clusterKey(for memoryID: String) -> String {
+        if memoryID.hasPrefix("subtrip-") {
+            // Sub-trip ids are "subtrip-<year>-<month>-<day>-<segKey>".
+            // The trip key is the first three hyphen-joined components after
+            // the prefix. Numeric so split-on-"-" is unambiguous.
+            let rest = memoryID.dropFirst("subtrip-".count)
+            let parts = rest.split(separator: "-", omittingEmptySubsequences: false)
+            if parts.count >= 4 {
+                let tripKey = parts.prefix(3).joined(separator: "-")
+                return "trip-\(tripKey)"
+            }
+        }
+        return memoryID
+    }
+
     // MARK: - Generate
 
     /// Run the full memory-generation pipeline on a detached task and return
@@ -50,6 +72,10 @@ enum MemoryEngine {
     /// - `seenMemoryIDs`: memory IDs the user has already seen (tapped into
     ///   the slideshow). Seen memories are deprioritised for ~6 months so the
     ///   rail stays fresh.
+    /// - `surfacedClusters`: cluster keys (see `clusterKey(for:)`) → date the
+    ///   cluster last appeared on the rail. Members of recently-surfaced
+    ///   clusters get a score penalty so trip parent + sub-trips rotate over
+    ///   days instead of all stacking on the same render.
     static func generate(
         from allPhotos: [PhotoFile],
         leafFolders: [PhotoFolder],
@@ -60,7 +86,8 @@ enum MemoryEngine {
         mePersonPath: String = "",
         now: Date = Date(),
         seed: String = "",
-        seenMemoryIDs: [String: Date] = [:]
+        seenMemoryIDs: [String: Date] = [:],
+        surfacedClusters: [String: Date] = [:]
     ) async -> [Memory] {
         await Task.detached(priority: .utility) {
             let calendar = Calendar.current
@@ -249,10 +276,11 @@ enum MemoryEngine {
                 )
             }
 
-            // Sort by score, then greedily select top 10 with overlap penalty.
-            // Sub-trips are intentionally inside their parent trip's photo set,
-            // so they bypass the overlap filter — losing them defeats the goal
-            // of surfacing finer-grained legs of long journeys.
+            // Sort by score, then greedily select top 10 with cluster
+            // uniqueness — at most one member of each cluster surfaces on a
+            // single render. A cluster groups a trip parent with its
+            // sub-trips (see `clusterKey(for:)`); other memory types are
+            // singleton clusters keyed by their own id.
             // Deduplicate folder memories that share a name (e.g. five
             // leaf folders all called "Unsorted"). Keep the one with the
             // most photos so the best representative wins.
@@ -275,13 +303,20 @@ enum MemoryEngine {
             // Day-seeded jitter (0–12 pts) so the selection rotates daily
             // while high-priority types (birthdays, on-this-day) stay on top.
             // Memories seen in the last ~6 months get a penalty so they sink
-            // below unseen candidates of similar quality.
+            // below unseen candidates of similar quality. Clusters surfaced
+            // in the last 3 days also get a penalty so a trip parent and its
+            // sub-trips rotate across days instead of repeating.
             var rng = SeededRNG(seed: seed)
             let sixMonthsAgo = calendar.date(byAdding: .month, value: -6, to: today) ?? today
+            let coolDownThreshold = calendar.date(byAdding: .day, value: -3, to: today) ?? today
             let jitteredScores: [Double] = candidates.map { mem in
                 var s = mem.score + Double.random(in: 0..<12, using: &rng)
                 if let lastSeen = seenMemoryIDs[mem.id], lastSeen > sixMonthsAgo {
                     s -= 30.0
+                }
+                let cluster = clusterKey(for: mem.id)
+                if let lastSurfaced = surfacedClusters[cluster], lastSurfaced > coolDownThreshold {
+                    s -= 25.0
                 }
                 return s
             }
@@ -289,22 +324,18 @@ enum MemoryEngine {
             candidates = sortedIndices.map { candidates[$0] }
 
             var selected: [Memory] = []
-            var usedPhotoIDs = Set<UUID>()
+            var usedClusters = Set<String>()
             for (idx, candidate) in candidates.enumerated() {
-                let isSubtrip = candidate.id.hasPrefix("subtrip-")
-                let candidateSet = Set(candidate.photoIDs)
-                if !isSubtrip {
-                    let overlapCount = candidateSet.intersection(usedPhotoIDs).count
-                    let overlapRatio = candidateSet.isEmpty ? 0.0 : Double(overlapCount) / Double(candidateSet.count)
-                    if overlapRatio > 0.7 {
-                        Log.memory.debug("Skip '\(candidate.id)' (overlap=\(String(format: "%.0f%%", overlapRatio * 100)) jitteredScore=\(String(format: "%.1f", jitteredScores[sortedIndices[idx]])))")
-                        continue
-                    }
+                let cluster = clusterKey(for: candidate.id)
+                if usedClusters.contains(cluster) {
+                    Log.memory.debug("Skip '\(candidate.id)' (cluster '\(cluster)' already taken; jitteredScore=\(String(format: "%.1f", jitteredScores[sortedIndices[idx]])))")
+                    continue
                 }
                 let seenSuffix = seenMemoryIDs[candidate.id] != nil ? " [seen]" : ""
-                Log.memory.info("Pick '\(candidate.id)' score=\(String(format: "%.1f", candidate.score)) jitter=\(String(format: "%.1f", jitteredScores[sortedIndices[idx]]))\(seenSuffix) photos=\(candidate.photoIDs.count) title='\(candidate.title)'")
+                let cooledSuffix = (surfacedClusters[cluster].map { $0 > coolDownThreshold } ?? false) ? " [cooled]" : ""
+                Log.memory.info("Pick '\(candidate.id)' score=\(String(format: "%.1f", candidate.score)) jitter=\(String(format: "%.1f", jitteredScores[sortedIndices[idx]]))\(seenSuffix)\(cooledSuffix) photos=\(candidate.photoIDs.count) title='\(candidate.title)'")
                 selected.append(candidate)
-                usedPhotoIDs.formUnion(candidateSet)
+                usedClusters.insert(cluster)
                 if selected.count >= 10 { break }
             }
 
@@ -548,20 +579,16 @@ enum MemoryEngine {
         ))
 
         // Surface meaningful sub-trips inside long parent trips — e.g. the
-        // Buenos Aires leg of a 3-month South America journey. We split the
-        // sorted photos by country code first, then by city-level Places path
-        // when only one country is present. A segment qualifies if it spans at
+        // Buenos Aires leg of a 3-month South America journey. We pick the
+        // coarsest Places-hierarchy depth (country → region → city) that
+        // actually has variation across the trip, so e.g. a Bamberg + Berlin
+        // trip splits at the region level (Bavaria + Berlin) rather than
+        // collapsing at country level. A segment qualifies if it spans at
         // least 2 days, has 15+ photos, and is meaningfully smaller than the
         // parent (so we don't duplicate the parent as a sub-trip).
         guard days >= 5 else { return }
         let parentSet = Set(ids)
-        let segments: [(label: String, key: String, entries: [(PhotoFile, Date)])]
-        let countriesPresent = Set(sorted.compactMap { $0.0.countryCode?.uppercased() })
-        if countriesPresent.count >= 2 {
-            segments = consecutiveCountrySegments(in: sorted)
-        } else {
-            segments = consecutivePlacesSegments(in: sorted)
-        }
+        let segments = splitTripIntoSegments(in: sorted)
         for seg in segments {
             guard seg.entries.count >= 15,
                   let segFirst = seg.entries.first?.1,
@@ -593,7 +620,26 @@ enum MemoryEngine {
         }
     }
 
-    /// Group a sorted-by-date photo run into consecutive-country segments.
+    /// Group a sorted-by-date trip into consecutive segments at the coarsest
+    /// Places hierarchy depth that still has variation. Country-level splits
+    /// (depth 0) win when ≥2 countries are present; otherwise regions
+    /// (depth 1); otherwise cities (depth 2). Country segmentation prefers
+    /// the canonical `countryCode` — its label goes through `countryName`
+    /// for proper localization — while region/city use the longest
+    /// `Places/*` path on each photo. Returns `[]` when there's no
+    /// variation at any depth (e.g. the whole trip is one city).
+    static func splitTripIntoSegments(
+        in entries: [(PhotoFile, Date)]
+    ) -> [(label: String, key: String, entries: [(PhotoFile, Date)])] {
+        let countriesPresent = Set(entries.compactMap { $0.0.countryCode?.uppercased() })
+        if countriesPresent.count >= 2 {
+            return consecutiveCountrySegments(in: entries)
+        }
+        return consecutivePlacesSegments(in: entries, preferredDepth: 1)
+    }
+
+    /// Group a sorted-by-date photo run into consecutive-country segments
+    /// using `countryCode` directly.
     static func consecutiveCountrySegments(
         in entries: [(PhotoFile, Date)]
     ) -> [(label: String, key: String, entries: [(PhotoFile, Date)])] {
@@ -618,26 +664,37 @@ enum MemoryEngine {
         return out
     }
 
-    /// Group a sorted-by-date photo run by deepest Places leaf (city or below).
-    /// Used when the trip stays in one country — surfaces city-level legs.
+    /// Group a sorted-by-date photo run by `Places/*` path segments at the
+    /// coarsest depth ≥ `preferredDepth` that has ≥2 distinct values across
+    /// the trip. `preferredDepth` is 1=region, 2=city. Returns `[]` when no
+    /// depth in `preferredDepth...2` shows variation.
+    ///
+    /// Per-photo path = the longest `Places/*` tag carried by that photo,
+    /// with the leading `Places` token dropped (so depth 0 = country name,
+    /// 1 = region, 2 = city).
     static func consecutivePlacesSegments(
-        in entries: [(PhotoFile, Date)]
+        in entries: [(PhotoFile, Date)],
+        preferredDepth: Int
     ) -> [(label: String, key: String, entries: [(PhotoFile, Date)])] {
-        func cityKey(for photo: PhotoFile) -> (label: String, key: String)? {
-            // Pick the longest Places path on the photo and use the city-level
-            // segment (depth 3 = country/region/city). Fall back to the deepest
-            // available.
-            let placesPaths = photo.hierarchicalTags
+        let perPhotoSegments: [[String]] = entries.map { e -> [String] in
+            let placesPaths = e.0.hierarchicalTags
                 .filter { $0.namespace?.lowercased() == "places" }
-                .map { $0.fullPath.split(separator: "/").map(String.init) }
-            guard let longest = placesPaths.max(by: { $0.count < $1.count }), longest.count > 1 else { return nil }
-            // segments without "Places"
-            let segs = Array(longest.dropFirst())
-            let cityIdx = min(2, segs.count - 1) // 0=country, 1=region, 2=city
-            let label = segs[cityIdx]
-            let key = segs.prefix(cityIdx + 1).joined(separator: "-").lowercased()
-            return (label, key)
+                .map { $0.fullPath.split(separator: "/").dropFirst().map(String.init) }
+            return placesPaths.max(by: { $0.count < $1.count }) ?? []
         }
+        func distinctAt(_ depth: Int) -> Int {
+            var seen = Set<String>()
+            for segs in perPhotoSegments where segs.count > depth {
+                seen.insert(segs[depth].lowercased())
+            }
+            return seen.count
+        }
+        var chosenDepth: Int? = nil
+        for d in max(0, preferredDepth)...2 {
+            if distinctAt(d) >= 2 { chosenDepth = d; break }
+        }
+        guard let depth = chosenDepth else { return [] }
+
         var out: [(label: String, key: String, entries: [(PhotoFile, Date)])] = []
         var current: [(PhotoFile, Date)] = []
         var currentLabel: String? = nil
@@ -646,10 +703,17 @@ enum MemoryEngine {
             guard let label = currentLabel, let key = currentKey, !current.isEmpty else { return }
             out.append((label, key, current))
         }
-        for e in entries {
-            let info = cityKey(for: e.0)
-            let label = info?.label
-            let key = info?.key
+        for (i, e) in entries.enumerated() {
+            let segs = perPhotoSegments[i]
+            let label: String?
+            let key: String?
+            if segs.count > depth {
+                label = segs[depth]
+                key = segs.prefix(depth + 1).joined(separator: "-").lowercased()
+            } else {
+                label = nil
+                key = nil
+            }
             if key != currentKey {
                 flush()
                 current = []

@@ -36,6 +36,14 @@ final class GalleryStore {
     @ObservationIgnored var seenMemoryIDs: [String: Date] = [:] {
         didSet { persistSeenMemoryIDs() }
     }
+    /// Cluster keys (see `MemoryEngine.clusterKey(for:)`) → last date the
+    /// cluster surfaced on the rail. Clusters are penalised for ~3 days
+    /// after surfacing so a trip parent + sub-trips rotate across days.
+    /// Pruned at load to entries from the last 7 days; that headroom
+    /// covers the 3-day cool-down with slack for time-zone changes.
+    @ObservationIgnored var surfacedClusters: [String: Date] = [:] {
+        didSet { persistSurfacedClusters() }
+    }
     /// Per-person featured photo ID. Keyed by person tag fullPath (case-sensitive).
     var featuredPhotoByPerson: [String: UUID] = [:] {
         didSet { persistFeaturedPhotoByPerson() }
@@ -157,6 +165,13 @@ final class GalleryStore {
         if let data = defaults.data(forKey: "seenMemoryIDs"),
            let dict = try? JSONDecoder().decode([String: Date].self, from: data) {
             seenMemoryIDs = dict
+        }
+        if let data = defaults.data(forKey: "surfacedClusters"),
+           let dict = try? JSONDecoder().decode([String: Date].self, from: data) {
+            // Drop entries outside the cool-down window so the map can't
+            // grow unbounded across years of use.
+            let cutoff = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? .distantPast
+            surfacedClusters = dict.filter { $0.value > cutoff }
         }
         if defaults.object(forKey: "birthdayMemoriesEnabled") != nil {
             birthdayMemoriesEnabled = defaults.bool(forKey: "birthdayMemoriesEnabled")
@@ -313,6 +328,11 @@ final class GalleryStore {
     private func persistSeenMemoryIDs() {
         guard let data = try? JSONEncoder().encode(seenMemoryIDs) else { return }
         defaults.set(data, forKey: "seenMemoryIDs")
+    }
+
+    private func persistSurfacedClusters() {
+        guard let data = try? JSONEncoder().encode(surfacedClusters) else { return }
+        defaults.set(data, forKey: "surfacedClusters")
     }
 
     // MARK: - Contacts
@@ -886,11 +906,20 @@ final class GalleryStore {
             mePersonPath: self.mePersonPath,
             now: self.clock.now(),
             seed: seed,
-            seenMemoryIDs: self.seenMemoryIDs
+            seenMemoryIDs: self.seenMemoryIDs,
+            surfacedClusters: self.surfacedClusters
         )
 
         let elapsed = (CFAbsoluteTimeGetCurrent() - t) * 1000
         self.memories = results
+        // Record the clusters we just surfaced so the next generation
+        // applies the cool-down penalty to their members.
+        let now = self.clock.now()
+        var updated = self.surfacedClusters
+        for memory in results {
+            updated[MemoryEngine.clusterKey(for: memory.id)] = now
+        }
+        self.surfacedClusters = updated
         saveMemoriesCache()
         Log.memory.info("Generated \(results.count) memories in \(String(format: "%.0f", elapsed))ms")
 

@@ -18,6 +18,7 @@ enum EnrichmentService {
         let gpsLatitude: Double?
         let gpsLongitude: Double?
         let enrichedFileDate: Date?
+        let faceRegions: [FaceRegion]
     }
 
     /// Enrich every photo whose `enrichedFileDate` is nil. Returns the same
@@ -68,7 +69,8 @@ enum EnrichmentService {
                                 countryCode: photo.countryCode,
                                 gpsLatitude: photo.gpsLatitude,
                                 gpsLongitude: photo.gpsLongitude,
-                                enrichedFileDate: modDate ?? Date()
+                                enrichedFileDate: modDate ?? Date(),
+                                faceRegions: photo.faceRegions
                             )
                         }
 
@@ -95,7 +97,8 @@ enum EnrichmentService {
                             countryCode: metadata.countryCode ?? photo.countryCode,
                             gpsLatitude: metadata.gpsLatitude ?? photo.gpsLatitude,
                             gpsLongitude: metadata.gpsLongitude ?? photo.gpsLongitude,
-                            enrichedFileDate: modDate ?? Date()
+                            enrichedFileDate: modDate ?? Date(),
+                            faceRegions: metadata.faceRegions.isEmpty ? photo.faceRegions : metadata.faceRegions
                         )
                     }
                 }
@@ -112,6 +115,10 @@ enum EnrichmentService {
             var dateCount = 0
             var tagCount = 0
             var uniquePaths = Set<String>()
+            var regionPhotoCount = 0
+            var regionCount = 0
+            var namedRegionCount = 0
+            var regionNamesSeen = Set<String>()
             for enriched in batchResults {
                 result[enriched.index].dateTaken = enriched.dateTaken
                 result[enriched.index].dateFromMetadata = enriched.dateFromMetadata
@@ -120,15 +127,33 @@ enum EnrichmentService {
                 result[enriched.index].gpsLatitude = enriched.gpsLatitude
                 result[enriched.index].gpsLongitude = enriched.gpsLongitude
                 result[enriched.index].enrichedFileDate = enriched.enrichedFileDate
+                result[enriched.index].faceRegions = enriched.faceRegions
                 if enriched.dateTaken != nil { dateCount += 1 }
                 if !enriched.hierarchicalTags.isEmpty {
                     tagCount += 1
                     for tag in enriched.hierarchicalTags { uniquePaths.insert(tag.fullPath.lowercased()) }
                 }
+                if !enriched.faceRegions.isEmpty {
+                    regionPhotoCount += 1
+                    regionCount += enriched.faceRegions.count
+                    for region in enriched.faceRegions {
+                        if let name = region.name, !name.isEmpty {
+                            namedRegionCount += 1
+                            regionNamesSeen.insert(name)
+                        }
+                    }
+                }
             }
 
             let elapsed = CFAbsoluteTimeGetCurrent() - startTime
             Log.enrich.info("Done in \(String(format: "%.1f", elapsed))s: \(dateCount) EXIF dates, \(tagCount) photos with tags, \(uniquePaths.count) unique tag paths")
+            Log.enrich.info("Face regions: \(regionCount) on \(regionPhotoCount) photos (\(namedRegionCount) named, \(regionNamesSeen.count) unique names)")
+            if regionCount == 0 {
+                Log.enrich.warning("No MWG regions found — Person rail will fall back to center-crop. Check that your XMP has <mwg-rs:RegionInfo> blocks.")
+            } else {
+                let sampleNames = regionNamesSeen.prefix(8).joined(separator: ", ")
+                Log.enrich.debug("Sample region names: \(sampleNames)")
+            }
             let sampleTags = result.flatMap(\.hierarchicalTags).prefix(20)
             if !sampleTags.isEmpty {
                 let tagDetails = sampleTags.map { "\($0.fullPath) → ns:\($0.namespace ?? "nil") name:\($0.displayName)" }

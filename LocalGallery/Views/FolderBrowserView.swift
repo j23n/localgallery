@@ -144,7 +144,9 @@ struct FolderBrowserView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
+            Spacer()
         }
         .padding(.vertical, 4)
+        .contentShape(Rectangle())
     }
 }

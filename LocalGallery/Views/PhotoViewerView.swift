@@ -210,9 +210,10 @@ struct PhotoViewerView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var isChromeVisible: Bool = true
-    @State private var showShareSheet: Bool = false
     @State private var showEXIF: Bool = false
     @State private var dismissOffset: CGFloat = 0
+    @State private var pendingShareItem: ShareItem?
+    @State private var isPreparingShare: Bool = false
 
     /// Index of `currentPhotoID` within `photos`, or nil if the id isn't
     /// present (rescan removed the photo, or the array is empty).
@@ -223,13 +224,6 @@ struct PhotoViewerView: View {
     private var currentPhoto: PhotoFile? {
         guard let idx = currentIndex else { return nil }
         return photos[idx]
-    }
-
-    private var positionLabel: String {
-        if let idx = currentIndex {
-            return "\(idx + 1) / \(photos.count)"
-        }
-        return "0 / \(photos.count)"
     }
 
     var body: some View {
@@ -249,48 +243,34 @@ struct PhotoViewerView: View {
                 .offset(y: dismissOffset)
             }
 
-            if isChromeVisible {
-                VStack {
-                    HStack {
-                        Button { dismiss() } label: {
-                            Image(systemName: "xmark")
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundStyle(.white)
-                                .frame(width: 36, height: 36)
-                                .background(.white.opacity(0.15), in: Circle())
-                        }
-                        Spacer()
-                        Text(positionLabel)
-                            .font(.system(size: 13, weight: .medium, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.85))
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 5)
-                            .background(.white.opacity(0.12), in: Capsule())
-                        Spacer()
-                        Color.clear.frame(width: 36, height: 36)
-                    }
-                    .padding(.horizontal)
-                    .padding(.top, 8)
-
+            // Filmstrip is always visible — taps on the photo only toggle
+            // the other chrome (top pill + share + info).
+            VStack {
+                Spacer()
+                filmstrip
+                    .padding(.bottom, isChromeVisible ? 64 : 12)
+            }
+            .background(
+                VStack(spacing: 0) {
                     Spacer()
+                    LinearGradient(
+                        colors: [.clear, .black.opacity(0.15), .black.opacity(0.55)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .frame(height: 160)
+                }
+                .allowsHitTesting(false)
+                .ignoresSafeArea()
+            )
+            .animation(.easeInOut(duration: 0.25), value: isChromeVisible)
+            .offset(y: dismissOffset)
 
-                    HStack {
-                        Button { showShareSheet = true } label: {
-                            Image(systemName: "square.and.arrow.up")
-                                .font(.system(size: 18))
-                                .foregroundStyle(.white)
-                                .frame(width: 44, height: 44)
-                        }
-                        Spacer()
-                        Button { showEXIF = true } label: {
-                            Image(systemName: "info.circle")
-                                .font(.system(size: 18))
-                                .foregroundStyle(.white)
-                                .frame(width: 44, height: 44)
-                        }
-                    }
-                    .padding(.horizontal, 24)
-                    .padding(.bottom, 4)
+            if isChromeVisible {
+                VStack(spacing: 0) {
+                    topBar
+                    Spacer()
+                    bottomActionBar
                 }
                 .background(
                     VStack(spacing: 0) {
@@ -301,12 +281,6 @@ struct PhotoViewerView: View {
                         )
                         .frame(height: 120)
                         Spacer()
-                        LinearGradient(
-                            colors: [.clear, .black.opacity(0.15), .black.opacity(0.55)],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                        .frame(height: 120)
                     }
                     .allowsHitTesting(false)
                     .ignoresSafeArea()
@@ -314,8 +288,20 @@ struct PhotoViewerView: View {
                 .transition(.opacity)
                 .offset(y: dismissOffset)
             }
+
+            if isPreparingShare {
+                Color.black.opacity(0.35)
+                    .ignoresSafeArea()
+                    .overlay {
+                        ProgressView()
+                            .tint(.white)
+                            .scaleEffect(1.2)
+                    }
+                    .transition(.opacity)
+            }
         }
         .animation(.easeInOut(duration: 0.25), value: isChromeVisible)
+        .animation(.easeOut(duration: 0.15), value: isPreparingShare)
         .statusBarHidden(!isChromeVisible)
         .background(
             SwipeToDismissGestureInstaller(
@@ -331,10 +317,8 @@ struct PhotoViewerView: View {
                 dismiss()
             }
         }
-        .sheet(isPresented: $showShareSheet) {
-            if let photo = currentPhoto {
-                ShareSheet(items: [photo.url])
-            }
+        .sheet(item: $pendingShareItem) { item in
+            ShareSheet(items: [item.url])
         }
         .sheet(isPresented: $showEXIF) {
             if let photo = currentPhoto {
@@ -342,6 +326,161 @@ struct PhotoViewerView: View {
             }
         }
     }
+
+    // MARK: Chrome
+
+    private var topBar: some View {
+        HStack(alignment: .center, spacing: 8) {
+            Button { dismiss() } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 36, height: 36)
+                    .background(.white.opacity(0.15), in: Circle())
+            }
+
+            Spacer()
+
+            if let photo = currentPhoto, let lines = PhotoChrome.pillLines(for: photo) {
+                VStack(spacing: 1) {
+                    if let date = lines.date {
+                        Text(date)
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                    }
+                    if let location = lines.location {
+                        Text(location)
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.78))
+                            .lineLimit(1)
+                    }
+                }
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(.white.opacity(0.14), in: Capsule())
+            }
+
+            Spacer()
+
+            Color.clear.frame(width: 36, height: 36)
+        }
+        .padding(.horizontal)
+        .padding(.top, 8)
+    }
+
+    private var bottomActionBar: some View {
+        HStack(spacing: 12) {
+            shareButton
+            Spacer()
+            infoButton
+        }
+        .padding(.horizontal, 24)
+        .padding(.bottom, 4)
+    }
+
+    private var shareButton: some View {
+        Menu {
+            Button("Original") { share(quality: .original) }
+            Button("High (4096px)") { share(quality: .high) }
+                .disabled(currentPhoto?.isVideo ?? false)
+            Button("Medium (2048px)") { share(quality: .medium) }
+                .disabled(currentPhoto?.isVideo ?? false)
+            Button("Small (1024px)") { share(quality: .small) }
+                .disabled(currentPhoto?.isVideo ?? false)
+        } label: {
+            Label("Share", systemImage: "square.and.arrow.up")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 9)
+                .background(.white.opacity(0.18), in: Capsule())
+        }
+    }
+
+    private var infoButton: some View {
+        Button { showEXIF = true } label: {
+            Label("Info", systemImage: "info.circle")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 9)
+                .background(.white.opacity(0.18), in: Capsule())
+        }
+    }
+
+    // MARK: Filmstrip
+
+    private var filmstrip: some View {
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 4) {
+                    ForEach(photos) { photo in
+                        Button {
+                            withAnimation(.easeOut(duration: 0.2)) {
+                                currentPhotoID = photo.id
+                            }
+                        } label: {
+                            ThumbnailView(url: photo.url, size: 56, cornerRadius: 6)
+                                .frame(width: 56, height: 56)
+                                .scaleEffect(photo.id == currentPhotoID ? 1.08 : 1.0)
+                                .overlay {
+                                    if photo.id == currentPhotoID {
+                                        RoundedRectangle(cornerRadius: 6)
+                                            .stroke(.white, lineWidth: 2)
+                                    }
+                                }
+                                .animation(.easeOut(duration: 0.2), value: currentPhotoID)
+                        }
+                        .buttonStyle(.plain)
+                        .id(photo.id)
+                    }
+                }
+                .padding(.horizontal, 16)
+            }
+            .frame(height: 70)
+            .onAppear {
+                proxy.scrollTo(currentPhotoID, anchor: .center)
+            }
+            .onChange(of: currentPhotoID) { _, id in
+                withAnimation(.easeOut(duration: 0.25)) {
+                    proxy.scrollTo(id, anchor: .center)
+                }
+            }
+        }
+    }
+
+    // MARK: Share
+
+    private func share(quality: PhotoQuality) {
+        guard let photo = currentPhoto else { return }
+        // Show spinner only if the export takes meaningful time. `.original`
+        // and small images return near-instantly.
+        let spinnerTask = Task {
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            if !Task.isCancelled { isPreparingShare = true }
+        }
+        Task {
+            defer {
+                spinnerTask.cancel()
+                isPreparingShare = false
+            }
+            do {
+                let url = try await PhotoExporter.export(photo, quality: quality)
+                pendingShareItem = ShareItem(url: url)
+            } catch {
+                Log.ui.error("Photo export failed: \(error.localizedDescription)")
+            }
+        }
+    }
+}
+
+// MARK: - Identifiable wrapper for sheet(item:) on a URL
+
+private struct ShareItem: Identifiable {
+    let id = UUID()
+    let url: URL
 }
 
 // MARK: - Zoomable Image (UIScrollView-based)

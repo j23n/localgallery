@@ -50,6 +50,16 @@ struct SettingsView: View {
                     }
 
                     NavigationLink {
+                        MePersonPicker()
+                    } label: {
+                        LabeledContent {
+                            Text(meSummary).foregroundStyle(.secondary)
+                        } label: {
+                            Label("Me", systemImage: "person.crop.circle.badge.checkmark")
+                        }
+                    }
+
+                    NavigationLink {
                         LinkedContactsList()
                     } label: {
                         LabeledContent {
@@ -78,6 +88,14 @@ struct SettingsView: View {
                     LabeledContent("Version", value: appVersion)
                 }
 
+                Section("Developer") {
+                    NavigationLink {
+                        LogsView()
+                    } label: {
+                        Label("Logs", systemImage: "doc.text.magnifyingglass")
+                    }
+                }
+
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
@@ -102,6 +120,14 @@ struct SettingsView: View {
                 }
             }
         }
+    }
+
+    /// Display name of the currently-marked "me" person, or "Not set".
+    private var meSummary: String {
+        guard !store.mePersonPath.isEmpty,
+              let me = store.peopleTags.first(where: { $0.fullPath == store.mePersonPath })
+        else { return "Not set" }
+        return me.displayName
     }
 
     /// One-line summary of linked / auto-matched contacts for the Settings row.
@@ -197,5 +223,73 @@ private struct HiddenPersonRow: View {
             .buttonStyle(.plain)
         }
         .padding(.vertical, 2)
+    }
+}
+
+// MARK: - "Me" person picker
+
+/// Choose which `People/<name>` tag represents the current user. Used by
+/// trip-title generation to skip the user when listing companions
+/// ("Chile with Anna & Bob"). Only one person can be marked at a time.
+struct MePersonPicker: View {
+    @Environment(GalleryStore.self) private var store
+    @State private var searchText = ""
+
+    private var people: [TagSuggestion] {
+        let all = store.peopleTags
+        guard !searchText.isEmpty else { return all }
+        let needle = searchText.lowercased()
+        return all.filter { $0.displayName.lowercased().contains(needle) }
+    }
+
+    var body: some View {
+        List {
+            Section {
+                Button {
+                    store.unmarkAsMe()
+                } label: {
+                    HStack {
+                        Image(systemName: "person.crop.circle.badge.xmark")
+                        Text("Not set")
+                        Spacer()
+                        if store.mePersonPath.isEmpty {
+                            Image(systemName: "checkmark")
+                                .foregroundStyle(Design.accentColor)
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+            } footer: {
+                Text("Trip memory titles will exclude this person from the “with X, Y, Z” list. The list shows everyone tagged in your library.")
+            }
+            Section("People") {
+                ForEach(people) { person in
+                    Button {
+                        store.markAsMe(person.fullPath)
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "person.fill")
+                                .foregroundStyle(Design.ink3)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(person.displayName)
+                                    .foregroundStyle(Design.ink)
+                                Text("\(person.count) \(person.count == 1 ? "photo" : "photos")")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(Design.ink3)
+                            }
+                            Spacer()
+                            if store.mePersonPath == person.fullPath {
+                                Image(systemName: "checkmark")
+                                    .foregroundStyle(Design.accentColor)
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .searchable(text: $searchText, prompt: "Search people")
+        .navigationTitle("Me")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }

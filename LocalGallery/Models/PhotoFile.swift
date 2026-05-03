@@ -22,6 +22,10 @@ struct PhotoFile: Identifiable, Hashable, Codable, Sendable {
     var enrichedFileDate: Date? = nil
     var gpsLatitude: Double? = nil
     var gpsLongitude: Double? = nil
+    /// MWG `mwg-rs:RegionInfo` entries — one per detected face. Empty when the
+    /// source XMP carries none. Used by the People rail to crop thumbnails to
+    /// the matching face.
+    var faceRegions: [FaceRegion] = []
 
     // Not persisted — loaded lazily at runtime
     var dimensions: CGSize? = nil
@@ -32,10 +36,10 @@ struct PhotoFile: Identifiable, Hashable, Codable, Sendable {
     var keywords: [String] { hierarchicalTags.map(\.displayName) }
 
     enum CodingKeys: String, CodingKey {
-        case id, url, filename, fileSize, dateTaken, dateFromMetadata, isVideo, livePhotoVideoURL, hierarchicalTags, countryCode, enrichedFileDate, gpsLatitude, gpsLongitude
+        case id, url, filename, fileSize, dateTaken, dateFromMetadata, isVideo, livePhotoVideoURL, hierarchicalTags, countryCode, enrichedFileDate, gpsLatitude, gpsLongitude, faceRegions
     }
 
-    init(id: UUID, url: URL, filename: String, fileSize: Int64, dateTaken: Date?, dateFromMetadata: Bool = false, isVideo: Bool = false, livePhotoVideoURL: URL? = nil, hierarchicalTags: [HierarchicalTag] = [], countryCode: String? = nil, enrichedFileDate: Date? = nil, gpsLatitude: Double? = nil, gpsLongitude: Double? = nil) {
+    init(id: UUID, url: URL, filename: String, fileSize: Int64, dateTaken: Date?, dateFromMetadata: Bool = false, isVideo: Bool = false, livePhotoVideoURL: URL? = nil, hierarchicalTags: [HierarchicalTag] = [], countryCode: String? = nil, enrichedFileDate: Date? = nil, gpsLatitude: Double? = nil, gpsLongitude: Double? = nil, faceRegions: [FaceRegion] = []) {
         self.id = id
         self.url = url
         self.filename = filename
@@ -49,6 +53,7 @@ struct PhotoFile: Identifiable, Hashable, Codable, Sendable {
         self.enrichedFileDate = enrichedFileDate
         self.gpsLatitude = gpsLatitude
         self.gpsLongitude = gpsLongitude
+        self.faceRegions = faceRegions
     }
 
     init(from decoder: Decoder) throws {
@@ -66,6 +71,7 @@ struct PhotoFile: Identifiable, Hashable, Codable, Sendable {
         enrichedFileDate = try c.decodeIfPresent(Date.self, forKey: .enrichedFileDate)
         gpsLatitude = try c.decodeIfPresent(Double.self, forKey: .gpsLatitude)
         gpsLongitude = try c.decodeIfPresent(Double.self, forKey: .gpsLongitude)
+        faceRegions = try c.decodeIfPresent([FaceRegion].self, forKey: .faceRegions) ?? []
     }
 
     static func == (lhs: PhotoFile, rhs: PhotoFile) -> Bool {

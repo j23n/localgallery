@@ -9,8 +9,14 @@ enum LibraryCacheStore {
     /// dates read AVAsset.creationDate (videos used to skip enrichment and
     /// fall back to the filesystem date, which often equals the download
     /// time on this device). v16: stable IDs migrated from MD5 to SHA-256 —
-    /// old cached IDs are incompatible with new scan output.
-    static let version = 16
+    /// old cached IDs are incompatible with new scan output. v17: PhotoFile
+    /// gained `faceRegions` — re-enrich so MWG region data populates.
+    /// v18: face region reader now also pulls from embedded XMP (not just
+    /// .xmp sidecars), so re-enrich to pick up regions in JPEG/HEIC files
+    /// that don't have a sidecar. v19: MWG region parser rewritten to target
+    /// `<mwg-rs:Area>` directly instead of walking `<rdf:li>` boundaries —
+    /// re-enrich so libraries that hit the boundary bug pick up regions now.
+    static let version = 19
 
     private struct Payload: Codable, Sendable {
         let version: Int

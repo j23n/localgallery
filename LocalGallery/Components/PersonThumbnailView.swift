@@ -62,9 +62,10 @@ struct PersonThumbnailView: View {
         fullImage = Self.crop(full, to: region)
     }
 
-    /// Crop with `1× region width / height` padding on each axis, clamped to
-    /// the image bounds. Returns the original image when the region is too
-    /// small after clamping to be useful.
+    /// Crop around the face with enough padding that the face occupies a
+    /// portrait-style proportion of the frame (~20%) rather than filling
+    /// it. Clamped to the image bounds — when the face is near an edge we
+    /// shift the rect rather than shrink it so the face stays centred.
     static func crop(_ image: UIImage, to region: FaceRegion) -> UIImage {
         guard let cgImage = image.cgImage else { return image }
         let imgW = CGFloat(cgImage.width)
@@ -76,8 +77,12 @@ struct PersonThumbnailView: View {
         let rW = CGFloat(region.width) * imgW
         let rH = CGFloat(region.height) * imgH
 
-        // 1× padding on each side → span = 3× region extent.
-        let span = max(rW, rH) * 3
+        // Span is 5× the region extent so the face occupies ~20% of the
+        // crop — a comfortable headshot proportion. Clamp to a minimum of
+        // 35% of the shorter image side so a tiny face still produces a
+        // recognisable framing instead of a tight pixel-peeped crop.
+        let minSpan = min(imgW, imgH) * 0.35
+        let span = max(max(rW, rH) * 5, minSpan)
         var rect = CGRect(
             x: cx - span / 2,
             y: cy - span / 2,

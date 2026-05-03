@@ -788,46 +788,60 @@ final class GalleryStore {
     }
 
     /// The photo chosen as the card image for a person. When the user hasn't
-    /// pinned a specific photo, picks the best automatic candidate using
-    /// `featuredPhotoScore` — large face region + recent date.
+    /// pinned a specific photo, prefer photos where this person is the only
+    /// one tagged (cleaner cover, no other faces to crop around), then sort
+    /// by recency. Face-area-based ranking turned out to be unreliable when
+    /// multiple regions exist and the matching region for *this person*
+    /// can't be uniquely identified by name — solo-photo preference is a
+    /// simpler proxy for "good portrait of this person".
     func featuredPhoto(for tag: TagSuggestion) -> PhotoFile? {
         if let id = featuredPhotoByPerson[tag.fullPath], let photo = searchService.photo(byID: id) {
             return photo
         }
         let candidates = photos(forTag: tag)
         guard !candidates.isEmpty else { return nil }
-        let now = clock.now()
-        let displayLower = tag.displayName.lowercased()
-        return candidates.max { a, b in
-            featuredPhotoScore(a, personDisplayLower: displayLower, now: now)
-                < featuredPhotoScore(b, personDisplayLower: displayLower, now: now)
+        let solo = candidates.filter { peopleTagCount(in: $0) == 1 }
+        let pool = solo.isEmpty ? candidates : solo
+        return pool.max { a, b in
+            (a.dateTaken ?? .distantPast) < (b.dateTaken ?? .distantPast)
         }
     }
 
-    /// Score a candidate cover photo for a person. Region area dominates so
-    /// close-up portraits beat wide shots; recency is a tiebreaker for photos
-    /// without region data (or with similar-sized regions).
-    private func featuredPhotoScore(_ photo: PhotoFile, personDisplayLower: String, now: Date) -> Double {
-        let matched = photo.faceRegions.first { region in
-            (region.name?.lowercased() ?? "") == personDisplayLower
-        }
-        let area = matched.map { $0.width * $0.height } ?? 0
-        let recencyDays: Double
-        if let date = photo.dateTaken {
-            recencyDays = max(0, now.timeIntervalSince(date) / 86_400)
-        } else {
-            recencyDays = 10_000
-        }
-        // Linear decay over 5 years; clamps to [0, 1].
-        let recency = max(0, 1 - recencyDays / (365 * 5))
-        return area * 100 + recency * 10
+    private func peopleTagCount(in photo: PhotoFile) -> Int {
+        photo.hierarchicalTags.filter { $0.namespace?.lowercased() == "people" }.count
     }
 
     /// Face region matching `tag.displayName` on a candidate cover photo.
-    /// Returned for `PersonThumbnailView` so it can crop to the face.
+    /// Tries exact lowercased match first; falls back to first-name or
+    /// substring match in case the MWG `mwg-rs:Name` value differs slightly
+    /// from the `People/<name>` tag leaf (e.g. tag "Anna" but region
+    /// "Anna Smith", or vice versa). Returns nil when no region's name
+    /// resembles the person.
     func faceRegion(for photo: PhotoFile, person displayName: String) -> FaceRegion? {
-        let lower = displayName.lowercased()
-        return photo.faceRegions.first { ($0.name?.lowercased() ?? "") == lower }
+        let target = displayName.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !target.isEmpty else { return nil }
+        let targetFirst = target.split(separator: " ").first.map(String.init) ?? target
+
+        // 1. Exact lowercased match.
+        if let exact = photo.faceRegions.first(where: { ($0.name?.lowercased() ?? "") == target }) {
+            return exact
+        }
+        // 2. First-name match (handles "Anna" tag → "Anna Smith" region or vice versa).
+        if let firstMatch = photo.faceRegions.first(where: { region in
+            guard let name = region.name?.lowercased(), !name.isEmpty else { return false }
+            let regionFirst = name.split(separator: " ").first.map(String.init) ?? name
+            return regionFirst == targetFirst
+        }) {
+            return firstMatch
+        }
+        // 3. Substring match either direction.
+        if let sub = photo.faceRegions.first(where: { region in
+            guard let name = region.name?.lowercased(), !name.isEmpty else { return false }
+            return name.contains(target) || target.contains(name)
+        }) {
+            return sub
+        }
+        return nil
     }
 
     func setFeaturedPhoto(personPath: String, photoID: UUID) {

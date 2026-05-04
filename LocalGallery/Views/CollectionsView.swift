@@ -7,6 +7,7 @@ enum CollectionsRoute: Hashable {
     case slideshow(Memory)
     case memoryGrid(Memory)
     case peopleList
+    case personGrid(TagSuggestion)
 }
 
 struct CollectionsView: View {
@@ -110,6 +111,8 @@ struct CollectionsView: View {
                 MemoryGridView(memory: memory)
             case .peopleList:
                 PeopleListView()
+            case .personGrid(let tag):
+                TagGridView(tag: tag)
             }
         }
     }
@@ -642,9 +645,7 @@ struct PeopleListView: View {
     var body: some View {
         List {
             ForEach(filteredPeople) { person in
-                NavigationLink {
-                    TagGridView(tag: person)
-                } label: {
+                NavigationLink(value: CollectionsRoute.personGrid(person)) {
                     PeopleListRow(tag: person)
                 }
                 .swipeActions(edge: .trailing, allowsFullSwipe: true) {

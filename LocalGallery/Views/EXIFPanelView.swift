@@ -1,7 +1,10 @@
 import SwiftUI
 import MapKit
 
-struct EXIFSheetView: View {
+/// Inline info drawer rendered on the same canvas as the photo viewer. Loads
+/// EXIF + photo-tools metadata for the visible photo and re-loads as the
+/// photo id changes (paging while the drawer is open).
+struct PhotoInfoPanel: View {
     let photo: PhotoFile
     @Environment(GalleryStore.self) private var store
     @State private var exifData: EXIFData?
@@ -9,21 +12,17 @@ struct EXIFSheetView: View {
     @State private var isLoading = true
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                EXIFContentView(
-                    photo: photo,
-                    exifData: exifData,
-                    photoToolsData: photoToolsData,
-                    isLoading: isLoading
-                )
-            }
-            .background(Color(.systemGroupedBackground))
-            .navigationTitle("Info")
-            .navigationBarTitleDisplayMode(.inline)
+        ScrollView {
+            content
+                .padding(.top, 16)
+                .padding(.bottom, 40)
+                .frame(maxWidth: .infinity)
         }
-        .presentationDetents([.medium, .large])
-        .task {
+        .background(Color(.systemGroupedBackground))
+        .task(id: photo.id) {
+            isLoading = true
+            exifData = nil
+            photoToolsData = PhotoToolsMetadata()
             async let exif = store.loadEXIF(for: photo)
             async let pt = store.loadPhotoToolsMetadata(for: photo)
             exifData = await exif
@@ -31,68 +30,55 @@ struct EXIFSheetView: View {
             isLoading = false
         }
     }
-}
 
-struct EXIFContentView: View {
-    let photo: PhotoFile
-    let exifData: EXIFData?
-    let photoToolsData: PhotoToolsMetadata
-    let isLoading: Bool
-
-    var body: some View {
-        VStack(spacing: 0) {
-            if isLoading {
-                ProgressView()
-                    .frame(maxWidth: .infinity, minHeight: 200)
-            } else {
-                VStack(alignment: .leading, spacing: 20) {
-                    section("File") {
-                        infoRow("Filename", value: photo.filename)
-                        infoRow("Dimensions", value: dimensionsText)
-                        infoRow("File Size", value: formattedFileSize(photo.fileSize))
-                        infoRow("Date Taken", value: formattedDate)
-                    }
-
-                    if !photo.hierarchicalTags.isEmpty {
-                        section("Tags") {
-                            HierarchicalTagFlowView(tags: photo.hierarchicalTags)
-                                .padding(.vertical, 2)
-                        }
-                    }
-
-                    section("Camera") {
-                        infoRow("Camera", value: cameraText)
-                        infoRow("Lens", value: exifData?.lens)
-                        infoRow("Aperture", value: apertureText)
-                        infoRow("Shutter Speed", value: shutterSpeedText)
-                        infoRow("ISO", value: exifData?.iso.map { "\($0)" })
-                    }
-
-                    section("Location") {
-                        if let lat = exifData?.gpsLatitude, let lon = exifData?.gpsLongitude {
-                            infoRow("Coordinates", value: String(format: "%.5f, %.5f", lat, lon))
-                            mapView(latitude: lat, longitude: lon)
-                        } else {
-                            infoRow("Coordinates", value: nil)
-                        }
-                    }
-
-                    if !photoToolsData.isEmpty {
-                        section("photo-tools") {
-                            infoRow("Tagger Version", value: photoToolsData.taggerVersion)
-                            infoRow("Tagged At", value: photoToolsData.taggedAt)
-                            infoRow("Country Code", value: photoToolsData.countryCode)
-                            infoRow("CLIP Model", value: photoToolsData.clipModel)
-                            infoRow("CLIP Timestamp", value: photoToolsData.clipTimestamp)
-                        }
+    @ViewBuilder
+    private var content: some View {
+        if isLoading {
+            ProgressView()
+                .frame(maxWidth: .infinity, minHeight: 200)
+        } else {
+            VStack(alignment: .leading, spacing: 20) {
+                if !photo.hierarchicalTags.isEmpty {
+                    section("Tags") {
+                        HierarchicalTagFlowView(tags: photo.hierarchicalTags)
+                            .padding(.vertical, 2)
                     }
                 }
-                .padding(.horizontal, 16)
+
+                if let lat = exifData?.gpsLatitude, let lon = exifData?.gpsLongitude {
+                    section("Location") {
+                        infoRow("Coordinates", value: String(format: "%.5f, %.5f", lat, lon))
+                        mapView(latitude: lat, longitude: lon)
+                    }
+                }
+
+                section("File") {
+                    infoRow("Filename", value: photo.filename)
+                    infoRow("Dimensions", value: dimensionsText)
+                    infoRow("File Size", value: formattedFileSize(photo.fileSize))
+                    infoRow("Date Taken", value: formattedDate)
+                }
+
+                section("Camera") {
+                    infoRow("Camera", value: cameraText)
+                    infoRow("Lens", value: exifData?.lens)
+                    infoRow("Aperture", value: apertureText)
+                    infoRow("Shutter Speed", value: shutterSpeedText)
+                    infoRow("ISO", value: exifData?.iso.map { "\($0)" })
+                }
+
+                if !photoToolsData.isEmpty {
+                    section("photo-tools") {
+                        infoRow("Tagger Version", value: photoToolsData.taggerVersion)
+                        infoRow("Tagged At", value: photoToolsData.taggedAt)
+                        infoRow("Country Code", value: photoToolsData.countryCode)
+                        infoRow("CLIP Model", value: photoToolsData.clipModel)
+                        infoRow("CLIP Timestamp", value: photoToolsData.clipTimestamp)
+                    }
+                }
             }
+            .padding(.horizontal, 16)
         }
-        .padding(.top, 16)
-        .padding(.bottom, 40)
-        .frame(maxWidth: .infinity)
     }
 
     // MARK: - Section

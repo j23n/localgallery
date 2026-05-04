@@ -20,7 +20,11 @@ final class GalleryStore {
     }
 
     var hiddenPeople: Set<String> = [] {
-        didSet { defaults.set(Array(hiddenPeople), forKey: "hiddenPeople") }
+        didSet {
+            defaults.set(Array(hiddenPeople), forKey: "hiddenPeople")
+            guard !_isInitializing else { return }
+            forceRegenerateMemories()
+        }
     }
     /// Person tag paths that are "featured" — sorted to the front of the People rail
     /// and decorated with a star. Stored under the legacy `pinnedPeople` key.
@@ -729,7 +733,8 @@ final class GalleryStore {
     }
 
     /// All people with hidden filtered out and featured floated to the front
-    /// (preserves feature order).
+    /// (preserves feature order). Used by PeopleListView — no cap, no recency
+    /// gate so the full roster is always reachable.
     var visiblePeople: [TagSuggestion] {
         let visible = topPeople.filter { !hiddenPeople.contains($0.fullPath) }
         let featuredSet = Set(featuredPeople)
@@ -738,9 +743,29 @@ final class GalleryStore {
         return featuredFirst + rest
     }
 
+    /// Top 20 people for the Collections rail. Non-featured must have at least
+    /// one photo dated within the past 2 years; featured bypass the recency
+    /// gate (the user explicitly promoted them). Sorted by total photo count.
+    var visiblePeopleForRail: [TagSuggestion] {
+        let twoYearsAgo = Calendar.current.date(byAdding: .year, value: -2, to: Date()) ?? Date()
+        let featuredSet = Set(featuredPeople)
+        let visible = topPeople.filter { !hiddenPeople.contains($0.fullPath) }
+        let featuredInOrder = featuredPeople.compactMap { path in visible.first { $0.fullPath == path } }
+        let nonFeatured = visible
+            .filter { !featuredSet.contains($0.fullPath) }
+            .filter { ($0.latestPhotoDate ?? .distantPast) > twoYearsAgo }
+        return Array((featuredInOrder + nonFeatured).prefix(20))
+    }
+
     var visibleMemories: [Memory] {
         memories.filter { memory in
             guard !hiddenMemories.contains(memory.id) else { return false }
+            // Suppress birthday memories for people who have since been hidden
+            // (catches stale cached memories generated before the person was hidden).
+            if memory.id.hasPrefix("birthday-") {
+                let personPath = String(memory.id.dropFirst("birthday-".count))
+                if hiddenPeople.contains(personPath) { return false }
+            }
             // Hide memories whose photo IDs are entirely stale (e.g. folder
             // moved since the memory was generated, changing SHA-256 UUIDs).
             // Mirror the same resolution order as MemoryCardView's coverURL.
@@ -918,6 +943,7 @@ final class GalleryStore {
             contactsByLowerName: self.contactLinker.contactsByLowerName,
             birthdaysEnabled: self.birthdayMemoriesEnabled,
             mePersonPath: self.mePersonPath,
+            hiddenPeople: self.hiddenPeople,
             now: self.clock.now(),
             seed: seed,
             seenMemoryIDs: self.seenMemoryIDs,

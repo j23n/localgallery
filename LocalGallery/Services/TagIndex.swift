@@ -85,21 +85,20 @@ final class TagIndex {
         }
         .sorted { $0.count > $1.count }
 
-        // Sort people by recent-activity then count. Show all people, not just
-        // 8 — pinning / featuring happens downstream in visiblePeople.
+        // Build people list with latestPhotoDate, sorted by photo count.
+        // Recency filtering (2-year gate) and the 20-cap happen downstream in
+        // visiblePeopleForRail so the full list is available for PeopleListView.
         let peopleTags = tags.filter { $0.namespace?.lowercased() == "people" }
-        let oneYearAgo = Calendar.current.date(byAdding: .year, value: -1, to: now) ?? now
-        let scoredPeople: [(tag: TagSuggestion, hasRecent: Bool)] = peopleTags.map { person in
+        let people: [TagSuggestion] = peopleTags.map { person in
             let photos = photosForTag[person.fullPath.lowercased()] ?? []
-            let hasRecent = photos.contains { ($0.dateTaken ?? .distantPast) > oneYearAgo }
-            return (person, hasRecent)
+            let latest = photos.compactMap(\.dateTaken).max()
+            return TagSuggestion(
+                id: person.id, displayName: person.displayName,
+                fullPath: person.fullPath, namespace: person.namespace,
+                count: person.count, latestPhotoDate: latest
+            )
         }
-        let people = scoredPeople
-            .sorted { a, b in
-                if a.hasRecent != b.hasRecent { return a.hasRecent }
-                return a.tag.count > b.tag.count
-            }
-            .map(\.tag)
+        .sorted { $0.count > $1.count }
 
         return (tags, people)
     }

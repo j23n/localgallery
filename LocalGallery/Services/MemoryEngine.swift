@@ -84,6 +84,7 @@ enum MemoryEngine {
         contactsByLowerName: [String: ContactInfo],
         birthdaysEnabled: Bool,
         mePersonPath: String = "",
+        hiddenPeople: Set<String> = [],
         now: Date = Date(),
         seed: String = "",
         seenMemoryIDs: [String: Date] = [:],
@@ -223,7 +224,7 @@ enum MemoryEngine {
 
             // === 6. Trip Detection ===
             let tripCountBefore = candidates.count
-            generateTripMemories(from: photosWithDates, calendar: calendar, today: today, mePersonPath: mePersonPath, into: &candidates)
+            generateTripMemories(from: photosWithDates, calendar: calendar, today: today, mePersonPath: mePersonPath, hiddenPeople: hiddenPeople, into: &candidates)
             Log.memory.info("Trips: produced \(candidates.count - tripCountBefore) memories")
 
             // === 7. Birthdays ===
@@ -241,6 +242,7 @@ enum MemoryEngine {
                     lowerNameIndex: contactsByLowerName,
                     calendar: calendar,
                     todayComponents: todayComponents,
+                    hiddenPeople: hiddenPeople,
                     into: &candidates
                 )
                 Log.memory.info("Birthdays: produced \(candidates.count - bdayBefore) memories")
@@ -419,6 +421,7 @@ enum MemoryEngine {
         lowerNameIndex: [String: ContactInfo],
         calendar: Calendar,
         todayComponents: DateComponents,
+        hiddenPeople: Set<String> = [],
         into candidates: inout [Memory]
     ) {
         guard let todayMonth = todayComponents.month,
@@ -445,6 +448,7 @@ enum MemoryEngine {
         let contactByID = Dictionary(uniqueKeysWithValues: contacts.map { ($0.id, $0) })
 
         for (path, bundle) in byPath {
+            if hiddenPeople.contains(path) { continue }
             // Resolve effective contact: explicit `.disabled` skips this tag,
             // a `.manual` link wins over name-based auto-match, and absence
             // means "auto-match by displayName".
@@ -501,6 +505,7 @@ enum MemoryEngine {
         calendar: Calendar,
         today: Date,
         mePersonPath: String,
+        hiddenPeople: Set<String> = [],
         into candidates: inout [Memory]
     ) {
         let geoPhotos = photosWithDates
@@ -524,16 +529,16 @@ enum MemoryEngine {
             if dist > distanceThresholdKm {
                 if let lastDate = currentTrip.last?.1,
                    entry.1.timeIntervalSince(lastDate) > 48 * 3600 {
-                    flushTrip(currentTrip, calendar: calendar, today: today, mePersonPath: mePersonPath, into: &candidates)
+                    flushTrip(currentTrip, calendar: calendar, today: today, mePersonPath: mePersonPath, hiddenPeople: hiddenPeople, into: &candidates)
                     currentTrip = []
                 }
                 currentTrip.append(entry)
             } else {
-                flushTrip(currentTrip, calendar: calendar, today: today, mePersonPath: mePersonPath, into: &candidates)
+                flushTrip(currentTrip, calendar: calendar, today: today, mePersonPath: mePersonPath, hiddenPeople: hiddenPeople, into: &candidates)
                 currentTrip = []
             }
         }
-        flushTrip(currentTrip, calendar: calendar, today: today, mePersonPath: mePersonPath, into: &candidates)
+        flushTrip(currentTrip, calendar: calendar, today: today, mePersonPath: mePersonPath, hiddenPeople: hiddenPeople, into: &candidates)
     }
 
     // MARK: Trip Segmentation
@@ -543,6 +548,7 @@ enum MemoryEngine {
         calendar: Calendar,
         today: Date,
         mePersonPath: String,
+        hiddenPeople: Set<String> = [],
         into candidates: inout [Memory]
     ) {
         guard entries.count >= 15 else { return }
@@ -558,7 +564,7 @@ enum MemoryEngine {
 
         let tripPhotos = sorted.map(\.0)
         let locationLabel = tripLabel(for: tripPhotos)
-        let peopleSuffix = tripPeopleSuffix(for: tripPhotos, mePersonPath: mePersonPath)
+        let peopleSuffix = tripPeopleSuffix(for: tripPhotos, mePersonPath: mePersonPath, excludedPaths: hiddenPeople)
         let title = composeTripTitle(location: locationLabel, peopleSuffix: peopleSuffix)
         if locationLabel == nil {
             let sampleTags = sorted.prefix(3).flatMap { $0.0.hierarchicalTags.map(\.fullPath) }
@@ -603,7 +609,7 @@ enum MemoryEngine {
                   Double(segSet.count) <= Double(parentSet.count) * 0.85 else { continue }
 
             let segPhotos = seg.entries.map(\.0)
-            let segPeopleSuffix = tripPeopleSuffix(for: segPhotos, mePersonPath: mePersonPath)
+            let segPeopleSuffix = tripPeopleSuffix(for: segPhotos, mePersonPath: mePersonPath, excludedPaths: hiddenPeople)
             let subTitle = composeTripTitle(location: seg.label, peopleSuffix: segPeopleSuffix)
             candidates.append(Memory(
                 id: "subtrip-\(tripKey)-\(seg.key)", type: .trip,
@@ -748,6 +754,13 @@ enum MemoryEngine {
         if total > 0,
            let dominant = countryCounts.max(by: { $0.value < $1.value }),
            Double(dominant.value) / Double(total) >= 0.90 {
+            // Prefer the most specific shared Places location (e.g. "Hawaii"
+            // rather than "United States") when the hierarchy goes deeper than
+            // the country level.
+            let prefix = deepestSharedPlacesPrefix(in: photos)
+            if prefix.count >= 2, let leaf = prefix.last {
+                return leaf
+            }
             return countryName(from: dominant.key) ?? dominant.key
         }
 
@@ -805,12 +818,14 @@ enum MemoryEngine {
     static func tripPeopleSuffix(
         for photos: [PhotoFile],
         mePersonPath: String,
+        excludedPaths: Set<String> = [],
         maxNames: Int = 3
     ) -> String? {
         var counts: [String: (path: String, name: String, count: Int)] = [:]
         for photo in photos {
             for tag in photo.hierarchicalTags where tag.namespace?.lowercased() == "people" {
                 if !mePersonPath.isEmpty, tag.fullPath == mePersonPath { continue }
+                if excludedPaths.contains(tag.fullPath) { continue }
                 if var existing = counts[tag.fullPath] {
                     existing.count += 1
                     counts[tag.fullPath] = existing

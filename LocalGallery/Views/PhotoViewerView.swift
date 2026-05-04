@@ -341,7 +341,7 @@ struct PhotoViewerView: View {
                 VStack {
                     Spacer()
                     filmstrip
-                        .padding(.bottom, chromeVisible ? 64 : 12)
+                        .padding(.bottom, (chromeVisible ? 64 : 12) + geo.safeAreaInsets.bottom)
                 }
                 .background(
                     VStack(spacing: 0) {
@@ -364,10 +364,14 @@ struct PhotoViewerView: View {
 
                 if chromeVisible {
                     // Top bar — X always; pill hidden when info is open.
+                    // Pad by safeAreaInsets.top because the GeometryReader
+                    // ignores safe areas (full-bleed canvas), so the chrome
+                    // must account for the status bar explicitly.
                     VStack {
                         topBar
                         Spacer()
                     }
+                    .padding(.top, geo.safeAreaInsets.top)
                     .background(
                         VStack(spacing: 0) {
                             LinearGradient(
@@ -392,7 +396,7 @@ struct PhotoViewerView: View {
                         Spacer()
                         bottomActionBar
                     }
-                    .padding(.bottom, isInfoOpen ? infoHeight : 0)
+                    .padding(.bottom, isInfoOpen ? infoHeight : geo.safeAreaInsets.bottom)
                     .animation(Self.infoOpenSpring, value: isInfoOpen)
                     .transition(.opacity)
                     .offset(y: dismissOffset)

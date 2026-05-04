@@ -43,8 +43,14 @@ enum PhotoChrome {
             let country = deepest[1]
             return "\(city), \(country)"
         }
+        if let deepest = placePaths.max(by: { $0.count < $1.count }), deepest.count >= 3 {
+            // ["Places", country, region] — no city; show "Region, Country".
+            let region = deepest[2]
+            let country = deepest[1]
+            return "\(region), \(country)"
+        }
         if let deepest = placePaths.max(by: { $0.count < $1.count }), deepest.count >= 2 {
-            // ["Places", country, ...] — country only.
+            // ["Places", country] — country only.
             let country = deepest[1]
             // If a country code is also present, prefer the localized name.
             if let code = photo.countryCode, let localized = MemoryEngine.countryName(from: code) {

@@ -41,6 +41,7 @@ struct MemorySlideshowView: View {
     @State private var slideDuration: Double = 5.0
     @State private var showThemePicker: Bool = false
     @State private var showShareSheet: Bool = false
+    @State private var showOptions: Bool = false
     @State private var audio = SlideshowAudioController()
     @AppStorage("slideshowMusicTheme") private var storedTheme: String = SlideshowMusicTheme.wistful.rawValue
 
@@ -110,6 +111,18 @@ struct MemorySlideshowView: View {
             if let photo = currentPhoto {
                 ShareSheet(items: [photo.url])
             }
+        }
+        .confirmationDialog("", isPresented: $showOptions, titleVisibility: .hidden) {
+            Button("See all photos") {
+                if let onSeeAll {
+                    onSeeAll(memory)
+                } else {
+                    goToGrid = true
+                }
+            }
+            Button("Music: \(theme.displayName)") { showThemePicker = true }
+            Button("Share photo") { showShareSheet = true }
+            Button("Cancel", role: .cancel) { }
         }
         .onAppear {
             OrientationLock.lock(.portrait, rotateTo: .portrait)
@@ -187,26 +200,8 @@ struct MemorySlideshowView: View {
 
                 Spacer()
 
-                Menu {
-                    Button {
-                        if let onSeeAll {
-                            onSeeAll(memory)
-                        } else {
-                            goToGrid = true
-                        }
-                    } label: {
-                        Label("See all photos", systemImage: "square.grid.2x2")
-                    }
-                    Button {
-                        showThemePicker = true
-                    } label: {
-                        Label("Music: \(theme.displayName)", systemImage: "music.note")
-                    }
-                    Button {
-                        showShareSheet = true
-                    } label: {
-                        Label("Share photo", systemImage: "square.and.arrow.up")
-                    }
+                Button {
+                    showOptions = true
                 } label: {
                     Image(systemName: "ellipsis")
                         .font(.system(size: 14, weight: .semibold))

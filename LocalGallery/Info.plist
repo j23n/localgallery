@@ -4,7 +4,7 @@
 <dict>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
-		<string>com.localgallery.app.dailyMemories</string>
+		<string>com.j23n.localgallery.app.dailyMemories</string>
 	</array>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
@@ -26,7 +26,7 @@
 			<key>CFBundleTypeRole</key>
 			<string>Editor</string>
 			<key>CFBundleURLName</key>
-			<string>com.localgallery.app</string>
+			<string>com.j23n.localgallery.app</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>localgallery</string>

@@ -1,6 +1,6 @@
 name: LocalGallery
 options:
-  bundleIdPrefix: com.localgallery
+  bundleIdPrefix: com.j23n.localgallery
   deploymentTarget:
     iOS: "18.0"
   xcodeVersion: "16.0"
@@ -38,7 +38,7 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
         CFBundleURLTypes:
-          - CFBundleURLName: com.localgallery.app
+          - CFBundleURLName: com.j23n.localgallery.app
             CFBundleTypeRole: Editor
             CFBundleURLSchemes:
               - localgallery
@@ -46,10 +46,10 @@ targets:
         UIBackgroundModes:
           - fetch
         BGTaskSchedulerPermittedIdentifiers:
-          - com.localgallery.app.dailyMemories
+          - com.j23n.localgallery.app.dailyMemories
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.localgallery.app
+        PRODUCT_BUNDLE_IDENTIFIER: com.j23n.localgallery.app
         MARKETING_VERSION: "1.0.0"
         CURRENT_PROJECT_VERSION: "1"
         CODE_SIGN_ENTITLEMENTS: LocalGallery/LocalGallery.entitlements
@@ -78,7 +78,7 @@ targets:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.localgallery.app.widgets
+        PRODUCT_BUNDLE_IDENTIFIER: com.j23n.localgallery.app.widgets
         MARKETING_VERSION: "1.0.0"
         CURRENT_PROJECT_VERSION: "1"
         CODE_SIGN_ENTITLEMENTS: LocalGalleryWidgets/LocalGalleryWidgets.entitlements
@@ -93,7 +93,7 @@ targets:
       - path: LocalGalleryTests
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.localgallery.app.tests
+        PRODUCT_BUNDLE_IDENTIFIER: com.j23n.localgallery.app.tests
         GENERATE_INFOPLIST_FILE: true
     dependencies:
       - target: LocalGallery

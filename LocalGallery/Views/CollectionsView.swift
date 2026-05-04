@@ -6,6 +6,7 @@ import SwiftUI
 enum CollectionsRoute: Hashable {
     case slideshow(Memory)
     case memoryGrid(Memory)
+    case peopleList
 }
 
 struct CollectionsView: View {
@@ -107,6 +108,8 @@ struct CollectionsView: View {
                 })
             case .memoryGrid(let memory):
                 MemoryGridView(memory: memory)
+            case .peopleList:
+                PeopleListView()
             }
         }
     }
@@ -182,9 +185,9 @@ struct CollectionsView: View {
                     memoriesRail(memories)
                 }
 
-                let people = store.visiblePeople
+                let people = store.visiblePeopleForRail
                 if !people.isEmpty {
-                    sectionHeader("People")
+                    peopleSectionHeader
                     peopleRail(people)
                 }
 
@@ -205,19 +208,38 @@ struct CollectionsView: View {
 
     @ViewBuilder
     private func sectionHeader(_ title: String, systemIcon: String? = nil, accent: Bool = false) -> some View {
-        HStack(spacing: 7) {
+        HStack(spacing: 8) {
             if let systemIcon {
                 Image(systemName: systemIcon)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 15, weight: .semibold))
             }
-            Text(title.uppercased())
-                .font(.system(size: 12.5, weight: .semibold))
-                .tracking(0.5)
+            Text(title)
+                .font(.system(size: 20, weight: .bold))
         }
-        .foregroundStyle(accent ? Design.accentColor : Design.ink2)
+        .foregroundStyle(accent ? Design.accentColor : Design.ink)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 20)
-        .padding(.top, 18)
+        .padding(.top, 24)
         .padding(.bottom, 10)
+    }
+
+    private var peopleSectionHeader: some View {
+        NavigationLink(value: CollectionsRoute.peopleList) {
+            HStack(spacing: 8) {
+                Text("People")
+                    .font(.system(size: 20, weight: .bold))
+                    .foregroundStyle(Design.ink)
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Design.ink3)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 20)
+            .padding(.top, 24)
+            .padding(.bottom, 10)
+        }
+        .buttonStyle(.plain)
     }
 
     private func memoriesRail(_ memories: [Memory]) -> some View {
@@ -602,4 +624,144 @@ struct MemoryGridView: View {
 private struct RenderedVideo: Identifiable {
     let id = UUID()
     let url: URL
+}
+
+// MARK: - People List View
+
+struct PeopleListView: View {
+    @Environment(GalleryStore.self) private var store
+    @State private var searchText = ""
+    @State private var linkingPerson: TagSuggestion?
+
+    private var filteredPeople: [TagSuggestion] {
+        let all = store.visiblePeople
+        guard !searchText.isEmpty else { return all }
+        return all.filter { $0.displayName.localizedCaseInsensitiveContains(searchText) }
+    }
+
+    var body: some View {
+        List {
+            ForEach(filteredPeople) { person in
+                NavigationLink {
+                    TagGridView(tag: person)
+                } label: {
+                    PeopleListRow(tag: person)
+                }
+                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                    Button(role: .destructive) {
+                        store.hidePerson(person.fullPath)
+                    } label: {
+                        Label("Hide", systemImage: "eye.slash")
+                    }
+                }
+                .contextMenu {
+                    let isFeatured = store.isFeatured(person.fullPath)
+                    let isMe = store.isMe(person.fullPath)
+                    Button {
+                        if isMe { store.unmarkAsMe() } else { store.markAsMe(person.fullPath) }
+                    } label: {
+                        Label(isMe ? "Unmark as Me" : "Mark as Me",
+                              systemImage: isMe ? "person.crop.circle.badge.xmark" : "person.crop.circle.badge.checkmark")
+                    }
+                    Button {
+                        store.toggleFeaturePerson(person.fullPath)
+                    } label: {
+                        Label(isFeatured ? "Unfeature" : "Feature",
+                              systemImage: isFeatured ? "star.slash" : "star")
+                    }
+                    Button {
+                        linkingPerson = person
+                    } label: {
+                        Label(linkLabel(for: person), systemImage: "person.text.rectangle")
+                    }
+                    Button(role: .destructive) {
+                        store.hidePerson(person.fullPath)
+                    } label: {
+                        Label("Hide", systemImage: "eye.slash")
+                    }
+                }
+            }
+        }
+        .listStyle(.plain)
+        .searchable(text: $searchText, prompt: "Search")
+        .navigationTitle("People")
+        .navigationBarTitleDisplayMode(.large)
+        .background(Design.bg)
+        .sheet(item: $linkingPerson) { person in
+            ContactLinkSheet(person: person)
+        }
+    }
+
+    private func linkLabel(for person: TagSuggestion) -> String {
+        switch store.linkState(forPersonPath: person.fullPath, displayName: person.displayName) {
+        case .unlinked:        return "Link to Contact"
+        case .disabled:        return "Birthdays disabled"
+        case .manual(let c):   return "Linked: \(c.fullName)"
+        case .auto(let c):     return "Auto: \(c.fullName)"
+        }
+    }
+}
+
+// MARK: - People List Row
+
+struct PeopleListRow: View {
+    let tag: TagSuggestion
+    @Environment(GalleryStore.self) private var store
+
+    private var rowPhotos: [PhotoFile] {
+        let all = store.photos(forTag: tag)
+        guard let cover = store.featuredPhoto(for: tag) else {
+            return Array(all.prefix(2))
+        }
+        var result = [cover]
+        if let other = all.first(where: { $0.id != cover.id }) {
+            result.append(other)
+        }
+        return result
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            HStack(spacing: 4) {
+                ForEach(rowPhotos) { photo in
+                    PersonThumbnailView(
+                        url: photo.url,
+                        region: store.faceRegion(for: photo, person: tag.displayName),
+                        size: 52,
+                        cornerRadius: 9
+                    )
+                    .frame(width: 52, height: 52)
+                }
+                if rowPhotos.isEmpty {
+                    RoundedRectangle(cornerRadius: 9)
+                        .fill(Design.bgGrouped)
+                        .frame(width: 52, height: 52)
+                        .overlay {
+                            Image(systemName: "person.fill")
+                                .font(.system(size: 22))
+                                .foregroundStyle(Design.ink3)
+                        }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 5) {
+                    Text(tag.displayName)
+                        .font(.system(size: 15.5, weight: .medium))
+                        .foregroundStyle(Design.ink)
+                    if store.isFeatured(tag.fullPath) {
+                        Image(systemName: "star.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(Design.accentColor)
+                    }
+                }
+                Text("\(tag.count) \(tag.count == 1 ? "photo" : "photos")")
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(Design.ink2)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 4)
+    }
 }

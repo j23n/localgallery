@@ -5,15 +5,20 @@ import AVKit
 
 // MARK: - Swipe-down dismiss (UIKit gesture — doesn't conflict with TabView paging)
 
-/// Vertical-pan installer with a side-aware action: downward past 150pt
-/// dismisses the viewer; upward past 150pt opens the EXIF/info drawer
-/// (mirrors Apple Photos' swipe-up-for-info gesture). Downward pans drive
-/// `offset` for the rubber-band dim, upward pans don't slide the photo —
-/// the drawer is what moves.
+/// Vertical-pan installer with state-aware actions:
+/// - Info drawer closed: down past 150pt dismisses the viewer; up past 150pt
+///   opens the info drawer. Downward pans drive `offset` for the rubber-band
+///   dim. Upward pans don't slide the photo — the drawer animates open.
+/// - Info drawer open: down past 150pt closes the drawer. Touches starting
+///   below `photoHeight` are ignored so the info panel's scroll view handles
+///   them natively.
 struct SwipeToDismissGestureInstaller: UIViewRepresentable {
     @Binding var offset: CGFloat
+    @Binding var isInfoOpen: Bool
+    var photoHeight: CGFloat
     var onDismiss: () -> Void
-    var onShowInfo: () -> Void
+    var onOpenInfo: () -> Void
+    var onCloseInfo: () -> Void
 
     func makeUIView(context: Context) -> UIView {
         let view = UIView()
@@ -37,8 +42,11 @@ struct SwipeToDismissGestureInstaller: UIViewRepresentable {
 
     func updateUIView(_ uiView: UIView, context: Context) {
         context.coordinator.offsetBinding = $offset
+        context.coordinator.isInfoOpenBinding = $isInfoOpen
+        context.coordinator.photoHeight = photoHeight
         context.coordinator.onDismiss = onDismiss
-        context.coordinator.onShowInfo = onShowInfo
+        context.coordinator.onOpenInfo = onOpenInfo
+        context.coordinator.onCloseInfo = onCloseInfo
     }
 
     static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
@@ -48,39 +56,62 @@ struct SwipeToDismissGestureInstaller: UIViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(offset: $offset, onDismiss: onDismiss, onShowInfo: onShowInfo)
+        Coordinator(
+            offset: $offset,
+            isInfoOpen: $isInfoOpen,
+            photoHeight: photoHeight,
+            onDismiss: onDismiss,
+            onOpenInfo: onOpenInfo,
+            onCloseInfo: onCloseInfo
+        )
     }
 
     class Coordinator: NSObject, UIGestureRecognizerDelegate {
         var offsetBinding: Binding<CGFloat>
+        var isInfoOpenBinding: Binding<Bool>
+        var photoHeight: CGFloat
         var onDismiss: () -> Void
-        var onShowInfo: () -> Void
+        var onOpenInfo: () -> Void
+        var onCloseInfo: () -> Void
         var panGesture: UIPanGestureRecognizer?
         weak var hostView: UIView?
 
-        init(offset: Binding<CGFloat>, onDismiss: @escaping () -> Void, onShowInfo: @escaping () -> Void) {
+        init(
+            offset: Binding<CGFloat>,
+            isInfoOpen: Binding<Bool>,
+            photoHeight: CGFloat,
+            onDismiss: @escaping () -> Void,
+            onOpenInfo: @escaping () -> Void,
+            onCloseInfo: @escaping () -> Void
+        ) {
             self.offsetBinding = offset
+            self.isInfoOpenBinding = isInfoOpen
+            self.photoHeight = photoHeight
             self.onDismiss = onDismiss
-            self.onShowInfo = onShowInfo
+            self.onOpenInfo = onOpenInfo
+            self.onCloseInfo = onCloseInfo
         }
 
         @objc func handlePan(_ gesture: UIPanGestureRecognizer) {
             let dy = gesture.translation(in: gesture.view).y
+            let infoOpen = isInfoOpenBinding.wrappedValue
             switch gesture.state {
             case .changed:
-                if dy > 0 {
+                // Rubber-band only when info is closed and user is pulling down
+                // to dismiss. All other states are threshold-based — no live
+                // preview while dragging.
+                if !infoOpen, dy > 0 {
                     offsetBinding.wrappedValue = dy
                 }
-                // Upward pan doesn't move the photo — the drawer moves.
             case .ended, .cancelled:
-                if dy > 150 {
-                    onDismiss()
-                } else if dy < -150 {
-                    onShowInfo()
-                    withAnimation(.easeOut(duration: 0.2)) {
-                        offsetBinding.wrappedValue = 0
-                    }
+                if infoOpen {
+                    if dy > 150 { onCloseInfo() }
                 } else {
+                    if dy > 150 {
+                        onDismiss()
+                    } else if dy < -150 {
+                        onOpenInfo()
+                    }
                     withAnimation(.easeOut(duration: 0.2)) {
                         offsetBinding.wrappedValue = 0
                     }
@@ -90,11 +121,17 @@ struct SwipeToDismissGestureInstaller: UIViewRepresentable {
             }
         }
 
-        // Begin for either-direction vertical pans (down → dismiss, up → info).
+        // Begin for vertical pans. When info is open, only begin in the photo
+        // area — touches in the info panel area belong to its scroll view.
         func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
             guard let pan = gestureRecognizer as? UIPanGestureRecognizer else { return false }
             let v = pan.velocity(in: pan.view)
-            return abs(v.y) > abs(v.x) * 2.0
+            guard abs(v.y) > abs(v.x) * 2.0 else { return false }
+            if isInfoOpenBinding.wrappedValue {
+                let location = pan.location(in: pan.view)
+                return location.y < photoHeight
+            }
+            return true
         }
 
         // Allow TabView's scroll gesture to work simultaneously
@@ -127,6 +164,7 @@ struct PagingPhotoView: UIViewControllerRepresentable {
     /// the index against the current `photos` array on every update.
     @Binding var currentPhotoID: UUID
     @Binding var isChromeVisible: Bool
+    @Binding var isInfoOpen: Bool
 
     func makeUIViewController(context: Context) -> UIPageViewController {
         let pvc = UIPageViewController(
@@ -185,7 +223,8 @@ struct PagingPhotoView: UIViewControllerRepresentable {
             let view = PhotoPageView(
                 photo: photo,
                 initialThumbnail: parent.store.cachedThumbnail(for: photo.url),
-                isChromeVisible: parent.$isChromeVisible
+                isChromeVisible: parent.$isChromeVisible,
+                isInfoOpen: parent.$isInfoOpen
             )
             .environment(parent.store)
             return IndexedHostingController(photoID: photoID, rootView: AnyView(view))
@@ -225,10 +264,16 @@ struct PhotoViewerView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var isChromeVisible: Bool = true
-    @State private var showEXIF: Bool = false
+    @State private var isInfoOpen: Bool = false
     @State private var dismissOffset: CGFloat = 0
     @State private var pendingShareItem: ShareItem?
     @State private var isPreparingShare: Bool = false
+
+    /// How much vertical space the inline info drawer occupies when fully
+    /// open, as a fraction of the screen height. The remainder is the photo
+    /// area, which shrinks/translates up to make room.
+    private static let infoFraction: CGFloat = 0.55
+    private static let infoOpenSpring: Animation = .spring(response: 0.45, dampingFraction: 0.85)
 
     /// Index of `currentPhotoID` within `photos`, or nil if the id isn't
     /// present (rescan removed the photo, or the array is empty).
@@ -247,90 +292,139 @@ struct PhotoViewerView: View {
     }
 
     var body: some View {
-        ZStack {
-            Color.black
-                .opacity(dismissOffset > 0 ? max(0.3, 1.0 - Double(dismissOffset) / 300.0) : 1.0)
-                .ignoresSafeArea()
+        GeometryReader { geo in
+            let infoHeight = geo.size.height * Self.infoFraction
+            let photoHeight = isInfoOpen ? (geo.size.height - infoHeight) : geo.size.height
+            let chromeVisible = isInfoOpen || isChromeVisible
 
-            if !photos.isEmpty {
-                PagingPhotoView(
-                    photos: photos,
-                    store: store,
-                    currentPhotoID: $currentPhotoID,
-                    isChromeVisible: $isChromeVisible
-                )
-                .ignoresSafeArea()
-                .offset(y: dismissOffset)
-            }
+            ZStack {
+                Color.black
+                    .opacity(dismissOffset > 0 ? max(0.3, 1.0 - Double(dismissOffset) / 300.0) : 1.0)
+                    .ignoresSafeArea()
 
-            // Filmstrip is always visible — taps on the photo only toggle
-            // the other chrome (top pill + share + info).
-            VStack {
-                Spacer()
-                filmstrip
-                    .padding(.bottom, isChromeVisible ? 64 : 12)
-            }
-            .background(
+                // Shared canvas: photo on top, info panel below. Both move as
+                // one unit — the photo shrinks to make room for the info panel
+                // sliding up into view (Apple Photos style).
                 VStack(spacing: 0) {
-                    Spacer()
-                    LinearGradient(
-                        colors: [.clear, .black.opacity(0.15), .black.opacity(0.55)],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                    .frame(height: 160)
+                    Group {
+                        if !photos.isEmpty {
+                            PagingPhotoView(
+                                photos: photos,
+                                store: store,
+                                currentPhotoID: $currentPhotoID,
+                                isChromeVisible: $isChromeVisible,
+                                isInfoOpen: $isInfoOpen
+                            )
+                        } else {
+                            Color.clear
+                        }
+                    }
+                    .frame(width: geo.size.width, height: photoHeight)
+
+                    Group {
+                        if let photo = currentPhoto {
+                            PhotoInfoPanel(photo: photo)
+                                .environment(store)
+                        } else {
+                            Color(.systemGroupedBackground)
+                        }
+                    }
+                    .frame(width: geo.size.width, height: infoHeight)
+                    .opacity(isInfoOpen ? 1 : 0)
                 }
-                .allowsHitTesting(false)
-                .ignoresSafeArea()
-            )
-            .animation(.easeInOut(duration: 0.25), value: isChromeVisible)
-            .offset(y: dismissOffset)
+                .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
+                .clipped()
+                .offset(y: dismissOffset)
+                .animation(Self.infoOpenSpring, value: isInfoOpen)
 
-            if isChromeVisible {
-                VStack(spacing: 0) {
-                    topBar
+                // Filmstrip — fades out when info is open.
+                VStack {
                     Spacer()
-                    bottomActionBar
+                    filmstrip
+                        .padding(.bottom, chromeVisible ? 64 : 12)
                 }
                 .background(
                     VStack(spacing: 0) {
+                        Spacer()
                         LinearGradient(
-                            colors: [.black.opacity(0.55), .black.opacity(0.15), .clear],
+                            colors: [.clear, .black.opacity(0.15), .black.opacity(0.55)],
                             startPoint: .top,
                             endPoint: .bottom
                         )
-                        .frame(height: 120)
-                        Spacer()
+                        .frame(height: 160)
                     }
                     .allowsHitTesting(false)
                     .ignoresSafeArea()
                 )
-                .transition(.opacity)
+                .opacity(isInfoOpen ? 0 : 1)
+                .allowsHitTesting(!isInfoOpen)
+                .animation(.easeInOut(duration: 0.25), value: isChromeVisible)
+                .animation(.easeInOut(duration: 0.25), value: isInfoOpen)
                 .offset(y: dismissOffset)
-            }
 
-            if isPreparingShare {
-                Color.black.opacity(0.35)
-                    .ignoresSafeArea()
-                    .overlay {
-                        ProgressView()
-                            .tint(.white)
-                            .scaleEffect(1.2)
+                if chromeVisible {
+                    // Top bar — X always; pill hidden when info is open.
+                    VStack {
+                        topBar
+                        Spacer()
                     }
+                    .background(
+                        VStack(spacing: 0) {
+                            LinearGradient(
+                                colors: [.black.opacity(0.55), .black.opacity(0.15), .clear],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                            .frame(height: 120)
+                            .opacity(isInfoOpen ? 0 : 1)
+                            Spacer()
+                        }
+                        .allowsHitTesting(false)
+                        .ignoresSafeArea()
+                    )
                     .transition(.opacity)
+                    .offset(y: dismissOffset)
+
+                    // Bottom action bar — anchored to the bottom of the photo
+                    // area so it always sits on the dark photo, never on the
+                    // light info panel beneath it.
+                    VStack {
+                        Spacer()
+                        bottomActionBar
+                    }
+                    .padding(.bottom, isInfoOpen ? infoHeight : 0)
+                    .animation(Self.infoOpenSpring, value: isInfoOpen)
+                    .transition(.opacity)
+                    .offset(y: dismissOffset)
+                }
+
+                if isPreparingShare {
+                    Color.black.opacity(0.35)
+                        .ignoresSafeArea()
+                        .overlay {
+                            ProgressView()
+                                .tint(.white)
+                                .scaleEffect(1.2)
+                        }
+                        .transition(.opacity)
+                }
             }
-        }
-        .animation(.easeInOut(duration: 0.25), value: isChromeVisible)
-        .animation(.easeOut(duration: 0.15), value: isPreparingShare)
-        .statusBarHidden(!isChromeVisible)
-        .background(
-            SwipeToDismissGestureInstaller(
-                offset: $dismissOffset,
-                onDismiss: { dismiss() },
-                onShowInfo: { showEXIF = true }
+            .animation(.easeInOut(duration: 0.25), value: chromeVisible)
+            .animation(.easeOut(duration: 0.15), value: isPreparingShare)
+            .statusBarHidden(!chromeVisible)
+            .background(
+                SwipeToDismissGestureInstaller(
+                    offset: $dismissOffset,
+                    isInfoOpen: $isInfoOpen,
+                    photoHeight: photoHeight,
+                    onDismiss: { dismiss() },
+                    onOpenInfo: { withAnimation(Self.infoOpenSpring) { isInfoOpen = true } },
+                    onCloseInfo: { withAnimation(Self.infoOpenSpring) { isInfoOpen = false } }
+                )
+                .frame(width: 0, height: 0)
             )
-            .frame(width: 0, height: 0)
-        )
+        }
+        .ignoresSafeArea()
         .onChange(of: photos) { _, newPhotos in
             // Rescan dropped the photo we were viewing; dismiss instead of
             // silently landing on a different image at a stale index.
@@ -340,11 +434,6 @@ struct PhotoViewerView: View {
         }
         .sheet(item: $pendingShareItem) { item in
             ShareSheet(items: [item.url])
-        }
-        .sheet(isPresented: $showEXIF) {
-            if let photo = currentPhoto {
-                EXIFSheetView(photo: photo)
-            }
         }
     }
 
@@ -373,6 +462,8 @@ struct PhotoViewerView: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
                 .background(.white.opacity(0.14), in: Capsule())
+                .opacity(isInfoOpen ? 0 : 1)
+                .animation(.easeInOut(duration: 0.2), value: isInfoOpen)
             }
 
             HStack {
@@ -420,13 +511,18 @@ struct PhotoViewerView: View {
     }
 
     private var infoButton: some View {
-        Button { showEXIF = true } label: {
-            Label("Info", systemImage: "info.circle")
+        Button {
+            withAnimation(Self.infoOpenSpring) { isInfoOpen.toggle() }
+        } label: {
+            Label("Info", systemImage: isInfoOpen ? "info.circle.fill" : "info.circle")
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(isInfoOpen ? .black : .white)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 9)
-                .background(.white.opacity(0.18), in: Capsule())
+                .background(
+                    isInfoOpen ? Color.white.opacity(0.92) : Color.white.opacity(0.18),
+                    in: Capsule()
+                )
         }
     }
 
@@ -542,6 +638,7 @@ final class ZoomingScrollView: UIScrollView {
 
 struct ZoomableImageView: UIViewRepresentable {
     let image: UIImage
+    var isZoomEnabled: Bool = true
     var onSingleTap: () -> Void = {}
     var onZoomChange: (Bool) -> Void = { _ in }
 
@@ -549,7 +646,7 @@ struct ZoomableImageView: UIViewRepresentable {
         let scrollView = ZoomingScrollView()
         scrollView.delegate = context.coordinator
         scrollView.minimumZoomScale = 1.0
-        scrollView.maximumZoomScale = 5.0
+        scrollView.maximumZoomScale = isZoomEnabled ? 5.0 : 1.0
         scrollView.bouncesZoom = true
         scrollView.showsHorizontalScrollIndicator = false
         scrollView.showsVerticalScrollIndicator = false
@@ -580,6 +677,13 @@ struct ZoomableImageView: UIViewRepresentable {
     func updateUIView(_ scrollView: ZoomingScrollView, context: Context) {
         context.coordinator.onSingleTap = onSingleTap
         context.coordinator.onZoomChange = onZoomChange
+        let newMax: CGFloat = isZoomEnabled ? 5.0 : 1.0
+        if scrollView.maximumZoomScale != newMax {
+            scrollView.maximumZoomScale = newMax
+            if !isZoomEnabled && scrollView.zoomScale > 1.0 {
+                scrollView.setZoomScale(1.0, animated: true)
+            }
+        }
         guard let imageView = scrollView.imageView else { return }
         if imageView.image !== image {
             imageView.image = image
@@ -657,6 +761,7 @@ struct PhotoPageView: View {
     var initialThumbnail: UIImage? = nil
     @Environment(GalleryStore.self) private var store
     @Binding var isChromeVisible: Bool
+    @Binding var isInfoOpen: Bool
 
     @State private var thumbnail: UIImage?
     @State private var fullImage: UIImage?
@@ -698,7 +803,14 @@ struct PhotoPageView: View {
                     if let displayImage = fullImage ?? thumbnail ?? initialThumbnail {
                         ZoomableImageView(
                             image: displayImage,
-                            onSingleTap: { withAnimation { isChromeVisible.toggle() } },
+                            isZoomEnabled: !isInfoOpen,
+                            onSingleTap: {
+                                // Tap on the photo only toggles chrome when
+                                // info is closed — when open, chrome is forced
+                                // visible by the parent and tapping is a no-op.
+                                guard !isInfoOpen else { return }
+                                withAnimation { isChromeVisible.toggle() }
+                            },
                             onZoomChange: { zoomed in
                                 isZoomed = zoomed
                                 if zoomed {
@@ -729,7 +841,7 @@ struct PhotoPageView: View {
                 minimumDuration: 0.3,
                 maximumDistance: 50,
                 perform: {
-                    guard let liveURL = photo.livePhotoVideoURL, !isZoomed else { return }
+                    guard let liveURL = photo.livePhotoVideoURL, !isZoomed, !isInfoOpen else { return }
                     let player = AVPlayer(url: liveURL)
                     livePlayer = player
                     player.play()

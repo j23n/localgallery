@@ -192,11 +192,16 @@ struct PagingPhotoView: UIViewControllerRepresentable {
         guard let current = pvc.viewControllers?.first as? IndexedHostingController,
               current.photoID != currentPhotoID,
               photos.contains(where: { $0.id == currentPhotoID }) else { return }
-        let curIdx = photos.firstIndex(where: { $0.id == current.photoID }) ?? 0
-        let tarIdx = photos.firstIndex(where: { $0.id == currentPhotoID }) ?? 0
-        let direction: UIPageViewController.NavigationDirection = tarIdx > curIdx ? .forward : .reverse
-        let vc = context.coordinator.makeHostingController(for: currentPhotoID)
-        pvc.setViewControllers([vc], direction: direction, animated: false)
+        // Programmatic `setViewControllers` mid-swipe trips UIPageViewController's
+        // "No view controller managing visible view" assertion — its in-flight
+        // transition gets interrupted while the queuing scroll view still
+        // points at a view it no longer manages. Stash the request and apply
+        // it from `didFinishAnimating` instead.
+        if context.coordinator.isTransitioning {
+            context.coordinator.pendingPhotoID = currentPhotoID
+            return
+        }
+        context.coordinator.applyPhotoID(currentPhotoID, to: pvc)
     }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -213,13 +218,37 @@ struct PagingPhotoView: UIViewControllerRepresentable {
 
     class Coordinator: NSObject, UIPageViewControllerDataSource, UIPageViewControllerDelegate {
         var parent: PagingPhotoView
+        /// True between `willTransitionTo` and `didFinishAnimating` for a
+        /// gesture-driven swipe. While set, programmatic photoID updates are
+        /// queued via `pendingPhotoID` and data-source neighbor lookups read
+        /// from `photosSnapshot` so an enrichment tick that rebuilds
+        /// `parent.photos` can't shift the answers UIKit gets mid-transition.
+        var isTransitioning = false
+        /// Photo id requested by `updateUIViewController` while a transition
+        /// was in flight. Applied from `didFinishAnimating`.
+        var pendingPhotoID: UUID?
+        /// Photos array frozen for the duration of a manual swipe.
+        private var photosSnapshot: [PhotoFile]?
+        /// Weak cache so a given photoID always resolves to the same hosting
+        /// controller while UIPageViewController still holds it. Returning a
+        /// fresh instance on every data-source call confused the page
+        /// controller's bookkeeping when the user reversed direction mid-swipe.
+        private final class WeakVC { weak var vc: IndexedHostingController? }
+        private var vcCache: [UUID: WeakVC] = [:]
+
         init(_ parent: PagingPhotoView) { self.parent = parent }
 
+        private var activePhotos: [PhotoFile] {
+            photosSnapshot ?? parent.photos
+        }
+
         func makeHostingController(for photoID: UUID) -> IndexedHostingController {
-            // Caller guarantees `photoID` is in `parent.photos`; the firstIndex
+            if let cached = vcCache[photoID]?.vc { return cached }
+            // Caller guarantees `photoID` is in `activePhotos`; the firstIndex
             // lookup is the canonical resolution path post-rescan.
-            let idx = parent.photos.firstIndex(where: { $0.id == photoID }) ?? 0
-            let photo = parent.photos[idx]
+            let photos = activePhotos
+            let idx = photos.firstIndex(where: { $0.id == photoID }) ?? 0
+            let photo = photos[idx]
             let view = PhotoPageView(
                 photo: photo,
                 initialThumbnail: parent.store.cachedThumbnail(for: photo.url),
@@ -227,26 +256,55 @@ struct PagingPhotoView: UIViewControllerRepresentable {
                 isInfoOpen: parent.$isInfoOpen
             )
             .environment(parent.store)
-            return IndexedHostingController(photoID: photoID, rootView: AnyView(view))
+            let controller = IndexedHostingController(photoID: photoID, rootView: AnyView(view))
+            let box = WeakVC()
+            box.vc = controller
+            vcCache[photoID] = box
+            return controller
+        }
+
+        func applyPhotoID(_ photoID: UUID, to pvc: UIPageViewController) {
+            guard let current = pvc.viewControllers?.first as? IndexedHostingController,
+                  current.photoID != photoID,
+                  parent.photos.contains(where: { $0.id == photoID }) else { return }
+            let curIdx = parent.photos.firstIndex(where: { $0.id == current.photoID }) ?? 0
+            let tarIdx = parent.photos.firstIndex(where: { $0.id == photoID }) ?? 0
+            let direction: UIPageViewController.NavigationDirection = tarIdx > curIdx ? .forward : .reverse
+            let vc = makeHostingController(for: photoID)
+            pvc.setViewControllers([vc], direction: direction, animated: false)
         }
 
         func pageViewController(_ pvc: UIPageViewController, viewControllerBefore vc: UIViewController) -> UIViewController? {
+            let photos = activePhotos
             guard let indexed = vc as? IndexedHostingController,
-                  let curIdx = parent.photos.firstIndex(where: { $0.id == indexed.photoID }),
+                  let curIdx = photos.firstIndex(where: { $0.id == indexed.photoID }),
                   curIdx > 0 else { return nil }
-            return makeHostingController(for: parent.photos[curIdx - 1].id)
+            return makeHostingController(for: photos[curIdx - 1].id)
         }
 
         func pageViewController(_ pvc: UIPageViewController, viewControllerAfter vc: UIViewController) -> UIViewController? {
+            let photos = activePhotos
             guard let indexed = vc as? IndexedHostingController,
-                  let curIdx = parent.photos.firstIndex(where: { $0.id == indexed.photoID }),
-                  curIdx < parent.photos.count - 1 else { return nil }
-            return makeHostingController(for: parent.photos[curIdx + 1].id)
+                  let curIdx = photos.firstIndex(where: { $0.id == indexed.photoID }),
+                  curIdx < photos.count - 1 else { return nil }
+            return makeHostingController(for: photos[curIdx + 1].id)
+        }
+
+        func pageViewController(_ pvc: UIPageViewController, willTransitionTo pendingViewControllers: [UIViewController]) {
+            isTransitioning = true
+            photosSnapshot = parent.photos
         }
 
         func pageViewController(_ pvc: UIPageViewController, didFinishAnimating finished: Bool, previousViewControllers: [UIViewController], transitionCompleted completed: Bool) {
+            isTransitioning = false
+            photosSnapshot = nil
             if completed, let indexed = pvc.viewControllers?.first as? IndexedHostingController {
                 parent.currentPhotoID = indexed.photoID
+            }
+            vcCache = vcCache.filter { $0.value.vc != nil }
+            if let pending = pendingPhotoID {
+                pendingPhotoID = nil
+                applyPhotoID(pending, to: pvc)
             }
         }
     }
@@ -437,9 +495,12 @@ struct PhotoViewerView: View {
         .onAppear { windowInsets = Self.currentWindowInsets() }
         .onChange(of: photos) { _, newPhotos in
             // Rescan dropped the photo we were viewing; dismiss instead of
-            // silently landing on a different image at a stale index.
+            // silently landing on a different image at a stale index. Defer
+            // one runloop so an in-flight UIPageViewController transition can
+            // finish before teardown — dismissing mid-transition trips its
+            // visible-view assertion.
             if !newPhotos.contains(where: { $0.id == currentPhotoID }) {
-                dismiss()
+                DispatchQueue.main.async { dismiss() }
             }
         }
         .photoShareSheet(request: $shareRequest)

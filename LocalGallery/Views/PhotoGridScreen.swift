@@ -75,8 +75,8 @@ struct PhotoGridScreen: View {
     @State private var isPinching = false
     @State private var pinchBaseTier: Int = 0
 
-    // Share sheet (share an arbitrary list of URLs)
-    @State private var shareURLs: [URL]?
+    // Share request (drives the unified size-selection share flow)
+    @State private var shareRequest: PhotoShareRequest?
 
     // Settings sheet (root only)
     @State private var showSettings = false
@@ -355,12 +355,7 @@ struct PhotoGridScreen: View {
                 .id(viewerID)
         }
         .sheet(isPresented: $showSettings) { SettingsView() }
-        .sheet(item: Binding<ShareBag?>(
-            get: { shareURLs.map { ShareBag(urls: $0) } },
-            set: { shareURLs = $0?.urls }
-        )) { bag in
-            ShareSheet(items: bag.urls)
-        }
+        .photoShareSheet(request: $shareRequest)
         .navigationDestination(isPresented: $goToSlideshow) {
             if let m = playableMemory {
                 MemorySlideshowView(memory: m)
@@ -531,9 +526,12 @@ struct PhotoGridScreen: View {
                 } label: {
                     Label("Open", systemImage: "eye")
                 }
-                Button {
-                    shareURLs = [photo.url]
-                } label: {
+                PhotoShareMenu(
+                    canResize: !photo.isVideo,
+                    onSelect: { quality in
+                        shareRequest = PhotoShareRequest(photos: [photo], quality: quality)
+                    }
+                ) {
                     Label("Share", systemImage: "square.and.arrow.up")
                 }
                 Button {
@@ -630,12 +628,17 @@ struct PhotoGridScreen: View {
     // MARK: - Select bottom bar
 
     private var selectBottomBar: some View {
-        HStack {
-            Button {
-                let urls = filtered.filter { selected.contains($0.id) }.map(\.url)
-                guard !urls.isEmpty else { return }
-                shareURLs = urls
-            } label: {
+        let selectedPhotos = filtered.filter { selected.contains($0.id) }
+        let canResize = !selectedPhotos.isEmpty && selectedPhotos.allSatisfy { !$0.isVideo }
+
+        return HStack {
+            PhotoShareMenu(
+                canResize: canResize,
+                onSelect: { quality in
+                    guard !selectedPhotos.isEmpty else { return }
+                    shareRequest = PhotoShareRequest(photos: selectedPhotos, quality: quality)
+                }
+            ) {
                 HStack(spacing: 6) {
                     Image(systemName: "square.and.arrow.up")
                     Text("Share")
@@ -852,9 +855,3 @@ struct YearScrubber: View {
     }
 }
 
-// MARK: - Share plumbing (Identifiable wrapper so .sheet(item:) works for arrays of URLs)
-
-private struct ShareBag: Identifiable {
-    let id = UUID()
-    let urls: [URL]
-}

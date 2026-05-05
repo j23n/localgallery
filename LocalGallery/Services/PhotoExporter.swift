@@ -42,6 +42,21 @@ enum PhotoQuality: String, CaseIterable, Identifiable, Sendable {
         guard let edge = maxEdge else { return nil }
         return "\(edge)px"
     }
+
+    var iconName: String {
+        switch self {
+        case .original: return "doc"
+        case .high:     return "photo.fill"
+        case .medium:   return "photo"
+        case .small:    return "photo.artframe"
+        }
+    }
+
+    /// Display name with the dimension cap appended in parens for resized tiers.
+    var menuTitle: String {
+        if let dim = dimensionLabel { return "\(displayName) (\(dim))" }
+        return displayName
+    }
 }
 
 /// Resizes photos to a chosen `PhotoQuality` for sharing. Resized output is

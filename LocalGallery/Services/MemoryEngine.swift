@@ -514,31 +514,144 @@ enum MemoryEngine {
 
         guard geoPhotos.count >= 5 else { return }
 
-        let allLats = geoPhotos.compactMap(\.0.gpsLatitude).sorted()
-        let allLons = geoPhotos.compactMap(\.0.gpsLongitude).sorted()
-        let homeLat = allLats[allLats.count / 2]
-        let homeLon = allLons[allLons.count / 2]
+        let homeRegions = detectHomeRegions(in: geoPhotos, calendar: calendar)
 
-        let distanceThresholdKm = 50.0
+        let isAtHome: (PhotoFile) -> Bool
+        if homeRegions.isEmpty {
+            // Fallback for libraries too sparse to surface a stable home
+            // cluster (a brand-new library, or one with very few GPS-tagged
+            // photos). Reverts to the legacy global-median heuristic so trip
+            // detection still produces something useful, even if loose.
+            let allLats = geoPhotos.compactMap(\.0.gpsLatitude).sorted()
+            let allLons = geoPhotos.compactMap(\.0.gpsLongitude).sorted()
+            let homeLat = allLats[allLats.count / 2]
+            let homeLon = allLons[allLons.count / 2]
+            let distanceThresholdKm = 50.0
+            Log.memory.info("Trips: no home cluster detected — fallback to global median (\(String(format: "%.3f", homeLat)), \(String(format: "%.3f", homeLon)))")
+            isAtHome = { photo in
+                guard let lat = photo.gpsLatitude, let lon = photo.gpsLongitude else { return false }
+                return haversineKm(lat1: homeLat, lon1: homeLon, lat2: lat, lon2: lon) <= distanceThresholdKm
+            }
+        } else {
+            Log.memory.info("Trips: home detected — \(homeRegions.primaryCount) primary cell(s), \(homeRegions.cells.count) total with neighbours")
+            isAtHome = { photo in
+                guard let lat = photo.gpsLatitude, let lon = photo.gpsLongitude else { return false }
+                return homeRegions.contains(lat: lat, lon: lon)
+            }
+        }
+
         var currentTrip: [(PhotoFile, Date)] = []
 
         for entry in geoPhotos {
-            guard let lat = entry.0.gpsLatitude, let lon = entry.0.gpsLongitude else { continue }
-            let dist = haversineKm(lat1: homeLat, lon1: homeLon, lat2: lat, lon2: lon)
-
-            if dist > distanceThresholdKm {
+            if isAtHome(entry.0) {
+                flushTrip(currentTrip, calendar: calendar, today: today, mePersonPath: mePersonPath, hiddenPeople: hiddenPeople, into: &candidates)
+                currentTrip = []
+            } else {
                 if let lastDate = currentTrip.last?.1,
                    entry.1.timeIntervalSince(lastDate) > 48 * 3600 {
                     flushTrip(currentTrip, calendar: calendar, today: today, mePersonPath: mePersonPath, hiddenPeople: hiddenPeople, into: &candidates)
                     currentTrip = []
                 }
                 currentTrip.append(entry)
-            } else {
-                flushTrip(currentTrip, calendar: calendar, today: today, mePersonPath: mePersonPath, hiddenPeople: hiddenPeople, into: &candidates)
-                currentTrip = []
             }
         }
         flushTrip(currentTrip, calendar: calendar, today: today, mePersonPath: mePersonPath, hiddenPeople: hiddenPeople, into: &candidates)
+    }
+
+    // MARK: Home Detection
+
+    /// Quantised GPS cell. ~11 km × 11 km at the equator, narrowing toward the
+    /// poles. Used to cluster photos by location for home detection.
+    struct GridCell: Hashable {
+        let latBin: Int
+        let lonBin: Int
+
+        static let binSizeDegrees: Double = 0.1
+
+        init(lat: Double, lon: Double) {
+            self.latBin = Int(floor(lat / Self.binSizeDegrees))
+            self.lonBin = Int(floor(lon / Self.binSizeDegrees))
+        }
+
+        init(latBin: Int, lonBin: Int) {
+            self.latBin = latBin
+            self.lonBin = lonBin
+        }
+    }
+
+    /// Cells the user has lived in (or otherwise spent significant time
+    /// across). Each primary cell is expanded by its 8 grid neighbours so
+    /// "home" effectively becomes a ~33 km region — daily life around a metro
+    /// area still counts as home even when the residence sits on a cell
+    /// boundary or a few neighbouring cells get used regularly.
+    struct HomeRegions {
+        let primaryCount: Int
+        let cells: Set<GridCell>
+
+        var isEmpty: Bool { cells.isEmpty }
+
+        func contains(lat: Double, lon: Double) -> Bool {
+            cells.contains(GridCell(lat: lat, lon: lon))
+        }
+    }
+
+    /// Detect home cells from the GPS photo set. A cell qualifies as home
+    /// when it has photos spanning ≥180 days *and* covers ≥30 distinct days.
+    /// Both criteria together separate "lived here" from "stayed here a
+    /// while" — a 3-month trip has wide span but few distinct days; a single
+    /// busy week at home has many distinct days but tiny span. The criteria
+    /// adapt downward when the library itself is younger than ~360 days, so
+    /// new users still get usable trip detection.
+    static func detectHomeRegions(
+        in geoPhotos: [(PhotoFile, Date)],
+        calendar: Calendar
+    ) -> HomeRegions {
+        struct CellStat {
+            var first: Date
+            var last: Date
+            var days: Set<DateComponents>
+        }
+        var stats: [GridCell: CellStat] = [:]
+
+        for (photo, date) in geoPhotos {
+            guard let lat = photo.gpsLatitude, let lon = photo.gpsLongitude else { continue }
+            let cell = GridCell(lat: lat, lon: lon)
+            let day = calendar.dateComponents([.year, .month, .day], from: date)
+            if var existing = stats[cell] {
+                if date < existing.first { existing.first = date }
+                if date > existing.last { existing.last = date }
+                existing.days.insert(day)
+                stats[cell] = existing
+            } else {
+                stats[cell] = CellStat(first: date, last: date, days: [day])
+            }
+        }
+
+        guard let firstDate = geoPhotos.first?.1, let lastDate = geoPhotos.last?.1 else {
+            return HomeRegions(primaryCount: 0, cells: [])
+        }
+        let totalSpanDays = calendar.dateComponents([.day], from: firstDate, to: lastDate).day ?? 0
+        // Adapt thresholds when the library itself is young: require half its
+        // total span and a quarter of its distinct-day budget. Caps lock the
+        // strict criteria in once the library is mature.
+        let totalDistinctDays = Set(geoPhotos.map { calendar.dateComponents([.year, .month, .day], from: $0.1) }).count
+        let minSpanDays = min(180, max(30, totalSpanDays / 2))
+        let minDistinctDays = min(30, max(10, totalDistinctDays / 4))
+
+        var primaryCount = 0
+        var cells = Set<GridCell>()
+        for (cell, stat) in stats {
+            let span = calendar.dateComponents([.day], from: stat.first, to: stat.last).day ?? 0
+            guard span >= minSpanDays, stat.days.count >= minDistinctDays else { continue }
+            primaryCount += 1
+            for dlat in -1...1 {
+                for dlon in -1...1 {
+                    cells.insert(GridCell(latBin: cell.latBin + dlat, lonBin: cell.lonBin + dlon))
+                }
+            }
+        }
+
+        return HomeRegions(primaryCount: primaryCount, cells: cells)
     }
 
     // MARK: Trip Segmentation

@@ -266,14 +266,27 @@ struct PhotoViewerView: View {
     @State private var isChromeVisible: Bool = true
     @State private var isInfoOpen: Bool = false
     @State private var dismissOffset: CGFloat = 0
-    @State private var pendingShareItem: ShareItem?
-    @State private var isPreparingShare: Bool = false
+    @State private var shareRequest: PhotoShareRequest?
+    /// Window-derived safe-area insets. `GeometryReader { geo in … }` paired
+    /// with `.ignoresSafeArea()` — the pattern this view uses to get a
+    /// full-screen canvas — reports zero insets inside a `fullScreenCover`
+    /// on iOS 18, so chrome layered above the canvas would slide under the
+    /// status bar / home indicator. Reading the live window's insets gives
+    /// us the real values, regardless of the GeometryReader's frame.
+    @State private var windowInsets: EdgeInsets = .init()
 
     /// How much vertical space the inline info drawer occupies when fully
     /// open, as a fraction of the screen height. The remainder is the photo
     /// area, which shrinks/translates up to make room.
     private static let infoFraction: CGFloat = 0.55
     private static let infoOpenSpring: Animation = .spring(response: 0.45, dampingFraction: 0.85)
+
+    private static func currentWindowInsets() -> EdgeInsets {
+        guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+              let window = scene.keyWindow else { return .init() }
+        let i = window.safeAreaInsets
+        return EdgeInsets(top: i.top, leading: i.left, bottom: i.bottom, trailing: i.right)
+    }
 
     /// Index of `currentPhotoID` within `photos`, or nil if the id isn't
     /// present (rescan removed the photo, or the array is empty).
@@ -337,11 +350,12 @@ struct PhotoViewerView: View {
                 .offset(y: dismissOffset)
                 .animation(Self.infoOpenSpring, value: isInfoOpen)
 
-                // Filmstrip — fades out when info is open.
+                // Filmstrip — fades out when info is open or when the user
+                // taps the photo to enter focus mode (chrome hidden).
                 VStack {
                     Spacer()
                     filmstrip
-                        .padding(.bottom, (chromeVisible ? 64 : 12) + geo.safeAreaInsets.bottom)
+                        .padding(.bottom, 64 + windowInsets.bottom)
                 }
                 .background(
                     VStack(spacing: 0) {
@@ -356,22 +370,22 @@ struct PhotoViewerView: View {
                     .allowsHitTesting(false)
                     .ignoresSafeArea()
                 )
-                .opacity(isInfoOpen ? 0 : 1)
-                .allowsHitTesting(!isInfoOpen)
+                .opacity(isChromeVisible && !isInfoOpen ? 1 : 0)
+                .allowsHitTesting(isChromeVisible && !isInfoOpen)
                 .animation(.easeInOut(duration: 0.25), value: isChromeVisible)
                 .animation(.easeInOut(duration: 0.25), value: isInfoOpen)
                 .offset(y: dismissOffset)
 
                 if chromeVisible {
                     // Top bar — X always; pill hidden when info is open.
-                    // Pad by safeAreaInsets.top because the GeometryReader
-                    // ignores safe areas (full-bleed canvas), so the chrome
-                    // must account for the status bar explicitly.
+                    // Pad by windowInsets.top (read from UIWindow) — the
+                    // GeometryReader ignores safe areas for the full-bleed
+                    // canvas, so we can't trust geo.safeAreaInsets here.
                     VStack {
                         topBar
                         Spacer()
                     }
-                    .padding(.top, geo.safeAreaInsets.top)
+                    .padding(.top, windowInsets.top)
                     .background(
                         VStack(spacing: 0) {
                             LinearGradient(
@@ -389,32 +403,23 @@ struct PhotoViewerView: View {
                     .transition(.opacity)
                     .offset(y: dismissOffset)
 
-                    // Bottom action bar — anchored to the bottom of the photo
-                    // area so it always sits on the dark photo, never on the
-                    // light info panel beneath it.
-                    VStack {
-                        Spacer()
-                        bottomActionBar
+                    // Bottom action bar — only shown over the photo when the
+                    // info drawer is closed. While the drawer is open, only
+                    // the X button remains; share/info are reachable again
+                    // after dismissing the drawer.
+                    if !isInfoOpen {
+                        VStack {
+                            Spacer()
+                            bottomActionBar
+                        }
+                        .padding(.bottom, windowInsets.bottom)
+                        .transition(.opacity)
+                        .offset(y: dismissOffset)
                     }
-                    .padding(.bottom, isInfoOpen ? infoHeight : geo.safeAreaInsets.bottom)
-                    .animation(Self.infoOpenSpring, value: isInfoOpen)
-                    .transition(.opacity)
-                    .offset(y: dismissOffset)
                 }
 
-                if isPreparingShare {
-                    Color.black.opacity(0.35)
-                        .ignoresSafeArea()
-                        .overlay {
-                            ProgressView()
-                                .tint(.white)
-                                .scaleEffect(1.2)
-                        }
-                        .transition(.opacity)
-                }
             }
             .animation(.easeInOut(duration: 0.25), value: chromeVisible)
-            .animation(.easeOut(duration: 0.15), value: isPreparingShare)
             .statusBarHidden(!chromeVisible)
             .background(
                 SwipeToDismissGestureInstaller(
@@ -429,6 +434,7 @@ struct PhotoViewerView: View {
             )
         }
         .ignoresSafeArea()
+        .onAppear { windowInsets = Self.currentWindowInsets() }
         .onChange(of: photos) { _, newPhotos in
             // Rescan dropped the photo we were viewing; dismiss instead of
             // silently landing on a different image at a stale index.
@@ -436,9 +442,7 @@ struct PhotoViewerView: View {
                 dismiss()
             }
         }
-        .sheet(item: $pendingShareItem) { item in
-            ShareSheet(items: [item.url])
-        }
+        .photoShareSheet(request: $shareRequest)
     }
 
     // MARK: Chrome
@@ -496,15 +500,13 @@ struct PhotoViewerView: View {
     }
 
     private var shareButton: some View {
-        Menu {
-            Button("Original") { share(quality: .original) }
-            Button("High (4096px)") { share(quality: .high) }
-                .disabled(currentPhoto?.isVideo ?? false)
-            Button("Medium (2048px)") { share(quality: .medium) }
-                .disabled(currentPhoto?.isVideo ?? false)
-            Button("Small (1024px)") { share(quality: .small) }
-                .disabled(currentPhoto?.isVideo ?? false)
-        } label: {
+        PhotoShareMenu(
+            canResize: !(currentPhoto?.isVideo ?? false),
+            onSelect: { quality in
+                guard let photo = currentPhoto else { return }
+                shareRequest = PhotoShareRequest(photos: [photo], quality: quality)
+            }
+        ) {
             Label("Share", systemImage: "square.and.arrow.up")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.white)
@@ -571,36 +573,6 @@ struct PhotoViewerView: View {
         }
     }
 
-    // MARK: Share
-
-    private func share(quality: PhotoQuality) {
-        guard let photo = currentPhoto else { return }
-        // Show spinner only if the export takes meaningful time. `.original`
-        // and small images return near-instantly.
-        let spinnerTask = Task {
-            try? await Task.sleep(nanoseconds: 150_000_000)
-            if !Task.isCancelled { isPreparingShare = true }
-        }
-        Task {
-            defer {
-                spinnerTask.cancel()
-                isPreparingShare = false
-            }
-            do {
-                let url = try await PhotoExporter.export(photo, quality: quality)
-                pendingShareItem = ShareItem(url: url)
-            } catch {
-                Log.ui.error("Photo export failed: \(error.localizedDescription)")
-            }
-        }
-    }
-}
-
-// MARK: - Identifiable wrapper for sheet(item:) on a URL
-
-private struct ShareItem: Identifiable {
-    let id = UUID()
-    let url: URL
 }
 
 // MARK: - Zoomable Image (UIScrollView-based)
@@ -613,15 +585,23 @@ private struct ShareItem: Identifiable {
 /// so we drive the re-fit from UIKit.
 final class ZoomingScrollView: UIScrollView {
     weak var imageView: UIImageView?
+    /// When true, the image bottom-aligns inside its container (used while
+    /// the info drawer is open so the photo sits flush against the info
+    /// panel — Apple Photos style). Otherwise centered.
+    var bottomAlign: Bool = false
     private var lastLaidOutBounds: CGSize = .zero
+    private var lastLaidOutBottomAlign: Bool = false
 
     override func layoutSubviews() {
         super.layoutSubviews()
         guard let imageView, imageView.image != nil else { return }
-        // Only re-fit when bounds change AND the user hasn't zoomed in —
-        // otherwise a scroll/zoom gesture would fight with automatic fitting.
-        if bounds.size != lastLaidOutBounds, zoomScale == minimumZoomScale {
+        // Only re-fit when bounds or alignment change AND the user hasn't
+        // zoomed in — otherwise a scroll/zoom gesture would fight with
+        // automatic fitting.
+        let needsRefit = bounds.size != lastLaidOutBounds || bottomAlign != lastLaidOutBottomAlign
+        if needsRefit, zoomScale == minimumZoomScale {
             lastLaidOutBounds = bounds.size
+            lastLaidOutBottomAlign = bottomAlign
             fitImage()
         }
     }
@@ -635,7 +615,9 @@ final class ZoomingScrollView: UIScrollView {
         imageView.frame = CGRect(origin: .zero, size: size)
         contentSize = size
         let xOffset = max(0, (b.width - size.width) / 2)
-        let yOffset = max(0, (b.height - size.height) / 2)
+        let yOffset = bottomAlign
+            ? max(0, b.height - size.height)
+            : max(0, (b.height - size.height) / 2)
         imageView.center = CGPoint(x: size.width / 2 + xOffset, y: size.height / 2 + yOffset)
     }
 }
@@ -643,6 +625,7 @@ final class ZoomingScrollView: UIScrollView {
 struct ZoomableImageView: UIViewRepresentable {
     let image: UIImage
     var isZoomEnabled: Bool = true
+    var bottomAlign: Bool = false
     var onSingleTap: () -> Void = {}
     var onZoomChange: (Bool) -> Void = { _ in }
 
@@ -656,6 +639,7 @@ struct ZoomableImageView: UIViewRepresentable {
         scrollView.showsVerticalScrollIndicator = false
         scrollView.backgroundColor = .clear
         scrollView.contentInsetAdjustmentBehavior = .never
+        scrollView.bottomAlign = bottomAlign
 
         let imageView = UIImageView(image: image)
         imageView.contentMode = .scaleAspectFit
@@ -687,6 +671,11 @@ struct ZoomableImageView: UIViewRepresentable {
             if !isZoomEnabled && scrollView.zoomScale > 1.0 {
                 scrollView.setZoomScale(1.0, animated: true)
             }
+        }
+        if scrollView.bottomAlign != bottomAlign {
+            scrollView.bottomAlign = bottomAlign
+            // layoutSubviews picks the new alignment up via lastLaidOutBottomAlign
+            scrollView.setNeedsLayout()
         }
         guard let imageView = scrollView.imageView else { return }
         if imageView.image !== image {
@@ -808,6 +797,7 @@ struct PhotoPageView: View {
                         ZoomableImageView(
                             image: displayImage,
                             isZoomEnabled: !isInfoOpen,
+                            bottomAlign: isInfoOpen,
                             onSingleTap: {
                                 // Tap on the photo only toggles chrome when
                                 // info is closed — when open, chrome is forced

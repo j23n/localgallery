@@ -27,21 +27,21 @@ struct MemorySlideshowView: View {
 
     @State private var index: Int = 0
     @State private var underlayIndex: Int = 0
-    @State private var progress: Double = 0
-    /// Continuous slideshow position used by the progress bar:
-    /// `Double(index) + sub-slide progress`. Updated monotonically so the bar
-    /// never dips when we advance — without this, the brief moment after we
-    /// reset `progress = 0` but before `index` increments inside the
-    /// `withAnimation` block renders the bar at 0.
-    @State private var barPosition: Double = 0
-    @State private var isPaused: Bool = false
+    /// When this slide started, in absolute time. The progress bar reads this
+    /// inside a `TimelineView` to compute its fill position from the current
+    /// time directly — no per-frame @State writes, so the parent body doesn't
+    /// re-evaluate 25× per second (which previously thrashed the menu's
+    /// gesture state and made the ellipsis tap unreliable).
     @State private var slideStart: Date = Date()
+    /// Non-nil while the user is holding a tap zone. We freeze the progress
+    /// bar to this timestamp and shift `slideStart` forward by the elapsed
+    /// pause duration on release — one @State write per pause edge instead
+    /// of 25 per second.
+    @State private var pausedSince: Date? = nil
     @State private var timer: Timer?
     @State private var goToGrid: Bool = false
     @State private var slideDuration: Double = 5.0
-    @State private var showThemePicker: Bool = false
-    @State private var showShareSheet: Bool = false
-    @State private var showOptions: Bool = false
+    @State private var shareRequest: PhotoShareRequest?
     @State private var audio = SlideshowAudioController()
     @AppStorage("slideshowMusicTheme") private var storedTheme: String = SlideshowMusicTheme.wistful.rawValue
 
@@ -77,20 +77,20 @@ struct MemorySlideshowView: View {
             }
             .ignoresSafeArea()
 
-            // Tap zones: left-third = prev, right-third = next, anywhere = hold-to-pause.
-            // Full-bleed so gestures reach the screen edges.
-            HStack(spacing: 0) {
-                tapZone { goPrev() }
-                tapZone { /* middle: no-op, still holdable */ }
-                tapZone { goNext() }
-            }
-            .ignoresSafeArea()
-
-            // Chrome stays inside safe area so the x / "See all" clear the
-            // dynamic island and the caption clears the home indicator.
-            VStack {
+            // Chrome bookends the screen, with the prev/middle/next tap zones
+            // occupying the photo region between them. Laying them out as
+            // siblings (not overlapping) is critical: when the tap zones
+            // extended under the chrome, the .onLongPressGesture(0.2) on the
+            // tap zone fought the ellipsis Menu's internal press gesture, so
+            // taps near the menu wouldn't open it reliably.
+            VStack(spacing: 0) {
                 topBar
-                Spacer()
+                HStack(spacing: 0) {
+                    tapZone { goPrev() }
+                    tapZone { /* middle: no-op, still holdable */ }
+                    tapZone { goNext() }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 bottomChrome
             }
         }
@@ -100,30 +100,7 @@ struct MemorySlideshowView: View {
         .navigationDestination(isPresented: $goToGrid) {
             MemoryGridView(memory: memory)
         }
-        .sheet(isPresented: $showThemePicker) {
-            MusicThemePicker(selected: Binding(
-                get: { theme },
-                set: { storedTheme = $0.rawValue; audio.play(theme: $0) }
-            ))
-            .presentationDetents([.medium])
-        }
-        .sheet(isPresented: $showShareSheet) {
-            if let photo = currentPhoto {
-                ShareSheet(items: [photo.url])
-            }
-        }
-        .confirmationDialog("", isPresented: $showOptions, titleVisibility: .hidden) {
-            Button("See all photos") {
-                if let onSeeAll {
-                    onSeeAll(memory)
-                } else {
-                    goToGrid = true
-                }
-            }
-            Button("Music: \(theme.displayName)") { showThemePicker = true }
-            Button("Share photo") { showShareSheet = true }
-            Button("Cancel", role: .cancel) { }
-        }
+        .photoShareSheet(request: $shareRequest)
         .onAppear {
             OrientationLock.lock(.portrait, rotateTo: .portrait)
             audio.play(theme: theme)
@@ -172,9 +149,14 @@ struct MemorySlideshowView: View {
                 minimumDuration: pauseHoldDelay,
                 maximumDistance: 50
             ) {
-                isPaused = true
+                pausedSince = Date()
             } onPressingChanged: { pressing in
-                if !pressing { isPaused = false }
+                if !pressing, let p = pausedSince {
+                    // Resume: shift the slide's start forward by however long
+                    // we were paused, so elapsed time picks up where it left off.
+                    slideStart = slideStart.addingTimeInterval(Date().timeIntervalSince(p))
+                    pausedSince = nil
+                }
             }
     }
 
@@ -200,8 +182,37 @@ struct MemorySlideshowView: View {
 
                 Spacer()
 
-                Button {
-                    showOptions = true
+                Menu {
+                    Button {
+                        if let onSeeAll {
+                            onSeeAll(memory)
+                        } else {
+                            goToGrid = true
+                        }
+                    } label: {
+                        Label("See all photos", systemImage: "square.grid.2x2")
+                    }
+                    Menu {
+                        Picker("Music", selection: Binding(
+                            get: { theme },
+                            set: { storedTheme = $0.rawValue; audio.play(theme: $0) }
+                        )) {
+                            ForEach(SlideshowMusicTheme.allCases) { t in
+                                Text(t.displayName).tag(t)
+                            }
+                        }
+                    } label: {
+                        Label("Music: \(theme.displayName)", systemImage: "music.note")
+                    }
+                    PhotoShareMenu(
+                        canResize: !(currentPhoto?.isVideo ?? false),
+                        onSelect: { quality in
+                            guard let photo = currentPhoto else { return }
+                            shareRequest = PhotoShareRequest(photos: [photo], quality: quality)
+                        }
+                    ) {
+                        Label("Share photo", systemImage: "square.and.arrow.up")
+                    }
                 } label: {
                     Image(systemName: "ellipsis")
                         .font(.system(size: 14, weight: .semibold))
@@ -215,16 +226,18 @@ struct MemorySlideshowView: View {
         .padding(.top, 8)
         .padding(.bottom, 12)
         .background(
+            // Hit-testing intentionally enabled so taps that miss the small
+            // ellipsis / x hit targets are absorbed by the chrome instead of
+            // falling through to the goNext / goPrev tap zones beneath.
             LinearGradient(colors: [Color.black.opacity(0.55), .clear],
                            startPoint: .top, endPoint: .bottom)
                 .ignoresSafeArea(edges: .top)
-                .allowsHitTesting(false)
         )
     }
 
     private var bottomChrome: some View {
         let total = max(photos.count, 1)
-        let overall = barPosition / Double(total)
+        let isPaused = (pausedSince != nil)
 
         return VStack(alignment: .leading, spacing: 6) {
             // Reserve a fixed slot above the title so the caption block doesn't
@@ -253,11 +266,20 @@ struct MemorySlideshowView: View {
                     .padding(.bottom, 8)
             }
 
-            GeometryReader { pg in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Color.white.opacity(0.22))
-                    Capsule().fill(Color.white)
-                        .frame(width: max(0, pg.size.width * CGFloat(overall)))
+            // TimelineView re-renders only its own content on each tick — the
+            // parent body stays stable so the menu's gesture state survives.
+            // Paused: timeline freezes; unpaused: animates at the display rate.
+            TimelineView(.animation(minimumInterval: 0.04, paused: isPaused)) { ctx in
+                let referenceDate = pausedSince ?? ctx.date
+                let elapsed = max(0, referenceDate.timeIntervalSince(slideStart))
+                let p = min(1.0, elapsed / slideDuration)
+                let overall = (Double(index) + p) / Double(total)
+                GeometryReader { pg in
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(Color.white.opacity(0.22))
+                        Capsule().fill(Color.white)
+                            .frame(width: max(0, pg.size.width * CGFloat(overall)))
+                    }
                 }
             }
             .frame(height: 3)
@@ -267,10 +289,11 @@ struct MemorySlideshowView: View {
         .padding(.top, 40)
         .padding(.bottom, 16)
         .background(
+            // Hit-testing intentionally enabled — same reason as the top bar:
+            // absorb stray taps in the chrome area so they don't trigger nav.
             LinearGradient(colors: [.clear, Color.black.opacity(0.72)],
                            startPoint: .top, endPoint: .bottom)
                 .ignoresSafeArea(edges: .bottom)
-                .allowsHitTesting(false)
         )
     }
 
@@ -295,12 +318,9 @@ struct MemorySlideshowView: View {
     }
 
     private func resetSlide() {
-        progress = 0
-        // Snap bar to the new index so the progress bar tracks the post-jump
-        // position immediately rather than re-animating from 0.
-        barPosition = Double(index)
         slideDuration = nextDuration()
         slideStart = Date()
+        pausedSince = nil
     }
 
     private func nextDuration() -> Double {
@@ -313,28 +333,19 @@ struct MemorySlideshowView: View {
     private func startTimer() {
         stopTimer()
         slideDuration = nextDuration()
-        slideStart = Date().addingTimeInterval(-progress * slideDuration)
-        barPosition = Double(index) + progress
-        let t = Timer.scheduledTimer(withTimeInterval: 0.04, repeats: true) { _ in
+        slideStart = Date()
+        // Low-frequency advancement check. The progress bar is driven by
+        // TimelineView locally, so this timer is only responsible for moving
+        // to the next slide when the current one's duration has elapsed.
+        let t = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { _ in
             Task { @MainActor in
-                guard !isPaused, !photos.isEmpty else {
-                    if isPaused { slideStart = Date().addingTimeInterval(-progress * slideDuration) }
-                    return
-                }
-                let p = min(1.0, Date().timeIntervalSince(slideStart) / slideDuration)
-                progress = p
-                barPosition = Double(index) + p
-                if p >= 1 {
-                    progress = 0
+                guard pausedSince == nil, !photos.isEmpty else { return }
+                if Date().timeIntervalSince(slideStart) >= slideDuration {
                     underlayIndex = index
                     let nextIndex = (index + 1) % photos.count
                     withAnimation(.easeInOut(duration: 0.55)) {
                         index = nextIndex
                     }
-                    // Snap bar to the new index to avoid the progress bar
-                    // animating backward to 0 then forward to 1/N during the
-                    // photo crossfade.
-                    barPosition = Double(nextIndex)
                     slideDuration = nextDuration()
                     slideStart = Date()
                 }
@@ -390,58 +401,6 @@ private struct SlideshowImage: View {
         }
         .frame(width: size.width, height: size.height)
         .brightness(-0.08)
-    }
-}
-
-// MARK: - Music theme picker
-
-private struct MusicThemePicker: View {
-    @Binding var selected: SlideshowMusicTheme
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            List {
-                Section {
-                    ForEach(SlideshowMusicTheme.allCases) { theme in
-                        Button {
-                            selected = theme
-                            dismiss()
-                        } label: {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(theme.displayName)
-                                        .font(.system(size: 15.5, weight: .medium))
-                                        .foregroundStyle(Design.ink)
-                                    Text(theme.blurb)
-                                        .font(.system(size: 12))
-                                        .foregroundStyle(Design.ink3)
-                                }
-                                Spacer()
-                                if theme == selected {
-                                    Image(systemName: "checkmark")
-                                        .font(.system(size: 13, weight: .semibold))
-                                        .foregroundStyle(Design.accentColor)
-                                }
-                            }
-                        }
-                        .buttonStyle(.plain)
-                    }
-                } header: {
-                    Text("Thematic music")
-                } footer: {
-                    Text("Played softly behind the slideshow. Your choice is remembered for next time.")
-                }
-            }
-            .navigationTitle("Music")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") { dismiss() }
-                        .fontWeight(.semibold)
-                }
-            }
-        }
     }
 }
 

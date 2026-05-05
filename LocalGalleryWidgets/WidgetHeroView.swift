@@ -93,9 +93,9 @@ struct WidgetHeroView: View {
 
     private var captionPadding: EdgeInsets {
         switch family {
-        case .systemSmall:  return EdgeInsets(top: 8, leading: 5, bottom: 4, trailing: 10)
-        case .systemMedium: return EdgeInsets(top: 10, leading: 7, bottom: 6, trailing: 14)
-        default:            return EdgeInsets(top: 12, leading: 9, bottom: 8, trailing: 18)
+        case .systemSmall:  return EdgeInsets(top: 8, leading: 2.5, bottom: 2, trailing: 10)
+        case .systemMedium: return EdgeInsets(top: 10, leading: 3.5, bottom: 3, trailing: 14)
+        default:            return EdgeInsets(top: 12, leading: 4.5, bottom: 4, trailing: 18)
         }
     }
 }

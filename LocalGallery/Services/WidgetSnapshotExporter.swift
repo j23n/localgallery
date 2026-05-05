@@ -295,11 +295,15 @@ actor WidgetSnapshotExporter {
                 guard !photos.isEmpty else { continue }
                 let sorted = photos.sorted { ($0.dateTaken ?? .distantPast) > ($1.dateTaken ?? .distantPast) }
                 let refs = Array(sorted.prefix(12)).map { makeRef(photo: $0, folderIdByURL: folderIdByURL) }
+                let dates = photos.compactMap(\.dateTaken).sorted()
+                let dateRange: ClosedRange<Date>? = (dates.first).flatMap { first in
+                    dates.last.map { first...$0 }
+                }
                 items.append(MemorySnapshotItem(
                     id: "birthday-" + resolution.tagFullPath,
                     kind: .birthday,
-                    title: "\(resolution.displayName)'s birthday",
-                    subtitle: "\(photos.count) photos",
+                    title: "Happy birthday, \(resolution.displayName)",
+                    subtitle: MemoryEngine.subtitleWithCount(dateRange: dateRange, count: photos.count),
                     photoRefs: refs,
                     validFrom: startOfToday,
                     validTo: startOfTomorrow,

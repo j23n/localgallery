@@ -782,10 +782,12 @@ final class GalleryStore {
     func hidePerson(_ path: String) {
         hiddenPeople.insert(path)
         featuredPeople.removeAll { $0 == path }
+        exportWidgetSnapshot()
     }
 
     func unhidePerson(_ path: String) {
         hiddenPeople.remove(path)
+        exportWidgetSnapshot()
     }
 
     func isFeatured(_ path: String) -> Bool {
@@ -873,9 +875,15 @@ final class GalleryStore {
         featuredPhotoByPerson[personPath] = photoID
     }
 
-    func hideMemory(_ id: String) { hiddenMemories.insert(id) }
+    func hideMemory(_ id: String) {
+        hiddenMemories.insert(id)
+        exportWidgetSnapshot()
+    }
     func markMemorySeen(_ id: String) { seenMemoryIDs[id] = clock.now() }
-    func unhideMemory(_ id: String) { hiddenMemories.remove(id) }
+    func unhideMemory(_ id: String) {
+        hiddenMemories.remove(id)
+        exportWidgetSnapshot()
+    }
 
     // MARK: - Widget Snapshot
 
@@ -893,6 +901,7 @@ final class GalleryStore {
         var birthdays: [WidgetSnapshotExporter.BirthdayResolution] = []
         if birthdayMemoriesEnabled {
             for tag in allTags where tag.namespace?.lowercased() == "people" {
+                if hiddenPeople.contains(tag.fullPath) { continue }
                 guard let contact = effectiveContact(forPersonPath: tag.fullPath, displayName: tag.displayName),
                       let birthday = contact.birthday,
                       birthday.month == today.month, birthday.day == today.day else { continue }
@@ -905,7 +914,7 @@ final class GalleryStore {
         }
         widgetExport.schedule(WidgetSnapshotExporter.Inputs(
             allPhotos: allPhotos,
-            memories: memories,
+            memories: visibleMemories,
             allTags: allTags,
             rootFolder: rootFolder,
             leafFolders: _cachedLeafFolders,

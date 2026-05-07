@@ -43,9 +43,7 @@ struct FolderBrowserView: View {
                     }
                 }
                 if isRoot {
-                    Button { showSettings = true } label: {
-                        Image(systemName: "gear")
-                    }
+                    SettingsToolbarButton(isPresented: $showSettings)
                 }
             }
         }

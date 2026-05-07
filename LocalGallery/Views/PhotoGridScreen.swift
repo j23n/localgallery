@@ -617,9 +617,7 @@ struct PhotoGridScreen: View {
                 }
 
                 if isRoot {
-                    Button { showSettings = true } label: {
-                        Image(systemName: "gear")
-                    }
+                    SettingsToolbarButton(isPresented: $showSettings)
                 }
             }
         }

@@ -129,10 +129,12 @@ struct LocalGalleryApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @State private var store = GalleryStore()
     @State private var router = AppRouter()
+    @AppStorage("crashReportingEnabled") private var crashReportingEnabled = false
 
     init() {
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
         configureAppearance()
+        CrashDiagnosticsService.shared.setEnabled(crashReportingEnabled)
     }
 
     var body: some Scene {

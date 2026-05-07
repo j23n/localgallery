@@ -46,7 +46,7 @@ struct CollectionsView: View {
         .navigationBarTitleDisplayMode(.large)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button { showSettings = true } label: { Image(systemName: "gear") }
+                SettingsToolbarButton(isPresented: $showSettings)
             }
         }
         .sheet(isPresented: $showSettings) { SettingsView() }

@@ -49,11 +49,14 @@ final class LogStore: @unchecked Sendable {
            last.category == entry.category,
            last.message == entry.message {
             entries[entries.count - 1].repeatCount += 1
-            return
+        } else {
+            entries.append(entry)
+            if entries.count > maxEntries {
+                entries.removeFirst(entries.count - maxEntries)
+            }
         }
-        entries.append(entry)
-        if entries.count > maxEntries {
-            entries.removeFirst(entries.count - maxEntries)
+        MainActor.assumeIsolated {
+            LogPersistence.shared.scheduleFlush()
         }
     }
 

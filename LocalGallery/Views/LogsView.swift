@@ -182,16 +182,7 @@ struct LogsView: View {
         let fileName = "localgallery-logs-\(stamp).txt"
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
         guard (try? text.write(to: url, atomically: true, encoding: .utf8)) != nil else { return }
-        let vc = UIActivityViewController(activityItems: [url], applicationActivities: nil)
-        guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-              let window = scene.keyWindow else { return }
-        var topVC = window.rootViewController
-        while let presented = topVC?.presentedViewController { topVC = presented }
-        vc.popoverPresentationController?.sourceView = window
-        vc.popoverPresentationController?.sourceRect = CGRect(
-            x: window.bounds.midX, y: window.safeAreaInsets.top, width: 0, height: 0
-        )
-        topVC?.present(vc, animated: true)
+        ShareSheet.present(items: [url])
     }
 }
 

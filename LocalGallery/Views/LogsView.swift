@@ -11,6 +11,7 @@ struct LogsView: View {
     @State private var isFollowing = true
     @State private var showCopyAlert = false
     @State private var logStore = LogStore.shared
+    @State private var scrollPosition = ScrollPosition(edge: .bottom)
 
     private static let timeFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -19,10 +20,10 @@ struct LogsView: View {
     }()
 
     private var filteredEntries: [LogStore.Entry] {
-        logStore.entries.filter { entry in
+        let needle = searchText.lowercased()
+        return logStore.entries.filter { entry in
             if let level = filterLevel, entry.level != level { return false }
-            if !searchText.isEmpty {
-                let needle = searchText.lowercased()
+            if !needle.isEmpty {
                 return entry.message.lowercased().contains(needle)
                     || entry.category.lowercased().contains(needle)
             }
@@ -115,22 +116,20 @@ struct LogsView: View {
 
     @ViewBuilder
     private var logsList: some View {
-        ScrollViewReader { proxy in
-            List(filteredEntries, id: \.id) { entry in
-                logListRow(for: entry)
-                    .id(entry.id)
-                    .listRowInsets(EdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 12))
+        List(filteredEntries, id: \.id) { entry in
+            logListRow(for: entry)
+                .listRowInsets(EdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 12))
+        }
+        .listStyle(.plain)
+        .scrollPosition($scrollPosition)
+        .onChange(of: filteredEntries.last?.id) { _, _ in
+            if isFollowing {
+                scrollPosition.scrollTo(edge: .bottom)
             }
-            .listStyle(.plain)
-            .onChange(of: filteredEntries.count) { _, _ in
-                if isFollowing, let last = filteredEntries.last {
-                    proxy.scrollTo(last.id, anchor: .bottom)
-                }
-            }
-            .onChange(of: isFollowing) { _, following in
-                if following, let last = filteredEntries.last {
-                    withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
-                }
+        }
+        .onChange(of: isFollowing) { _, following in
+            if following {
+                withAnimation { scrollPosition.scrollTo(edge: .bottom) }
             }
         }
     }

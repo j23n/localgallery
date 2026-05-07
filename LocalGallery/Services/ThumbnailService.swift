@@ -2,6 +2,7 @@ import Foundation
 import UIKit
 import ImageIO
 import AVFoundation
+import QuickLookThumbnailing
 import os
 
 // MARK: - Decode concurrency limiter
@@ -71,19 +72,36 @@ final class ThumbnailService {
 
     /// Async load: memory cache → disk cache → ImageIO/AVAsset generation.
     /// Caches the result back into the memory cache on hit.
-    func thumbnail(for url: URL, size: CGSize, isVideo: Bool = false) async -> UIImage? {
+    ///
+    /// `useQuickLook` switches the decode strategy: when true (i.e. the photo
+    /// is a non-downloaded file-provider placeholder), generation goes through
+    /// `QLThumbnailGenerator` which transparently uses provider-vended
+    /// thumbnails. Once a thumbnail has been written to the on-disk cache it
+    /// survives the source's eviction, so subsequent grid scrolls don't have
+    /// to re-fetch.
+    func thumbnail(for url: URL, size: CGSize, isVideo: Bool = false, useQuickLook: Bool = false) async -> UIImage? {
         if let cached = thumbnailCache.object(forKey: url as NSURL) {
             return cached
         }
 
         let maxPixelSize = max(size.width, size.height) * UIScreen.main.scale
-        let diskPath = thumbnailDiskCacheDir.appendingPathComponent(
-            PhotoFile.stableID(for: url).uuidString + ".jpg"
-        )
+        let stableID = PhotoFile.stableID(for: url).uuidString
+        let diskPath = thumbnailDiskCacheDir.appendingPathComponent(stableID + ".jpg")
+        let sentinelPath = thumbnailDiskCacheDir.appendingPathComponent(stableID + ".nothumb")
+
+        // Sentinel: provider didn't vend a thumbnail on a previous attempt.
+        // Skip the generator entirely so a 50k-photo cloud library doesn't
+        // burn battery re-asking on every scroll.
+        if FileManager.default.fileExists(atPath: sentinelPath.path) {
+            return nil
+        }
 
         do {
             let image = try await Self.loadThumbnail(
-                for: url, maxPixelSize: maxPixelSize, isVideo: isVideo, diskPath: diskPath
+                for: url, maxPixelSize: maxPixelSize, isVideo: isVideo,
+                useQuickLook: useQuickLook,
+                size: size,
+                diskPath: diskPath, sentinelPath: sentinelPath
             )
             guard let image else { return nil }
             let cost = image.cgImage.map { $0.bytesPerRow * $0.height } ?? 0
@@ -100,7 +118,9 @@ final class ThumbnailService {
     /// Generates or loads a thumbnail — `nonisolated` for cooperative pool
     /// execution with cancellation support.
     private nonisolated static func loadThumbnail(
-        for url: URL, maxPixelSize: CGFloat, isVideo: Bool, diskPath: URL
+        for url: URL, maxPixelSize: CGFloat, isVideo: Bool,
+        useQuickLook: Bool, size: CGSize,
+        diskPath: URL, sentinelPath: URL
     ) async throws -> UIImage? {
         try Task.checkCancellation()
 
@@ -113,7 +133,19 @@ final class ThumbnailService {
         if FileManager.default.fileExists(atPath: diskPath.path) {
             let sourceModDate = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
             let cacheModDate = (try? diskPath.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-            if let src = sourceModDate, let cache = cacheModDate, cache >= src,
+            // For placeholder files we trust the disk cache regardless of
+            // mod-date — reading the source's mtime might be a metadata-only
+            // call but the source itself has no bytes to compare against.
+            // Cache wins as long as it exists.
+            if useQuickLook {
+                if let source = CGImageSourceCreateWithURL(diskPath as CFURL, nil),
+                   let cgImage = CGImageSourceCreateImageAtIndex(
+                       source, 0,
+                       [kCGImageSourceShouldCacheImmediately: true] as CFDictionary
+                   ) {
+                    return UIImage(cgImage: cgImage)
+                }
+            } else if let src = sourceModDate, let cache = cacheModDate, cache >= src,
                let source = CGImageSourceCreateWithURL(diskPath as CFURL, nil),
                let cgImage = CGImageSourceCreateImageAtIndex(
                    source, 0,
@@ -133,7 +165,11 @@ final class ThumbnailService {
         do {
             try Task.checkCancellation()
             let result: UIImage?
-            if isVideo {
+            if useQuickLook {
+                result = try await decodeQuickLook(
+                    url: url, size: size, diskPath: diskPath, sentinelPath: sentinelPath
+                )
+            } else if isVideo {
                 result = try await decodeVideo(url: url, maxPixelSize: maxPixelSize, diskPath: diskPath)
             } else {
                 result = try await decodeImage(url: url, maxPixelSize: maxPixelSize, diskPath: diskPath)
@@ -143,6 +179,37 @@ final class ThumbnailService {
         } catch {
             await decodeLimiter.release()
             throw error
+        }
+    }
+
+    /// Generate a thumbnail for a non-downloaded file-provider placeholder via
+    /// `QLThumbnailGenerator`. QL transparently uses provider-vended
+    /// thumbnails when the underlying bytes haven't been fetched. On failure
+    /// (no thumb vended), writes a sentinel so subsequent calls can short-circuit.
+    private nonisolated static func decodeQuickLook(
+        url: URL, size: CGSize, diskPath: URL, sentinelPath: URL
+    ) async throws -> UIImage? {
+        try Task.checkCancellation()
+        let scale = await MainActor.run { UIScreen.main.scale }
+        let request = QLThumbnailGenerator.Request(
+            fileAt: url, size: size, scale: scale,
+            representationTypes: .thumbnail
+        )
+        do {
+            let rep = try await QLThumbnailGenerator.shared.generateBestRepresentation(for: request)
+            try Task.checkCancellation()
+            let cgImage = rep.cgImage
+            if let jpegData = opaqueJPEGData(from: cgImage, quality: 0.7) {
+                try? jpegData.write(to: diskPath, options: .atomic)
+            }
+            return rep.uiImage
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            // Provider didn't vend a thumbnail. Drop a sentinel so we don't
+            // ask again on every scroll.
+            try? Data().write(to: sentinelPath, options: .atomic)
+            return nil
         }
     }
 

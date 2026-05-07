@@ -3,7 +3,13 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(GalleryStore.self) private var store
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openURL) private var openURL
+    @Environment(\.scenePhase) private var scenePhase
     @State private var showPicker = false
+    @AppStorage("crashReportingEnabled") private var crashReportingEnabled = false
+    private var crashService = CrashDiagnosticsService.shared
+
+    private static let githubURL = URL(string: "https://github.com/j23n/localgallery")!
 
     var body: some View {
         @Bindable var store = store
@@ -44,6 +50,10 @@ struct SettingsView: View {
                     }
                 }
 
+                if store.hasFileProviderPhotos {
+                    cloudStorageSection
+                }
+
                 Section("People") {
                     Toggle(isOn: $store.birthdayMemoriesEnabled) {
                         Label("Birthday Memories", systemImage: "birthday.cake")
@@ -82,20 +92,55 @@ struct SettingsView: View {
                     }
                 }
 
-                Section("Info") {
+                Section("Stats") {
                     LabeledContent("Photos", value: "\(store.allPhotos.count)")
-                    LabeledContent("Tags", value: "\(store.allTags.count)")
-                    LabeledContent("Version", value: appVersion)
+                    LabeledContent("People", value: "\(tagCount(namespace: "people"))")
+                    LabeledContent("Objects", value: "\(tagCount(namespace: "objects"))")
+                    LabeledContent("Scenes", value: "\(tagCount(namespace: "scenes"))")
                 }
 
-                Section("Developer") {
+                Section {
                     NavigationLink {
                         LogsView()
                     } label: {
                         Label("Logs", systemImage: "doc.text.magnifyingglass")
                     }
+                    LabeledContent("Version", value: appVersion)
+                    Toggle("Crash Reporting", isOn: $crashReportingEnabled)
+                } header: {
+                    Text("Diagnostics")
+                } footer: {
+                    Text("When on, LocalGallery captures crash details and recent log entries on this device. Nothing is sent automatically — if a crash is captured, a banner appears here in Settings and you can choose to share the report with the developer. Logs include file names and folder paths from your library. Off by default. App Store crash analytics (system-level) are unaffected by this setting.")
                 }
 
+                if crashReportingEnabled, crashService.hasPendingCrash {
+                    crashSection
+                }
+
+                Section("About") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("LocalGallery browses photos from a folder of your choice — no import, no library, no accounts.")
+                            .font(.callout)
+
+                        Text("Found a bug or have feedback? Open an issue or get in touch:")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 4)
+
+                    Button {
+                        openURL(Self.githubURL)
+                    } label: {
+                        LabeledContent {
+                            Image(systemName: "arrow.up.right")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } label: {
+                            Label("GitHub", systemImage: "chevron.left.forwardslash.chevron.right")
+                        }
+                    }
+                    .tint(.primary)
+                }
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
@@ -103,6 +148,14 @@ struct SettingsView: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { dismiss() }
                         .fontWeight(.semibold)
+                }
+            }
+            .onChange(of: crashReportingEnabled) { _, newValue in
+                CrashDiagnosticsService.shared.setEnabled(newValue)
+            }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active {
+                    crashService.refreshPendingCrash()
                 }
             }
             .sheet(isPresented: $showPicker) {
@@ -146,6 +199,149 @@ struct SettingsView: View {
 
     private var appVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"
+    }
+
+    private func tagCount(namespace: String) -> Int {
+        store.allTags.reduce(into: 0) { count, tag in
+            if tag.namespace?.lowercased() == namespace { count += 1 }
+        }
+    }
+
+    // MARK: - Crash banner
+
+    @ViewBuilder
+    private var crashSection: some View {
+        Section {
+            VStack(alignment: .leading, spacing: 6) {
+                Label("LocalGallery crashed last session", systemImage: "exclamationmark.triangle.fill")
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.orange)
+                Text("A crash report was captured. You can share it with the developer to help diagnose the issue, or dismiss it.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.vertical, 2)
+
+            Button {
+                shareCrashReport()
+            } label: {
+                Label("Share Crash Report", systemImage: "square.and.arrow.up")
+            }
+
+            Button(role: .destructive) {
+                crashService.clearPendingCrash()
+            } label: {
+                Label("Dismiss", systemImage: "xmark.circle")
+            }
+        }
+    }
+
+    private func shareCrashReport() {
+        let stamp = Date().formatted(.iso8601.year().month().day().dateSeparator(.dash))
+        var items: [Any] = []
+
+        if let crashData = crashService.pendingCrashReport() {
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("localgallery-crash-\(stamp).json")
+            if (try? crashData.write(to: url, options: .atomic)) != nil {
+                items.append(url)
+            }
+        }
+
+        if let logData = crashService.recentLogTail() {
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("localgallery-logs-\(stamp).txt")
+            if (try? logData.write(to: url, options: .atomic)) != nil {
+                items.append(url)
+            }
+        }
+
+        guard !items.isEmpty else { return }
+        ShareSheet.present(items: items)
+    }
+
+    // MARK: - Cloud Storage
+
+    @State private var cloudStats: GalleryStore.CloudStorageStats?
+    @State private var isClearingDownloads = false
+    @State private var showClearDownloadsAlert = false
+    @State private var showClearSidecarsAlert = false
+
+    @ViewBuilder
+    private var cloudStorageSection: some View {
+        @Bindable var store = store
+        Section("Cloud Storage") {
+            if let stats = cloudStats {
+                LabeledContent("Downloaded") {
+                    Text("\(stats.materializedCount) (\(formatBytes(stats.materializedBytes)))")
+                        .foregroundStyle(.secondary)
+                }
+                LabeledContent("Placeholders") {
+                    Text("\(stats.placeholderCount)")
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                HStack(spacing: 8) {
+                    ProgressView()
+                    Text("Computing…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Button(role: .destructive) {
+                showClearDownloadsAlert = true
+            } label: {
+                Label("Clear All Downloads", systemImage: "icloud.slash")
+            }
+            .disabled(isClearingDownloads || (cloudStats?.materializedCount ?? 0) == 0)
+
+            Toggle(isOn: $store.prefetchAdjacentRemotePhotos) {
+                Label("Pre-fetch in Viewer", systemImage: "rectangle.portrait.and.arrow.right")
+            }
+            Toggle(isOn: $store.useCellularForDownloads) {
+                Label("Use Cellular for Downloads", systemImage: "antenna.radiowaves.left.and.right")
+            }
+        }
+        Section("Sidecars") {
+            Button(role: .destructive) {
+                showClearSidecarsAlert = true
+            } label: {
+                Label("Re-download All Sidecars", systemImage: "arrow.triangle.2.circlepath")
+            }
+        }
+        .alert("Clear all downloads?", isPresented: $showClearDownloadsAlert) {
+            Button("Cancel", role: .cancel) { }
+            Button("Clear", role: .destructive) {
+                isClearingDownloads = true
+                Task {
+                    _ = await store.clearAllDownloads()
+                    isClearingDownloads = false
+                    cloudStats = store.computeCloudStorageStats()
+                }
+            }
+        } message: {
+            Text("Photos will need to download again the next time you open them. Thumbnails and tags are kept.")
+        }
+        .alert("Re-download all sidecars?", isPresented: $showClearSidecarsAlert) {
+            Button("Cancel", role: .cancel) { }
+            Button("Re-download", role: .destructive) {
+                store.clearSidecarCache()
+                Task { await store.rescan(silent: true) }
+            }
+        } message: {
+            Text("This wipes the cached `.xmp` data and re-fetches everything on the next sync. Tags and country codes will reappear once the sync completes.")
+        }
+        .task {
+            cloudStats = store.computeCloudStorageStats()
+        }
+    }
+
+    private func formatBytes(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
     }
 }
 

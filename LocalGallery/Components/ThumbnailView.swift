@@ -8,6 +8,8 @@ struct ThumbnailView: View {
     var cornerRadius: CGFloat = 0
     @Environment(GalleryStore.self) private var store
     @State private var thumbnail: UIImage?
+    @State private var isRemotePlaceholder: Bool = false
+    @State private var thumbnailMissing: Bool = false
 
     var body: some View {
         ZStack {
@@ -18,10 +20,34 @@ struct ThumbnailView: View {
                     .frame(width: size, height: size)
                     .clipped()
                     .transition(.opacity)
+            } else if thumbnailMissing && isRemotePlaceholder {
+                // Provider didn't vend a thumbnail. Show a plain placeholder
+                // tile with a photo glyph so the grid doesn't stall on a
+                // forever-spinning shimmer.
+                Rectangle()
+                    .fill(Color(.systemGray6))
+                    .frame(width: size, height: size)
+                    .overlay(
+                        Image(systemName: "photo")
+                            .font(.system(size: max(16, size * 0.2)))
+                            .foregroundStyle(.secondary)
+                    )
+                    .transition(.opacity)
             } else {
                 ShimmerView()
                     .frame(width: size, height: size)
                     .transition(.opacity)
+            }
+
+            if isRemotePlaceholder {
+                VStack {
+                    HStack {
+                        Spacer()
+                        RemoteBadge(size: max(10, size * 0.09))
+                            .padding(4)
+                    }
+                    Spacer()
+                }
             }
 
             if isVideo {
@@ -56,7 +82,20 @@ struct ThumbnailView: View {
         .animation(.easeIn(duration: 0.2), value: thumbnail != nil)
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
         .task(id: url) {
-            thumbnail = await store.thumbnail(for: url, size: CGSize(width: size, height: size), isVideo: isVideo)
+            // Per-file probe is metadata-only (one URLResourceValues read),
+            // so cheap enough to do unconditionally — purely-local libraries
+            // come back as `.local` and skip the QL path.
+            let probe = FileProviderDetector.probe(url)
+            let isPlaceholder = probe.isFileProvider && probe.status != .local
+            self.isRemotePlaceholder = isPlaceholder
+            let result = await store.thumbnail(
+                for: url,
+                size: CGSize(width: size, height: size),
+                isVideo: isVideo,
+                useQuickLook: isPlaceholder
+            )
+            self.thumbnail = result
+            self.thumbnailMissing = (result == nil)
         }
     }
 }

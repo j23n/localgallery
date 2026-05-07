@@ -149,6 +149,14 @@ struct CollectionsView: View {
         renderedVideoURL = nil
 
         Task.detached(priority: .userInitiated) {
+            // Pre-flight: pull non-local photos down before the renderer
+            // tries to read their bytes — without this it would silently
+            // fail on placeholders.
+            let remote = photos.filter { $0.locality != .local }
+            for p in remote {
+                _ = try? await mgr.ensureMaterialized(p)
+            }
+
             let loader: (URL, CGSize) async -> UIImage? = { url, _ in
                 await mgr.loadFullImage(for: url)
             }

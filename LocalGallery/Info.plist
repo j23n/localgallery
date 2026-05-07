@@ -5,6 +5,7 @@
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
 		<string>com.j23n.localgallery.app.dailyMemories</string>
+		<string>com.j23n.localgallery.app.sidecarRefresh</string>
 	</array>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
@@ -35,6 +36,8 @@
 	</array>
 	<key>CFBundleVersion</key>
 	<string>1</string>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
 	<key>NSContactsUsageDescription</key>
 	<string>LocalGallery uses your contacts to surface birthday memories for the people in your photos. Names are matched only against your photo tags — nothing leaves the device.</string>
 	<key>UIApplicationSceneManifest</key>

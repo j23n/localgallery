@@ -21,10 +21,22 @@ enum FolderScanner {
         let faceRegions: [FaceRegion]
     }
 
+    /// One row of the sidecar manifest the scanner emits. Carries the photo's
+    /// stable UUID, the `.xmp` URL, and the URLResourceKey-derived version of
+    /// the sidecar at scan time. Used by `SidecarSyncService` to diff against
+    /// the cache without re-reading anything.
+    struct SidecarCandidate: Sendable {
+        let photoID: UUID
+        let sidecarURL: URL
+        let currentVersion: FileProviderDetector.ContentVersion
+        let downloadStatus: FileProviderDetector.DownloadStatus
+    }
+
     struct Result: Sendable {
         let rootFolder: PhotoFolder?
         let flatPhotos: [PhotoFile]
         let needsEnrichment: Bool
+        let sidecarManifest: [SidecarCandidate]
     }
 
     /// Internal scratch nodes used during traversal — flat array indexed by
@@ -61,6 +73,7 @@ enum FolderScanner {
             let fm = FileManager.default
             var flatPhotos: [PhotoFile] = []
             var needsEnrichment = false
+            var sidecarManifest: [SidecarCandidate] = []
 
             var nodes: [ScanFolderNode] = []
             var stack: [(URL, Int?)] = [(rootURL, nil)]
@@ -74,13 +87,29 @@ enum FolderScanner {
 
                 let keys: [URLResourceKey] = [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey, .creationDateKey, .typeIdentifierKey]
 
-                if let contents = try? fm.contentsOfDirectory(
-                    at: dirURL,
-                    includingPropertiesForKeys: keys,
-                    options: [.skipsHiddenFiles, .skipsPackageDescendants]
-                ) {
-                    // First pass: classify files and collect metadata
+                let contents: [URL]?
+                do {
+                    contents = try fm.contentsOfDirectory(
+                        at: dirURL,
+                        includingPropertiesForKeys: keys,
+                        options: [.skipsHiddenFiles, .skipsPackageDescendants]
+                    )
+                } catch {
+                    Log.scan.error("contentsOfDirectory failed for \(dirURL.path): \(error.localizedDescription)")
+                    contents = nil
+                }
+
+                if let contents {
+                    // First pass: classify files and collect metadata.
+                    // Photos and videos go into `scannedFiles`; `.xmp` siblings
+                    // are tracked separately so the manifest can emit one row
+                    // per photo that has a sidecar adjacent to it.
                     var scannedFiles: [ScanFile] = []
+                    // Lower-cased basename ("img_1234.heic") → URL of the
+                    // sidecar file. digiKam writes sidecars as `<photo>.xmp`
+                    // (basename + ".xmp"), so the manifest matches by exact
+                    // photo basename.
+                    var sidecarsByPhotoBasename: [String: URL] = [:]
 
                     for itemURL in contents {
                         let resourceValues = try? itemURL.resourceValues(forKeys: Set(keys))
@@ -90,7 +119,11 @@ enum FolderScanner {
                             subdirs.append(itemURL)
                         } else {
                             let ext = itemURL.pathExtension.lowercased()
-                            if !ext.isEmpty, let utType = UTType(filenameExtension: ext) {
+                            if ext == "xmp" {
+                                // Sidecar URL: `IMG.heic.xmp` → key `img.heic`.
+                                let key = itemURL.deletingPathExtension().lastPathComponent.lowercased()
+                                sidecarsByPhotoBasename[key] = itemURL
+                            } else if !ext.isEmpty, let utType = UTType(filenameExtension: ext) {
                                 let isImage = utType.conforms(to: .image)
                                 let isVideo = utType.conforms(to: .movie)
                                 if isImage || isVideo {
@@ -151,8 +184,14 @@ enum FolderScanner {
                             needsEnrichment = true
                         }
 
+                        let photoProbe = FileProviderDetector.probe(file.url)
+                        let locality: PhotoLocality = photoProbe.isFileProvider
+                            ? .remote(downloaded: photoProbe.status == .local)
+                            : .local
+                        let photoID = PhotoFile.stableID(for: file.url)
+
                         photos.append(PhotoFile(
-                            id: PhotoFile.stableID(for: file.url), url: file.url, filename: stem,
+                            id: photoID, url: file.url, filename: stem,
                             fileSize: file.fileSize,
                             dateTaken: dateTaken,
                             livePhotoVideoURL: liveURL,
@@ -161,8 +200,22 @@ enum FolderScanner {
                             enrichedFileDate: stale ? nil : cachedEnrichedDate,
                             gpsLatitude: cached?.gpsLatitude,
                             gpsLongitude: cached?.gpsLongitude,
-                            faceRegions: cached?.faceRegions ?? []
+                            faceRegions: cached?.faceRegions ?? [],
+                            locality: locality
                         ))
+
+                        // Sidecar manifest row — `<basename>.xmp` (e.g.
+                        // `IMG_1234.heic.xmp`).
+                        let basenameKey = file.url.lastPathComponent.lowercased()
+                        if let sidecarURL = sidecarsByPhotoBasename[basenameKey] {
+                            let sidecarProbe = FileProviderDetector.probe(sidecarURL)
+                            sidecarManifest.append(SidecarCandidate(
+                                photoID: photoID,
+                                sidecarURL: sidecarURL,
+                                currentVersion: sidecarProbe.version,
+                                downloadStatus: sidecarProbe.status
+                            ))
+                        }
                     }
                     // Standalone videos only (no matching image)
                     var standaloneVideoCount = 0
@@ -171,11 +224,16 @@ enum FolderScanner {
                         if !imageStemSet.contains(stem) {
                             standaloneVideoCount += 1
                             let cached = cachedMetadata[file.url]
+                            let videoProbe = FileProviderDetector.probe(file.url)
+                            let locality: PhotoLocality = videoProbe.isFileProvider
+                                ? .remote(downloaded: videoProbe.status == .local)
+                                : .local
                             photos.append(PhotoFile(
                                 id: PhotoFile.stableID(for: file.url), url: file.url, filename: stem,
                                 fileSize: file.fileSize,
                                 dateTaken: cached?.date ?? MetadataReader.earliestFilesystemDate(creation: file.creationDate, modification: file.modDate),
-                                isVideo: true
+                                isVideo: true,
+                                locality: locality
                             ))
                         }
                     }
@@ -249,7 +307,12 @@ enum FolderScanner {
             }
 
             let root = nodes.isEmpty ? nil : buildFolder(from: 0)
-            return Result(rootFolder: root, flatPhotos: flatPhotos, needsEnrichment: needsEnrichment)
+            return Result(
+                rootFolder: root,
+                flatPhotos: flatPhotos,
+                needsEnrichment: needsEnrichment,
+                sidecarManifest: sidecarManifest
+            )
         }.value
     }
 }

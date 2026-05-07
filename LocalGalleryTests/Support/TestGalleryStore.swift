@@ -25,6 +25,7 @@ enum TestGalleryStore {
         let paths = GalleryPaths(
             libraryCacheURL: tempDir.appending("library_cache.json"),
             memoriesCacheURL: tempDir.appending("memories_cache.json"),
+            sidecarCacheURL: tempDir.appending("sidecar_cache.json"),
             thumbnailDir: tempDir.appending("thumbnails", isDirectory: true),
             bookmarkKey: "rootFolderBookmark"
         )

@@ -9,6 +9,7 @@ import Foundation
 struct GalleryPaths: Sendable {
     let libraryCacheURL: URL
     let memoriesCacheURL: URL
+    let sidecarCacheURL: URL
     let thumbnailDir: URL
     let bookmarkKey: String
 
@@ -18,6 +19,7 @@ struct GalleryPaths: Sendable {
         return GalleryPaths(
             libraryCacheURL: docs.appendingPathComponent("library_cache.json"),
             memoriesCacheURL: docs.appendingPathComponent("memories_cache.json"),
+            sidecarCacheURL: docs.appendingPathComponent("sidecar_cache.json"),
             thumbnailDir: caches.appendingPathComponent("thumbnails", isDirectory: true),
             bookmarkKey: "rootFolderBookmark"
         )

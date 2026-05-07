@@ -1,6 +1,7 @@
 import Foundation
 import UIKit
 import Contacts
+import FileProvider
 import Observation
 import os
 
@@ -81,6 +82,23 @@ final class GalleryStore {
         didSet { persistPersonContactLinks() }
     }
 
+    /// Pre-fetch neighbour photos in the viewer when the user lands on a
+    /// file-provider placeholder. Default `true`; disable to save bandwidth.
+    var prefetchAdjacentRemotePhotos: Bool = true {
+        didSet {
+            guard !_isInitializing else { return }
+            defaults.set(prefetchAdjacentRemotePhotos, forKey: "prefetchAdjacentRemotePhotos")
+        }
+    }
+    /// When `false`, prefetch (only — explicit taps always go through) is
+    /// gated on Wi-Fi/wired connectivity. Default `false` (Wi-Fi-only).
+    var useCellularForDownloads: Bool = false {
+        didSet {
+            guard !_isInitializing else { return }
+            defaults.set(useCellularForDownloads, forKey: "useCellularForDownloads")
+        }
+    }
+
     /// Master toggle for birthday memories. When `false`, `generateMemories`
     /// skips the birthday category entirely. Default `true` so the feature
     /// surfaces automatically once Contacts access is granted.
@@ -103,6 +121,9 @@ final class GalleryStore {
     /// the existing task instead of starting a second traversal (app launch +
     /// willEnterForeground + pull-to-refresh can otherwise overlap).
     @ObservationIgnored private var activeScanTask: (url: URL, task: Task<Void, Never>)?
+    /// Most recent scanner-emitted sidecar manifest. Pass 5 (`SidecarSyncService`)
+    /// consumes this; until then it's just stashed for inspection.
+    @ObservationIgnored var lastSidecarManifest: [FolderScanner.SidecarCandidate] = []
     @ObservationIgnored private var memoriesGeneratedDay: Date? {
         didSet { persistMemoriesGeneratedDay() }
     }
@@ -112,6 +133,17 @@ final class GalleryStore {
     @ObservationIgnored private let tagService = TagIndex()
     @ObservationIgnored private let thumbnailService: ThumbnailService
     @ObservationIgnored private let widgetExport = WidgetExportScheduler()
+    /// Materialises file-provider placeholders on demand. Exposed as a
+    /// property so views can observe `inFlight` for spinner state.
+    let materializer = PhotoMaterializer()
+    /// Parsed `.xmp` cache keyed by photo UUID. Lets cloud libraries surface
+    /// tags/country codes/face regions even when the source `.xmp` files
+    /// have been evicted by the provider.
+    @ObservationIgnored private let sidecarCache: SidecarCacheStore
+    /// Diffs the scanner's sidecar manifest against `sidecarCache` and
+    /// fetches the deltas through `NSFileCoordinator`. Observed by the
+    /// top-of-grid sync banner.
+    let sidecarSync: SidecarSyncService
 
     // MARK: Injected seams (test-overridable; production uses `.production` /
     // `.standard` defaults so existing call sites are unchanged).
@@ -142,6 +174,12 @@ final class GalleryStore {
         self.contactsService = contactsService
         self.bookmarks = BookmarkManager(defaults: defaults, bookmarkKey: paths.bookmarkKey)
         self.thumbnailService = ThumbnailService(thumbnailDir: paths.thumbnailDir)
+        let sidecarCache = SidecarCacheStore(url: paths.sidecarCacheURL)
+        self.sidecarCache = sidecarCache
+        self.sidecarSync = SidecarSyncService(cache: sidecarCache)
+        self.sidecarSync.onFinished = { @MainActor [weak self] in
+            self?.reapplySidecarMerges()
+        }
 
         if let raw = defaults.string(forKey: "folderSortOrder"),
            let order = FolderSortOrder(rawValue: raw) {
@@ -179,6 +217,12 @@ final class GalleryStore {
         }
         if defaults.object(forKey: "birthdayMemoriesEnabled") != nil {
             birthdayMemoriesEnabled = defaults.bool(forKey: "birthdayMemoriesEnabled")
+        }
+        if defaults.object(forKey: "prefetchAdjacentRemotePhotos") != nil {
+            prefetchAdjacentRemotePhotos = defaults.bool(forKey: "prefetchAdjacentRemotePhotos")
+        }
+        if defaults.object(forKey: "useCellularForDownloads") != nil {
+            useCellularForDownloads = defaults.bool(forKey: "useCellularForDownloads")
         }
         if let raw = defaults.string(forKey: "mePersonPath") {
             mePersonPath = raw
@@ -491,10 +535,23 @@ final class GalleryStore {
         let newURLs = Set(result.flatPhotos.map(\.url))
         let contentChanged = existingURLs != newURLs || result.needsEnrichment
 
+        self.lastSidecarManifest = result.sidecarManifest
+        let remoteCount = result.flatPhotos.filter {
+            if case .remote = $0.locality { return true } else { return false }
+        }.count
+        if remoteCount > 0 {
+            Log.scan.info("Detected \(remoteCount) file-provider photos, \(result.sidecarManifest.count) sidecar candidates")
+        }
+
+        // Merge cached sidecar entries onto photos before publishing —
+        // search/tag features need this to work for cloud libraries even
+        // before the next sync run completes.
+        let mergedPhotos = mergeCachedSidecars(into: result.flatPhotos)
+
         if contentChanged && (!result.flatPhotos.isEmpty || !silent) {
             Log.scan.info("Complete: \(result.flatPhotos.count) photos (needsEnrichment=\(result.needsEnrichment), changed=true)")
             self.rootFolder = result.rootFolder
-            self.allPhotos = result.flatPhotos
+            self.allPhotos = mergedPhotos
             rebuildSortAndIndex()
             saveCache()
         } else if result.flatPhotos.isEmpty && !silent {
@@ -507,6 +564,15 @@ final class GalleryStore {
         }
         isScanning = false
         lastSyncedAt = Date()
+
+        // Hand the manifest to the sidecar sync service; it diffs against
+        // the cache and either fetches silently or surfaces a prompt.
+        let allIDs = Set(mergedPhotos.map(\.id))
+        sidecarSync.plan(
+            manifest: result.sidecarManifest,
+            allPhotoIDs: allIDs,
+            autoApprove: false
+        )
 
         // Enrich with EXIF dates and tags in background (only if needed).
         // Memory generation is deferred until after enrichment so memories reflect the
@@ -572,6 +638,51 @@ final class GalleryStore {
         }
         saveCache()
         Log.enrich.info("Applied enriched metadata to live data")
+    }
+
+    /// Re-apply `mergeCachedSidecars` to the live `allPhotos`. Called after
+    /// the sidecar sync service finishes a fetch run so newly-cached entries
+    /// surface tags/country codes without a manual rescan.
+    func reapplySidecarMerges() {
+        let merged = mergeCachedSidecars(into: allPhotos)
+        guard merged != allPhotos else { return }
+        self.allPhotos = merged
+        rebuildSortAndIndex()
+        saveCache()
+        Log.cache.info("Re-applied sidecar merges to live photos")
+    }
+
+    /// Merge any `SidecarCacheStore` entry into a photo's runtime fields, so
+    /// search/tags/country/face-regions surface for cloud photos before the
+    /// next sync completes. Cached fields lose to existing in-memory values
+    /// only when the photo already has them — fresh-from-disk metadata
+    /// (EXIF + sidecar in `MetadataReader.readImageMetadata`) wins on the
+    /// enrichment pass that runs after this.
+    private func mergeCachedSidecars(into photos: [PhotoFile]) -> [PhotoFile] {
+        var photos = photos
+        for i in photos.indices {
+            guard let cached = sidecarCache.get(photos[i].id) else { continue }
+            if photos[i].hierarchicalTags.isEmpty {
+                photos[i].hierarchicalTags = cached.hierarchicalTags
+            }
+            if photos[i].countryCode == nil {
+                photos[i].countryCode = cached.countryCode
+            }
+            if photos[i].faceRegions.isEmpty {
+                photos[i].faceRegions = cached.faceRegions
+            }
+            if photos[i].gpsLatitude == nil, let lat = cached.gpsLatitude {
+                photos[i].gpsLatitude = lat
+            }
+            if photos[i].gpsLongitude == nil, let lon = cached.gpsLongitude {
+                photos[i].gpsLongitude = lon
+            }
+            if photos[i].dateTaken == nil, let date = cached.dateTaken {
+                photos[i].dateTaken = date
+            }
+            photos[i].sidecarStatus = .cached(cached.version)
+        }
+        return photos
     }
 
     /// Recursively update photos inside folder tree with enriched metadata
@@ -912,8 +1023,17 @@ final class GalleryStore {
                 ))
             }
         }
+        // Widgets read from the App Group container in a separate process —
+        // file-provider placeholders are not guaranteed readable there. Drop
+        // them so the widget never tries to render bytes that aren't local.
+        let widgetPhotos = allPhotos.filter { photo in
+            switch photo.locality {
+            case .local: return true
+            case .remote(let downloaded): return downloaded
+            }
+        }
         widgetExport.schedule(WidgetSnapshotExporter.Inputs(
-            allPhotos: allPhotos,
+            allPhotos: widgetPhotos,
             memories: visibleMemories,
             allTags: allTags,
             rootFolder: rootFolder,
@@ -941,11 +1061,28 @@ final class GalleryStore {
     private func generateMemories(from allPhotos: [PhotoFile], leafFolders: [PhotoFolder], seed: String = "") async {
         let t = CFAbsoluteTimeGetCurrent()
 
-        MemoryEngine.logMemoryInputSummary(allPhotos: allPhotos)
+        // Drop file-provider placeholders that don't have a cached sidecar
+        // yet — their tags/GPS/date are unknown, so they'd inflate the pool
+        // with garbage candidates. Local photos and remote-with-cached-
+        // sidecar photos pass through.
+        let filtered = allPhotos.filter { photo in
+            switch photo.locality {
+            case .local: return true
+            case .remote(let downloaded):
+                if downloaded { return true }
+                if case .cached = photo.sidecarStatus { return true }
+                return false
+            }
+        }
+        if filtered.count != allPhotos.count {
+            Log.memory.info("Memory pool: \(filtered.count) of \(allPhotos.count) photos (excluded \(allPhotos.count - filtered.count) cloud placeholders without sidecars)")
+        }
+
+        MemoryEngine.logMemoryInputSummary(allPhotos: filtered)
 
         // Snapshot main-actor state before the engine's detached task runs.
         let results = await MemoryEngine.generate(
-            from: allPhotos,
+            from: filtered,
             leafFolders: leafFolders,
             contacts: self.contacts,
             personContactLinks: self.personContactLinks,
@@ -984,8 +1121,8 @@ final class GalleryStore {
         thumbnailService.cachedThumbnail(for: url)
     }
 
-    func thumbnail(for url: URL, size: CGSize, isVideo: Bool = false) async -> UIImage? {
-        await thumbnailService.thumbnail(for: url, size: size, isVideo: isVideo)
+    func thumbnail(for url: URL, size: CGSize, isVideo: Bool = false, useQuickLook: Bool = false) async -> UIImage? {
+        await thumbnailService.thumbnail(for: url, size: size, isVideo: isVideo, useQuickLook: useQuickLook)
     }
 
     func clearThumbnailCache() {
@@ -1009,4 +1146,143 @@ final class GalleryStore {
     func loadFullImage(for url: URL) async -> UIImage? {
         await thumbnailService.loadFullImage(for: url)
     }
+
+    // MARK: - Materialization (forwarded to PhotoMaterializer)
+
+    /// Ensure the photo's bytes are present on disk. Local photos return
+    /// immediately; placeholders coordinate-read through the file provider.
+    /// Throws on failure so the caller can offer a retry button.
+    @discardableResult
+    func ensureMaterialized(_ photo: PhotoFile) async throws -> URL {
+        let url = try await materializer.ensureMaterialized(photo)
+        // Mark this photo as downloaded in the in-memory model so the grid
+        // badge clears without waiting for a rescan. Cache write is deferred
+        // to the next save.
+        if let idx = allPhotos.firstIndex(where: { $0.id == photo.id }) {
+            var updated = allPhotos[idx]
+            if case .remote = updated.locality {
+                updated.locality = .remote(downloaded: true)
+                allPhotos[idx] = updated
+            }
+        }
+        return url
+    }
+
+    func cancelMaterialize(_ photoID: PhotoFile.ID) {
+        materializer.cancel(photoID)
+    }
+
+    func prefetchMaterialize(_ photos: [PhotoFile]) {
+        materializer.prefetch(photos)
+    }
+
+    // MARK: - Cloud storage
+
+    struct CloudStorageStats: Sendable, Equatable {
+        let materializedCount: Int
+        let materializedBytes: Int64
+        let placeholderCount: Int
+        let totalRemote: Int
+    }
+
+    /// True when at least one folder backs onto a file provider. Drives the
+    /// "Cloud Storage" section in Settings — purely-local libraries don't
+    /// see any of this UI.
+    var hasFileProviderPhotos: Bool {
+        allPhotos.contains { photo in
+            if case .remote = photo.locality { return true } else { return false }
+        }
+    }
+
+    /// Walk `allPhotos` and bucket them by download status. Cheap; only does
+    /// metadata reads (no downloads triggered). The Settings sheet caches
+    /// the result so repeat opens don't re-walk.
+    func computeCloudStorageStats() -> CloudStorageStats {
+        var materializedCount = 0
+        var materializedBytes: Int64 = 0
+        var placeholderCount = 0
+        var totalRemote = 0
+        for photo in allPhotos {
+            guard case .remote = photo.locality else { continue }
+            totalRemote += 1
+            let probe = FileProviderDetector.probe(photo.url)
+            if probe.status == .local {
+                materializedCount += 1
+                materializedBytes += probe.version.size ?? photo.fileSize
+            } else {
+                placeholderCount += 1
+            }
+        }
+        return CloudStorageStats(
+            materializedCount: materializedCount,
+            materializedBytes: materializedBytes,
+            placeholderCount: placeholderCount,
+            totalRemote: totalRemote
+        )
+    }
+
+    /// Ask the file-provider stack to evict every materialised provider-backed
+    /// photo. Eviction is per-domain via `NSFileProviderManager.evictItem`;
+    /// providers that don't support eviction silently no-op. Grid stays
+    /// usable because thumbnails + sidecar cache are untouched; only
+    /// full-resolution viewing requires a re-download.
+    func clearAllDownloads() async -> Int {
+        var evicted = 0
+        let downloaded = allPhotos.filter {
+            if case .remote(let d) = $0.locality { return d } else { return false }
+        }
+        for photo in downloaded {
+            do {
+                let pair: (NSFileProviderItemIdentifier, NSFileProviderDomainIdentifier)? =
+                    try await withCheckedThrowingContinuation { cont in
+                        NSFileProviderManager.getIdentifierForUserVisibleFile(at: photo.url) { id, domainID, err in
+                            if let err { cont.resume(throwing: err) }
+                            else if let id, let domainID { cont.resume(returning: (id, domainID)) }
+                            else { cont.resume(returning: nil) }
+                        }
+                    }
+                guard let (itemID, domainID) = pair else { continue }
+                // Resolve the domain inside the completion block so the
+                // non-Sendable `NSFileProviderDomain` value never crosses
+                // an actor hop. We either return a `Bool` (evict success)
+                // or rethrow the underlying error.
+                let didEvict: Bool = try await withCheckedThrowingContinuation { cont in
+                    NSFileProviderManager.getDomainsWithCompletionHandler { domains, _ in
+                        guard let domain = domains.first(where: { $0.identifier == domainID }),
+                              let manager = NSFileProviderManager(for: domain) else {
+                            cont.resume(returning: false)
+                            return
+                        }
+                        manager.evictItem(identifier: itemID) { error in
+                            if let error { cont.resume(throwing: error) }
+                            else { cont.resume(returning: true) }
+                        }
+                    }
+                }
+                if didEvict { evicted += 1 }
+            } catch {
+                Log.scan.warning("evictItem failed for \(photo.url.lastPathComponent): \(error.localizedDescription)")
+            }
+        }
+        // Refresh in-memory state regardless of evict success — next scan
+        // will re-detect actual download status.
+        for i in allPhotos.indices {
+            if case .remote = allPhotos[i].locality {
+                allPhotos[i].locality = .remote(downloaded: false)
+            }
+        }
+        Log.scan.info("Cleared \(evicted) downloads")
+        return evicted
+    }
+
+    /// Wipe the sidecar cache and re-run sync the next time the scanner
+    /// hands us a manifest. Used by the Settings "Re-download all sidecars"
+    /// nuclear button.
+    func clearSidecarCache() {
+        sidecarCache.clear()
+        for i in allPhotos.indices {
+            allPhotos[i].sidecarStatus = .absent
+        }
+    }
 }
+

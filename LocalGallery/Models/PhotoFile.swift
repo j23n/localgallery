@@ -2,6 +2,24 @@ import Foundation
 import CoreGraphics
 import CryptoKit
 
+/// Where the photo's bytes live. `.local` covers any file fully readable
+/// from disk, including provider-backed files that have already materialised.
+/// `.remote(downloaded: false)` is the placeholder state — the file appears
+/// in directory listings but its bytes haven't been fetched.
+enum PhotoLocality: Codable, Hashable, Sendable {
+    case local
+    case remote(downloaded: Bool)
+}
+
+/// Whether we have a parsed copy of the photo's `.xmp` sidecar in
+/// `SidecarCacheStore`. Search/tag features only consider `.cached(_)` photos.
+enum SidecarStatus: Codable, Hashable, Sendable {
+    case absent
+    case cached(FileProviderDetector.ContentVersion)
+    case pendingFetch
+    case fetchFailed(reason: String)
+}
+
 struct PhotoFile: Identifiable, Hashable, Codable, Sendable {
     let id: UUID
     let url: URL
@@ -26,6 +44,13 @@ struct PhotoFile: Identifiable, Hashable, Codable, Sendable {
     /// source XMP carries none. Used by the People rail to crop thumbnails to
     /// the matching face.
     var faceRegions: [FaceRegion] = []
+    /// Where the photo bytes live. Default `.local`; populated by the scanner
+    /// for file-provider URLs. Runtime/cache state — not part of the stable
+    /// UUID derivation.
+    var locality: PhotoLocality = .local
+    /// Sidecar cache state. Default `.absent`; populated by `SidecarSyncService`
+    /// once a `.xmp` for this photo has been parsed and persisted.
+    var sidecarStatus: SidecarStatus = .absent
 
     // Not persisted — loaded lazily at runtime
     var dimensions: CGSize? = nil
@@ -39,7 +64,7 @@ struct PhotoFile: Identifiable, Hashable, Codable, Sendable {
         case id, url, filename, fileSize, dateTaken, dateFromMetadata, isVideo, livePhotoVideoURL, hierarchicalTags, countryCode, enrichedFileDate, gpsLatitude, gpsLongitude, faceRegions
     }
 
-    init(id: UUID, url: URL, filename: String, fileSize: Int64, dateTaken: Date?, dateFromMetadata: Bool = false, isVideo: Bool = false, livePhotoVideoURL: URL? = nil, hierarchicalTags: [HierarchicalTag] = [], countryCode: String? = nil, enrichedFileDate: Date? = nil, gpsLatitude: Double? = nil, gpsLongitude: Double? = nil, faceRegions: [FaceRegion] = []) {
+    init(id: UUID, url: URL, filename: String, fileSize: Int64, dateTaken: Date?, dateFromMetadata: Bool = false, isVideo: Bool = false, livePhotoVideoURL: URL? = nil, hierarchicalTags: [HierarchicalTag] = [], countryCode: String? = nil, enrichedFileDate: Date? = nil, gpsLatitude: Double? = nil, gpsLongitude: Double? = nil, faceRegions: [FaceRegion] = [], locality: PhotoLocality = .local, sidecarStatus: SidecarStatus = .absent) {
         self.id = id
         self.url = url
         self.filename = filename
@@ -54,6 +79,8 @@ struct PhotoFile: Identifiable, Hashable, Codable, Sendable {
         self.gpsLatitude = gpsLatitude
         self.gpsLongitude = gpsLongitude
         self.faceRegions = faceRegions
+        self.locality = locality
+        self.sidecarStatus = sidecarStatus
     }
 
     init(from decoder: Decoder) throws {

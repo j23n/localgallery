@@ -10,16 +10,18 @@ import BackgroundTasks
 /// scene is connected — that's why this lives here and not on `GalleryStore`.
 @MainActor
 final class AppDelegate: NSObject, UIApplicationDelegate {
-    /// `BGTaskSchedulerPermittedIdentifiers` whitelists this exact string in
-    /// the Info.plist; both must stay in sync. `nonisolated` so the
-    /// `nonisolated static func scheduleBackgroundRefresh()` can read it.
-    nonisolated static let backgroundRefreshIdentifier = "com.localgallery.app.dailyMemories"
+    /// `BGTaskSchedulerPermittedIdentifiers` whitelists these exact strings
+    /// in the Info.plist; both must stay in sync. `nonisolated` so the
+    /// scheduling helpers can read it.
+    nonisolated static let backgroundRefreshIdentifier = "com.j23n.localgallery.app.dailyMemories"
+    nonisolated static let sidecarRefreshIdentifier = "com.j23n.localgallery.app.sidecarRefresh"
 
     /// Owns the BG-task → store indirection. The `WindowGroup` attaches the
     /// `GalleryStore` once SwiftUI builds the scene. We hold the service
     /// here (rather than reaching for a `GalleryStore.shared` global) so the
     /// BG handler has a stable, isolation-correct API to call.
     let memoryRefresh = MemoryRefreshService()
+    let sidecarRefresh = SidecarRefreshService()
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         // Capture the service value (Sendable because MemoryRefreshService is
@@ -33,12 +35,21 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             Self.handleBackgroundRefresh(task: task as! BGAppRefreshTask, service: service)
         }
 
+        let sidecarService = sidecarRefresh
+        BGTaskScheduler.shared.register(
+            forTaskWithIdentifier: Self.sidecarRefreshIdentifier,
+            using: nil
+        ) { task in
+            Self.handleSidecarRefresh(task: task as! BGAppRefreshTask, service: sidecarService)
+        }
+
         NotificationCenter.default.addObserver(
             forName: UIApplication.didEnterBackgroundNotification,
             object: nil,
             queue: .main
         ) { _ in
             Self.scheduleBackgroundRefresh()
+            Self.scheduleSidecarRefresh()
         }
 
         return true
@@ -69,6 +80,20 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         }
     }
 
+    /// Schedule the next sidecar refresh ~12h out (per Pass 8 plan; mirrors
+    /// the half-day cadence of memory refresh). Best-effort like the daily
+    /// memories task.
+    nonisolated static func scheduleSidecarRefresh() {
+        let request = BGAppRefreshTaskRequest(identifier: sidecarRefreshIdentifier)
+        request.earliestBeginDate = Date(timeIntervalSinceNow: 12 * 60 * 60)
+        do {
+            try BGTaskScheduler.shared.submit(request)
+            Log.bg.info("Scheduled sidecar refresh for ~12h from now")
+        } catch {
+            Log.bg.warning("Failed to schedule sidecar refresh: \(error.localizedDescription)")
+        }
+    }
+
     /// Handler for the background refresh. Forwards to `MemoryRefreshService`
     /// which runs the once-a-day memory regeneration on the attached store
     /// (or no-ops on a background-only launch where the WindowGroup never
@@ -95,6 +120,29 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             let success = !work.isCancelled
             task.setTaskCompleted(success: success)
             Log.bg.info("Background refresh finished (success: \(success))")
+        }
+    }
+
+    /// Handler for the sidecar refresh. Mirrors `handleBackgroundRefresh`
+    /// but routes to `SidecarRefreshService`.
+    private static func handleSidecarRefresh(task: BGAppRefreshTask, service: SidecarRefreshService) {
+        Log.bg.info("Sidecar refresh started")
+        scheduleSidecarRefresh()
+
+        let work = Task { @MainActor in
+            await service.runRefresh()
+        }
+
+        task.expirationHandler = {
+            Log.bg.warning("Sidecar refresh expired before completion")
+            work.cancel()
+        }
+
+        Task {
+            await work.value
+            let success = !work.isCancelled
+            task.setTaskCompleted(success: success)
+            Log.bg.info("Sidecar refresh finished (success: \(success))")
         }
     }
 }
@@ -158,6 +206,7 @@ struct LocalGalleryApp: App {
                 // the window is benign.
                 .task {
                     appDelegate.memoryRefresh.attach(store)
+                    appDelegate.sidecarRefresh.attach(store)
                     // Pre-render the six slideshow music themes so the first
                     // memory open doesn't pay the synth cost on the main
                     // actor. Idempotent — already-cached themes are skipped.

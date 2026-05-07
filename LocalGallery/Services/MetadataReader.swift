@@ -154,8 +154,15 @@ enum MetadataReader {
     private static func readXMPSidecar(for imageURL: URL) -> (rawTags: [String], countryCode: String?, faceRegions: [FaceRegion]) {
         let xmpURL = imageURL.appendingPathExtension("xmp")
         guard FileManager.default.fileExists(atPath: xmpURL.path),
-              let data = try? Data(contentsOf: xmpURL),
-              let xml = String(data: data, encoding: .utf8) else { return ([], nil, []) }
+              let data = try? Data(contentsOf: xmpURL) else { return ([], nil, []) }
+        return parseXMPBytes(data)
+    }
+
+    /// Parse a raw XMP byte buffer for the same fields as `readXMPSidecar`.
+    /// Used by `SidecarSyncService` after fetching `.xmp` contents from a
+    /// file provider (we hold the bytes in memory; no need to re-read disk).
+    static func parseXMPBytes(_ data: Data) -> (rawTags: [String], countryCode: String?, faceRegions: [FaceRegion]) {
+        guard let xml = String(data: data, encoding: .utf8) else { return ([], nil, []) }
 
         var rawTags: [String] = []
 

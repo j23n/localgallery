@@ -1,0 +1,57 @@
+{
+  "project": {
+    "name": "LocalGallery",
+    "policy_url": "https://j23n.com/public/posts/2026/my-ai-policy",
+    "date": "2026-05-08"
+  },
+  "tools": [
+    {
+      "name": "Claude Code (Anthropic)",
+      "model": "claude-opus-4.7",
+      "mode": "Agentic"
+    }
+  ],
+  "phases": [
+    {
+      "name": "Requirements & Scope",
+      "preset": "Human-led",
+      "human": 85,
+      "ai": 15
+    },
+    {
+      "name": "Architecture & Design",
+      "preset": "AI-collaborative",
+      "human": 40,
+      "ai": 60
+    },
+    {
+      "name": "Implementation",
+      "preset": "AI-generated with human review",
+      "human": 10,
+      "ai": 90
+    },
+    {
+      "name": "Testing",
+      "preset": "AI-generated",
+      "human": 5,
+      "ai": 95
+    },
+    {
+      "name": "Documentation",
+      "preset": "AI-collaborative",
+      "human": 40,
+      "ai": 60
+    }
+  ],
+  "oversight": {
+    "label": "Supervised",
+    "description": "AI works semi-autonomously; human reviews key checkpoints."
+  },
+  "process": "AI agent operated autonomously across multi-step tasks. Human reviewed diffs, resolved conflicts, and approved merges.",
+  "accountability": "The human author(s) are solely responsible for the content, accuracy, and fitness-for-purpose of this project.",
+  "output": {
+    "format": "Markdown",
+    "filename": "AI_DISCLAIMER.md",
+    "theme": "auto"
+  }
+}

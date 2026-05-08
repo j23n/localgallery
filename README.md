@@ -48,6 +48,10 @@ On first launch, the app asks you to select (or create) a folder containing your
 
 The app is read-only: it never modifies, moves, or deletes your files.
 
+## AI disclaimer
+
+Please see [docs/AI_DISCLAIMER.md].
+
 ## License
 
 [MPL 2.0](LICENSE)

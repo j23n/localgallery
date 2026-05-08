@@ -496,7 +496,8 @@ struct PersonCard: View {
                 PersonThumbnailView(
                     url: photo.url,
                     region: store.faceRegion(for: photo, person: tag.displayName),
-                    size: 128
+                    size: 128,
+                    isRemote: photo.locality.isRemotePlaceholder
                 )
             } else {
                 Rectangle()
@@ -565,15 +566,15 @@ struct MemoryCardView: View {
     let memory: Memory
     @Environment(GalleryStore.self) private var store
 
-    private var coverURL: URL? {
-        if let url = store.photo(byID: memory.coverPhotoID)?.url { return url }
-        return memory.photoIDs.lazy.compactMap { store.photo(byID: $0)?.url }.first
+    private var coverPhoto: PhotoFile? {
+        if let p = store.photo(byID: memory.coverPhotoID) { return p }
+        return memory.photoIDs.lazy.compactMap { store.photo(byID: $0) }.first
     }
 
     var body: some View {
         ZStack(alignment: .bottomLeading) {
-            if let url = coverURL {
-                ThumbnailView(url: url, size: 328)
+            if let photo = coverPhoto {
+                ThumbnailView(url: photo.url, size: 328, isRemote: photo.locality.isRemotePlaceholder)
                     .frame(width: 264, height: 328)
                     .clipped()
             } else {
@@ -737,7 +738,8 @@ struct PeopleListRow: View {
                         url: photo.url,
                         region: store.faceRegion(for: photo, person: tag.displayName),
                         size: 52,
-                        cornerRadius: 9
+                        cornerRadius: 9,
+                        isRemote: photo.locality.isRemotePlaceholder
                     )
                     .frame(width: 52, height: 52)
                 }

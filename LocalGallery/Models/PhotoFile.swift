@@ -9,6 +9,16 @@ import CryptoKit
 enum PhotoLocality: Codable, Hashable, Sendable {
     case local
     case remote(downloaded: Bool)
+
+    /// True for `.remote(downloaded: false)` — i.e., a provider-backed file
+    /// whose bytes haven't been materialised. Maps to the QuickLook thumbnail
+    /// path and the remote badge in the UI. Cheaper than calling
+    /// `FileProviderDetector.probe(url)` per cell — that's a filesystem
+    /// syscall and stutters scrolling on large grids.
+    var isRemotePlaceholder: Bool {
+        if case .remote(downloaded: false) = self { return true }
+        return false
+    }
 }
 
 /// Whether we have a parsed copy of the photo's `.xmp` sidecar in

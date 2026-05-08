@@ -479,7 +479,13 @@ struct PhotoGridScreen: View {
     private func gridCell(photo: PhotoFile, cellSize: CGFloat) -> some View {
         let isSelected = selected.contains(photo.id)
         ZStack {
-            ThumbnailView(url: photo.url, size: cellSize, isVideo: photo.isVideo, isLivePhoto: photo.livePhotoVideoURL != nil)
+            ThumbnailView(
+                url: photo.url,
+                size: cellSize,
+                isVideo: photo.isVideo,
+                isLivePhoto: photo.livePhotoVideoURL != nil,
+                isRemote: photo.locality.isRemotePlaceholder
+            )
                 .frame(width: cellSize, height: cellSize)
                 .scaleEffect(selectMode && isSelected ? 0.9 : 1.0)
                 .animation(.easeInOut(duration: 0.15), value: isSelected)

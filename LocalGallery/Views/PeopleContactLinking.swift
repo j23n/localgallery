@@ -452,7 +452,7 @@ struct LinkedContactsList: View {
     @ViewBuilder
     private func personThumb(_ person: TagSuggestion) -> some View {
         if let photo = store.featuredPhoto(for: person) {
-            ThumbnailView(url: photo.url, size: 40, cornerRadius: 20)
+            ThumbnailView(url: photo.url, size: 40, cornerRadius: 20, isRemote: photo.locality.isRemotePlaceholder)
                 .frame(width: 40, height: 40)
         } else {
             Circle()

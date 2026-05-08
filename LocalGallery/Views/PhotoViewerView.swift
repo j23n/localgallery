@@ -605,7 +605,7 @@ struct PhotoViewerView: View {
                                 currentPhotoID = photo.id
                             }
                         } label: {
-                            ThumbnailView(url: photo.url, size: 56, cornerRadius: 6)
+                            ThumbnailView(url: photo.url, size: 56, cornerRadius: 6, isRemote: photo.locality.isRemotePlaceholder)
                                 .frame(width: 56, height: 56)
                                 .scaleEffect(photo.id == currentPhotoID ? 1.08 : 1.0)
                                 .overlay {

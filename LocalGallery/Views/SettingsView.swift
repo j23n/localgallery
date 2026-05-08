@@ -383,7 +383,7 @@ private struct HiddenPersonRow: View {
     var body: some View {
         HStack(spacing: 12) {
             if let photo = featured {
-                ThumbnailView(url: photo.url, size: 44, cornerRadius: 22)
+                ThumbnailView(url: photo.url, size: 44, cornerRadius: 22, isRemote: photo.locality.isRemotePlaceholder)
                     .frame(width: 44, height: 44)
                     .saturation(0.7)
             } else {

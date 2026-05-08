@@ -6,9 +6,15 @@ struct ThumbnailView: View {
     var isVideo: Bool = false
     var isLivePhoto: Bool = false
     var cornerRadius: CGFloat = 0
+    /// True when the URL is a file-provider placeholder (bytes not yet on
+    /// disk). Drives the remote badge + the QuickLook thumbnail fallback.
+    /// Callers pass `photo.locality.isRemotePlaceholder`; pure-URL call sites
+    /// (folder covers etc.) accept the default. Pre-resolving this here
+    /// avoids a per-cell `URLResourceValues` syscall on the main thread —
+    /// that was stuttering scroll on the 20k All Photos grid.
+    var isRemote: Bool = false
     @Environment(GalleryStore.self) private var store
     @State private var thumbnail: UIImage?
-    @State private var isRemotePlaceholder: Bool = false
     @State private var thumbnailMissing: Bool = false
 
     var body: some View {
@@ -20,7 +26,7 @@ struct ThumbnailView: View {
                     .frame(width: size, height: size)
                     .clipped()
                     .transition(.opacity)
-            } else if thumbnailMissing && isRemotePlaceholder {
+            } else if thumbnailMissing && isRemote {
                 // Provider didn't vend a thumbnail. Show a plain placeholder
                 // tile with a photo glyph so the grid doesn't stall on a
                 // forever-spinning shimmer.
@@ -39,7 +45,7 @@ struct ThumbnailView: View {
                     .transition(.opacity)
             }
 
-            if isRemotePlaceholder {
+            if isRemote {
                 VStack {
                     HStack {
                         Spacer()
@@ -82,17 +88,11 @@ struct ThumbnailView: View {
         .animation(.easeIn(duration: 0.2), value: thumbnail != nil)
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
         .task(id: url) {
-            // Per-file probe is metadata-only (one URLResourceValues read),
-            // so cheap enough to do unconditionally — purely-local libraries
-            // come back as `.local` and skip the QL path.
-            let probe = FileProviderDetector.probe(url)
-            let isPlaceholder = probe.isFileProvider && probe.status != .local
-            self.isRemotePlaceholder = isPlaceholder
             let result = await store.thumbnail(
                 for: url,
                 size: CGSize(width: size, height: size),
                 isVideo: isVideo,
-                useQuickLook: isPlaceholder
+                useQuickLook: isRemote
             )
             self.thumbnail = result
             self.thumbnailMissing = (result == nil)

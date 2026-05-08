@@ -107,14 +107,14 @@ struct SettingsView: View {
                     }
                     LabeledContent("Version", value: appVersion)
                     Toggle("Crash Reporting", isOn: $crashReportingEnabled)
+
+                    if crashReportingEnabled, crashService.hasPendingCrash {
+                        crashRows
+                    }
                 } header: {
                     Text("Diagnostics")
                 } footer: {
                     Text("When on, LocalGallery captures crash details and recent log entries on this device. Nothing is sent automatically — if a crash is captured, a banner appears here in Settings and you can choose to share the report with the developer. Logs include file names and folder paths from your library. Off by default. App Store crash analytics (system-level) are unaffected by this setting.")
-                }
-
-                if crashReportingEnabled, crashService.hasPendingCrash {
-                    crashSection
                 }
 
                 Section("About") {
@@ -210,30 +210,28 @@ struct SettingsView: View {
     // MARK: - Crash banner
 
     @ViewBuilder
-    private var crashSection: some View {
-        Section {
-            VStack(alignment: .leading, spacing: 6) {
-                Label("LocalGallery crashed last session", systemImage: "exclamationmark.triangle.fill")
-                    .font(.subheadline)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(.orange)
-                Text("A crash report was captured. You can share it with the developer to help diagnose the issue, or dismiss it.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.vertical, 2)
+    private var crashRows: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("LocalGallery crashed last session", systemImage: "exclamationmark.triangle.fill")
+                .font(.subheadline)
+                .fontWeight(.semibold)
+                .foregroundStyle(.orange)
+            Text("A crash report was captured. You can share it with the developer to help diagnose the issue, or dismiss it.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.vertical, 2)
 
-            Button {
-                shareCrashReport()
-            } label: {
-                Label("Share Crash Report", systemImage: "square.and.arrow.up")
-            }
+        Button {
+            shareCrashReport()
+        } label: {
+            Label("Share Crash Report", systemImage: "square.and.arrow.up")
+        }
 
-            Button(role: .destructive) {
-                crashService.clearPendingCrash()
-            } label: {
-                Label("Dismiss", systemImage: "xmark.circle")
-            }
+        Button(role: .destructive) {
+            crashService.clearPendingCrash()
+        } label: {
+            Label("Dismiss", systemImage: "xmark.circle")
         }
     }
 

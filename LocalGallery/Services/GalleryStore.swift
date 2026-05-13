@@ -5,13 +5,63 @@ import FileProvider
 import Observation
 import os
 
+/// Which kind of scan a caller wants. Most internal entry points default to
+/// `.auto`, which runs a light scan but promotes to full when it's been more
+/// than `fullScanInterval` since the last full pass. Pull-to-refresh and the
+/// Settings "Reload Library" button pass `.full` for explicit user intent.
+enum ScanKind: Sendable {
+    case auto
+    case light
+    case full
+}
+
+/// Live progress of an in-flight scan. `nil` on `GalleryStore.scanProgress`
+/// means no scan is running. Views observe the value to render a progress
+/// banner; the store updates it from the scanner / enrichment callbacks.
+struct ScanProgress: Sendable, Equatable {
+    enum Phase: Sendable, Equatable {
+        /// Walking folders and stat-ing files. `total` is `nil` because we
+        /// don't know how many photos exist until the walk completes; views
+        /// should render "X photos found" without an ETA.
+        case scanning
+        /// Reading EXIF / XMP / video creation dates. `total` is the
+        /// up-front stale-file count, so views can show a percentage + ETA.
+        case enriching
+    }
+    var phase: Phase
+    var processed: Int
+    /// Known up-front for `.enriching`; `nil` for `.scanning`.
+    var total: Int?
+    var startedAt: Date
+    /// Display label for the phase (eg. "Scanning…", "Reading metadata…").
+    var label: String {
+        switch phase {
+        case .scanning: return "Scanning…"
+        case .enriching: return "Reading metadata…"
+        }
+    }
+}
+
 @Observable
 @MainActor
 final class GalleryStore {
+    /// Hours since the last full scan after which an `.auto` scan promotes
+    /// itself to a full scan. The light-scan path skips file-provider probes
+    /// and EXIF re-reads for unchanged files, so we still want a full pass
+    /// occasionally to catch in-place edits and missed sidecars.
+    private static let fullScanInterval: TimeInterval = 24 * 60 * 60
+
     var rootFolder: PhotoFolder?
     var allPhotos: [PhotoFile] = []
     var isScanning: Bool = false
+    /// Live progress of an in-flight scan. `nil` when idle. Set from the
+    /// `FolderScanner` and `EnrichmentService` callbacks; observed by the
+    /// `ScanProgressBanner` on the three main tabs.
+    var scanProgress: ScanProgress?
     var lastSyncedAt: Date?
+    /// Timestamp of the most recent FULL scan completion. Persisted so the
+    /// 24-hour `.auto`-mode promotion survives relaunch.
+    private(set) var lastFullScanAt: Date?
     private(set) var memories: [Memory] = []
     private(set) var topPeople: [TagSuggestion] = []
     private(set) var eventFolders: [PhotoFolder] = []
@@ -200,6 +250,9 @@ final class GalleryStore {
         if let raw = defaults.object(forKey: "memoriesGeneratedDay") as? Date {
             memoriesGeneratedDay = raw
         }
+        if let raw = defaults.object(forKey: "lastFullScanAt") as? Date {
+            lastFullScanAt = raw
+        }
         if let data = defaults.data(forKey: "personContactLinks"),
            let dict = try? JSONDecoder().decode([String: PersonLink].self, from: data) {
             personContactLinks = dict
@@ -250,7 +303,7 @@ final class GalleryStore {
                 guard let self else { return }
                 await self.loadContacts()
                 if let url = self.bookmarks.activeURL {
-                    await self.scanFolder(at: url, silent: true)
+                    await self.scanFolder(at: url, kind: .auto, silent: true)
                 }
                 // Day rolled over while the app was backgrounded? Re-export so
                 // the Memories widget gets fresh "On this day" content even if
@@ -482,53 +535,91 @@ final class GalleryStore {
             isScanning = true
         }
 
-        // Rescan in background — cached URLs are from a previous session
-        await scanFolder(at: url, silent: hadCache)
+        // Rescan in background — cached URLs are from a previous session.
+        // `.auto` picks light when we have fresh cache + recent full scan,
+        // and full otherwise (cold install, post-upgrade, >24h since last
+        // full pass).
+        await scanFolder(at: url, kind: .auto, silent: hadCache)
     }
 
-    func rescan(silent: Bool = true) async {
+    /// `.full` by default — pull-to-refresh and the Settings "Reload
+    /// Library" button want the user-initiated semantics. Background paths
+    /// (foreground observer, `restoreFolder`) pass `.auto`.
+    func rescan(kind: ScanKind = .full, silent: Bool = true) async {
         guard let url = bookmarks.activeURL else { return }
-        await scanFolder(at: url, silent: silent)
+        await scanFolder(at: url, kind: kind, silent: silent)
     }
 
     // MARK: - Folder Scanning (Iterative)
 
-    func scanFolder(at url: URL, silent: Bool = false) async {
+    func scanFolder(at url: URL, kind: ScanKind = .full, silent: Bool = false) async {
         if let active = activeScanTask, active.url == url {
             await active.task.value
             return
         }
         let task: Task<Void, Never> = Task { @MainActor [weak self] in
             guard let self else { return }
-            await self.performScan(at: url, silent: silent)
+            await self.performScan(at: url, kind: kind, silent: silent)
         }
         activeScanTask = (url, task)
         await task.value
         if activeScanTask?.task == task { activeScanTask = nil }
     }
 
-    private func performScan(at url: URL, silent: Bool) async {
-        if !silent { isScanning = true }
+    /// Resolve `.auto` → `.light` or `.full` based on how long it's been
+    /// since the last full scan. Exposed so tests can verify the gate.
+    func resolvedScanKind(for kind: ScanKind, now: Date) -> ScanKind {
+        switch kind {
+        case .light, .full: return kind
+        case .auto:
+            guard let last = lastFullScanAt else { return .full }
+            return now.timeIntervalSince(last) >= Self.fullScanInterval ? .full : .light
+        }
+    }
 
-        // Snapshot cached metadata so the scanner can merge it into the
-        // fresh scan without re-reading EXIF for unchanged files.
-        let cachedMetadata = Dictionary(
-            allPhotos.map { photo in
-                (photo.url, FolderScanner.CachedPhotoMetadata(
-                    date: photo.dateTaken,
-                    tags: photo.hierarchicalTags,
-                    countryCode: photo.countryCode,
-                    enrichedFileDate: photo.enrichedFileDate,
-                    gpsLatitude: photo.gpsLatitude,
-                    gpsLongitude: photo.gpsLongitude,
-                    faceRegions: photo.faceRegions
-                ))
-            },
+    private func performScan(at url: URL, kind: ScanKind, silent: Bool) async {
+        let resolved = resolvedScanKind(for: kind, now: clock.now())
+        let isLight = resolved == .light
+
+        // Spinner state and progress UI: light scans skip both — they're
+        // fast and shouldn't flash UI on every app open. Full scans drive
+        // the progress banner via `scanProgress`.
+        if !silent { isScanning = true }
+        let startedAt = clock.now()
+        if !isLight {
+            self.scanProgress = ScanProgress(phase: .scanning, processed: 0, total: nil, startedAt: startedAt)
+        }
+
+        let cachedPhotos = Dictionary(
+            allPhotos.map { ($0.url, $0) },
             uniquingKeysWith: { _, b in b }
         )
 
         // Heavy file I/O runs off the main actor so cached UI stays responsive.
-        let result = await FolderScanner.scan(at: url, cachedMetadata: cachedMetadata)
+        // Scanner progress hops back to the main actor to publish into
+        // `scanProgress`; throttled to once per ~100 files inside the scanner.
+        let progressCallback: (@Sendable (Int) -> Void)?
+        if !isLight {
+            progressCallback = { [weak self] processed in
+                Task { @MainActor [weak self] in
+                    guard let self, let current = self.scanProgress, current.phase == .scanning else { return }
+                    self.scanProgress = ScanProgress(
+                        phase: .scanning,
+                        processed: processed,
+                        total: nil,
+                        startedAt: current.startedAt
+                    )
+                }
+            }
+        } else {
+            progressCallback = nil
+        }
+        let result = await FolderScanner.scan(
+            at: url,
+            cachedPhotos: cachedPhotos,
+            reuseCached: isLight,
+            onProgress: progressCallback
+        )
 
         // Back on main actor — update observed state only if content changed.
         let existingURLs = Set(allPhotos.map(\.url))
@@ -548,22 +639,27 @@ final class GalleryStore {
         // before the next sync run completes.
         let mergedPhotos = mergeCachedSidecars(into: result.flatPhotos)
 
+        let scanKindLabel = isLight ? "light" : "full"
         if contentChanged && (!result.flatPhotos.isEmpty || !silent) {
-            Log.scan.info("Complete: \(result.flatPhotos.count) photos (needsEnrichment=\(result.needsEnrichment), changed=true)")
+            Log.scan.info("\(scanKindLabel) scan complete: \(result.flatPhotos.count) photos (+\(result.addedURLs.count) -\(result.removedURLs.count) ~\(result.modifiedURLs.count), needsEnrichment=\(result.needsEnrichment))")
             self.rootFolder = result.rootFolder
             self.allPhotos = mergedPhotos
             rebuildSortAndIndex()
             saveCache()
         } else if result.flatPhotos.isEmpty && !silent {
-            Log.scan.info("Complete: 0 photos")
+            Log.scan.info("\(scanKindLabel) scan complete: 0 photos")
             self.rootFolder = result.rootFolder
             self.allPhotos = []
             rebuildSortAndIndex()
         } else {
-            Log.scan.info("Scan complete, no changes detected (\(result.flatPhotos.count) photos)")
+            Log.scan.info("\(scanKindLabel) scan complete, no changes (\(result.flatPhotos.count) photos)")
         }
         isScanning = false
         lastSyncedAt = Date()
+        if resolved == .full {
+            lastFullScanAt = lastSyncedAt
+            defaults.set(lastFullScanAt, forKey: "lastFullScanAt")
+        }
 
         // Hand the manifest to the sidecar sync service; it diffs against
         // the cache and either fetches silently or surfaces a prompt.
@@ -583,6 +679,10 @@ final class GalleryStore {
         } else {
             generateMemoriesIfNeeded()
         }
+
+        // Scan + enrichment have settled — clear progress so the banner
+        // dismisses. Light scans never set it; this is a no-op then.
+        self.scanProgress = nil
 
         // Refresh the widget snapshot after the scan/enrichment pass settles.
         exportWidgetSnapshot()
@@ -604,7 +704,30 @@ final class GalleryStore {
             return
         }
 
-        let enrichedPhotos = await EnrichmentService.enrich(photos: photos)
+        // Flip the progress banner to the enriching phase. Total is known
+        // up-front (the stale-file count), so the UI can render a percent
+        // and ETA. Light scans haven't set scanProgress; create it here so
+        // a newly-discovered batch of files surfaces progress regardless.
+        let enrichStart = clock.now()
+        self.scanProgress = ScanProgress(
+            phase: .enriching,
+            processed: 0,
+            total: staleCount,
+            startedAt: enrichStart
+        )
+
+        let enrichedPhotos = await EnrichmentService.enrich(photos: photos) { [weak self] processed, total in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                guard let current = self.scanProgress, current.phase == .enriching else { return }
+                self.scanProgress = ScanProgress(
+                    phase: .enriching,
+                    processed: processed,
+                    total: total,
+                    startedAt: current.startedAt
+                )
+            }
+        }
 
         // Only apply if allPhotos hasn't been replaced during enrichment
         guard allPhotos.count == photos.count,

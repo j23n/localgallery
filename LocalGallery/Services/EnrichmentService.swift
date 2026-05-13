@@ -25,12 +25,23 @@ enum EnrichmentService {
     /// array with stale entries replaced; entries already enriched are
     /// passed through unchanged. Cooperative — checks `Task.isCancelled`
     /// per photo so a foreground rescan can short-circuit.
-    static func enrich(photos: [PhotoFile]) async -> [PhotoFile] {
+    ///
+    /// `onProgress` is invoked from the detached task as each photo finishes
+    /// (in TaskGroup completion order, not necessarily input order). The first
+    /// argument is the cumulative completed count, the second is the total
+    /// stale count discovered up-front. Use it to drive a progress bar; hop
+    /// to the main actor inside the closure if you need to publish state.
+    static func enrich(
+        photos: [PhotoFile],
+        onProgress: (@Sendable (Int, Int) -> Void)? = nil
+    ) async -> [PhotoFile] {
         let startTime = CFAbsoluteTimeGetCurrent()
 
         return await Task.detached(priority: .background) {
             var result = photos
             let staleIndices = result.indices.filter { result[$0].enrichedFileDate == nil }
+            let staleTotal = staleIndices.count
+            onProgress?(0, staleTotal)
 
             // Enrich stale photos in parallel via TaskGroup. Pre-extract
             // `photo` outside the addTask closure so the closure captures
@@ -105,6 +116,7 @@ enum EnrichmentService {
                 var collected: [EnrichedResult] = []
                 for await item in group {
                     if let item { collected.append(item) }
+                    onProgress?(collected.count, staleTotal)
                     if collected.count % 5000 == 0 {
                         Log.enrich.info("Processed \(collected.count)/\(staleIndices.count)…")
                     }

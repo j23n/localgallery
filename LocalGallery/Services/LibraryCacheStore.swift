@@ -16,7 +16,10 @@ enum LibraryCacheStore {
     /// that don't have a sidecar. v19: MWG region parser rewritten to target
     /// `<mwg-rs:Area>` directly instead of walking `<rdf:li>` boundaries —
     /// re-enrich so libraries that hit the boundary bug pick up regions now.
-    static let version = 19
+    /// v20: PhotoFile gained `fileModificationDate` so light scans can diff
+    /// the live filesystem listing against the cache without re-probing every
+    /// file — bump so the first scan after upgrade populates it for everyone.
+    static let version = 20
 
     private struct Payload: Codable, Sendable {
         let version: Int

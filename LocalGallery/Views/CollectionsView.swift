@@ -42,6 +42,7 @@ struct CollectionsView: View {
             }
         }
         .background(Design.bg)
+        .overlay(alignment: .top) { ScanProgressBanner() }
         .navigationTitle("Collections")
         .navigationBarTitleDisplayMode(.large)
         .toolbar {

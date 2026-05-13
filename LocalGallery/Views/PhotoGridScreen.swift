@@ -577,7 +577,14 @@ struct PhotoGridScreen: View {
             }
         }
 
-        if showVisibleDateRange && !selectMode {
+        // Principal slot: scan progress takes priority over the date-range
+        // title button when a scan is running, so the user sees live
+        // "X / Y · ~M:SS" instead of a stale date range.
+        if store.scanProgress != nil {
+            ToolbarItem(placement: .principal) {
+                ScanProgressBanner()
+            }
+        } else if showVisibleDateRange && !selectMode {
             ToolbarItem(placement: .principal) {
                 Button {
                     scrollToTopTrigger.toggle()

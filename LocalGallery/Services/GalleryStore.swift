@@ -581,14 +581,14 @@ final class GalleryStore {
         let resolved = resolvedScanKind(for: kind, now: clock.now())
         let isLight = resolved == .light
 
-        // Spinner state and progress UI: light scans skip both — they're
-        // fast and shouldn't flash UI on every app open. Full scans drive
-        // the progress banner via `scanProgress`.
+        // Spinner state is reserved for non-silent scans (Settings "Reload
+        // Library", cold launch without cache). Progress banner shows for
+        // both kinds — even a light scan over a 25k-photo library takes
+        // long enough that the user benefits from a "we're checking, give
+        // us a sec" cue.
         if !silent { isScanning = true }
         let startedAt = clock.now()
-        if !isLight {
-            self.scanProgress = ScanProgress(phase: .scanning, processed: 0, total: nil, startedAt: startedAt)
-        }
+        self.scanProgress = ScanProgress(phase: .scanning, processed: 0, total: nil, startedAt: startedAt)
 
         let cachedPhotos = Dictionary(
             allPhotos.map { ($0.url, $0) },
@@ -598,21 +598,16 @@ final class GalleryStore {
         // Heavy file I/O runs off the main actor so cached UI stays responsive.
         // Scanner progress hops back to the main actor to publish into
         // `scanProgress`; throttled to once per ~100 files inside the scanner.
-        let progressCallback: (@Sendable (Int) -> Void)?
-        if !isLight {
-            progressCallback = { [weak self] processed in
-                Task { @MainActor [weak self] in
-                    guard let self, let current = self.scanProgress, current.phase == .scanning else { return }
-                    self.scanProgress = ScanProgress(
-                        phase: .scanning,
-                        processed: processed,
-                        total: nil,
-                        startedAt: current.startedAt
-                    )
-                }
+        let progressCallback: @Sendable (Int) -> Void = { [weak self] processed in
+            Task { @MainActor [weak self] in
+                guard let self, let current = self.scanProgress, current.phase == .scanning else { return }
+                self.scanProgress = ScanProgress(
+                    phase: .scanning,
+                    processed: processed,
+                    total: nil,
+                    startedAt: current.startedAt
+                )
             }
-        } else {
-            progressCallback = nil
         }
         let result = await FolderScanner.scan(
             at: url,

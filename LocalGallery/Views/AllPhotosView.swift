@@ -28,6 +28,7 @@ struct AllPhotosView: View {
             }
         }
         .background(Design.bg)
+        .overlay(alignment: .top) { ScanProgressBanner() }
         .onAppear { applyPendingTagFilter() }
         .onChange(of: router.pendingPhotosTagFilter) { _, _ in applyPendingTagFilter() }
     }

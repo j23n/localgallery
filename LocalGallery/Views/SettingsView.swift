@@ -40,7 +40,9 @@ struct SettingsView: View {
                                        format: .dateTime.month(.abbreviated).day().hour().minute())
                     }
 
-                    if store.isScanning {
+                    if let progress = store.scanProgress {
+                        scanProgressRow(progress)
+                    } else if store.isScanning {
                         HStack(spacing: 8) {
                             ProgressView()
                             Text("Scanning folder…")
@@ -204,6 +206,57 @@ struct SettingsView: View {
     private func tagCount(namespace: String) -> Int {
         store.allTags.reduce(into: 0) { count, tag in
             if tag.namespace?.lowercased() == namespace { count += 1 }
+        }
+    }
+
+    @ViewBuilder
+    private func scanProgressRow(_ progress: ScanProgress) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text(progress.label)
+                    .font(.caption.weight(.semibold))
+                Spacer(minLength: 0)
+                Text(scanProgressDetail(progress))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            switch progress.phase {
+            case .scanning:
+                ProgressView().progressViewStyle(.linear)
+            case .enriching:
+                if let total = progress.total, total > 0 {
+                    ProgressView(value: Double(progress.processed), total: Double(total))
+                        .progressViewStyle(.linear)
+                } else {
+                    ProgressView().progressViewStyle(.linear)
+                }
+            }
+        }
+    }
+
+    private func scanProgressDetail(_ progress: ScanProgress) -> String {
+        switch progress.phase {
+        case .scanning:
+            return "\(progress.processed.formatted()) found"
+        case .enriching:
+            if let total = progress.total, total > 0 {
+                let elapsed = Date().timeIntervalSince(progress.startedAt)
+                if progress.processed > 0, elapsed > 1 {
+                    let throughput = Double(progress.processed) / elapsed
+                    let remaining = max(0, total - progress.processed)
+                    let secs = Int((Double(remaining) / max(throughput, 0.001)).rounded())
+                    if secs > 0 {
+                        let m = secs / 60
+                        let s = secs % 60
+                        let eta = m > 0 ? String(format: "~%d:%02d", m, s) : "~\(s)s"
+                        return "\(progress.processed.formatted()) / \(total.formatted()) · \(eta)"
+                    }
+                }
+                return "\(progress.processed.formatted()) / \(total.formatted())"
+            }
+            return "\(progress.processed.formatted())"
         }
     }
 

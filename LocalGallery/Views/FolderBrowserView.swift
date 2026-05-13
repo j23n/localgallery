@@ -23,6 +23,7 @@ struct FolderBrowserView: View {
                 emptyState
             }
         }
+        .overlay(alignment: .top) { ScanProgressBanner() }
         // Stable placeholder while the bookmark resolves on cold launch —
         // without it the large title flashes from "" to the folder name on
         // first render. Pushed children always have a folder by construction

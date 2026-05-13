@@ -4,23 +4,22 @@ import os
 
 /// Iterative folder traversal that produces a `PhotoFolder` tree + flat
 /// `[PhotoFile]` from a security-scoped root URL. The Store passes in a
-/// snapshot of cached metadata so this stays a pure detached-task operation
-/// — `@Observable` state assignment, cache save, and enrichment scheduling
-/// stay on the Store side.
+/// snapshot of the previous scan so this stays a pure detached-task
+/// operation — `@Observable` state assignment, cache save, and enrichment
+/// scheduling stay on the Store side.
+///
+/// Two modes:
+///   - **Full** (`reuseCached: false`): probe every file, rebuild every
+///     `PhotoFile` from scratch. Old metadata is merged from `cachedPhotos`
+///     so EXIF reads can short-circuit, but the FileProvider probe + stat
+///     run for every photo. ~3 min for ~25k photos.
+///   - **Light** (`reuseCached: true`): for any file whose URL + size +
+///     modDate match the cached entry, reuse the cached `PhotoFile` as-is
+///     (no probe, no enrichment trigger). New / changed / removed URLs
+///     surface in the result so the Store can update state and enrich just
+///     those. Walks the tree fully, but the per-file cost is one stat
+///     instead of stat + FileProvider probe + EXIF.
 enum FolderScanner {
-    /// Cached EXIF / tag / location data the Store carries forward across
-    /// scans. Keyed by file URL. Sendable so the Store can hand a snapshot
-    /// to the detached scan task.
-    struct CachedPhotoMetadata: Sendable {
-        let date: Date?
-        let tags: [HierarchicalTag]
-        let countryCode: String?
-        let enrichedFileDate: Date?
-        let gpsLatitude: Double?
-        let gpsLongitude: Double?
-        let faceRegions: [FaceRegion]
-    }
-
     /// One row of the sidecar manifest the scanner emits. Carries the photo's
     /// stable UUID, the `.xmp` URL, and the URLResourceKey-derived version of
     /// the sidecar at scan time. Used by `SidecarSyncService` to diff against
@@ -37,6 +36,13 @@ enum FolderScanner {
         let flatPhotos: [PhotoFile]
         let needsEnrichment: Bool
         let sidecarManifest: [SidecarCandidate]
+        /// URLs present in the scan but not in `cachedPhotos`.
+        let addedURLs: [URL]
+        /// URLs present in `cachedPhotos` but absent from the scan.
+        let removedURLs: [URL]
+        /// URLs whose `fileSize` or `fileModificationDate` changed since the
+        /// cache. Disjoint from `addedURLs`.
+        let modifiedURLs: [URL]
     }
 
     /// Internal scratch nodes used during traversal — flat array indexed by
@@ -62,18 +68,37 @@ enum FolderScanner {
     }
 
     /// Walk the security-scoped folder iteratively and build the result on a
-    /// detached background task. `cachedMetadata` is a per-URL snapshot the
-    /// Store carries forward to avoid re-reading EXIF for unchanged files;
-    /// the scanner uses it only as a fast path.
+    /// detached background task.
+    ///
+    /// - Parameters:
+    ///   - rootURL: The security-scoped folder.
+    ///   - cachedPhotos: URL → previous-scan `PhotoFile`. Carries forward
+    ///     EXIF / tags / GPS / locality.
+    ///   - reuseCached: When true, files whose `(fileSize, modDate)` match
+    ///     `cachedPhotos[url]` are reused without probing. When false,
+    ///     every file is re-probed (the cached entry is still used as a
+    ///     fast path for EXIF / tags so enrichment can short-circuit).
+    ///   - onProgress: Optional callback invoked from the detached task as
+    ///     photos are discovered. Receives the cumulative count. Called
+    ///     after every batch of files for throughput; safe to hop to the
+    ///     main actor inside.
     static func scan(
         at rootURL: URL,
-        cachedMetadata: [URL: CachedPhotoMetadata]
+        cachedPhotos: [URL: PhotoFile] = [:],
+        reuseCached: Bool = false,
+        onProgress: (@Sendable (Int) -> Void)? = nil
     ) async -> Result {
         await Task.detached(priority: .userInitiated) {
             let fm = FileManager.default
             var flatPhotos: [PhotoFile] = []
             var needsEnrichment = false
             var sidecarManifest: [SidecarCandidate] = []
+            var addedURLs: [URL] = []
+            var modifiedURLs: [URL] = []
+            var seenURLs: Set<URL> = []
+            // Throttle progress callbacks — fire every 100 files so the
+            // main-actor hops don't dominate the walk.
+            var progressTick = 0
 
             var nodes: [ScanFolderNode] = []
             var stack: [(URL, Int?)] = [(rootURL, nil)]
@@ -165,44 +190,75 @@ enum FolderScanner {
 
                     var pairedCount = 0
                     for file in scannedFiles where file.isImage {
+                        seenURLs.insert(file.url)
                         let stem = file.url.deletingPathExtension().lastPathComponent
                         let liveURL = videoByName[stem.lowercased()]
                         if liveURL != nil { pairedCount += 1 }
 
-                        // Merge cached EXIF metadata if available
-                        let cached = cachedMetadata[file.url]
-                        // Prefer cached EXIF date; fall back to earliest filesystem date.
-                        // creationDate = when the file appeared on THIS volume (e.g. download time);
-                        // modDate = sometimes preserved from the original file (AirDrop, chat saves).
-                        // min() picks the one closer to the actual photo date.
-                        let dateTaken = cached?.date ?? MetadataReader.earliestFilesystemDate(creation: file.creationDate, modification: file.modDate)
-                        let tags = cached?.tags ?? []
-                        let cachedEnrichedDate = cached?.enrichedFileDate
-                        // Re-enrich if never enriched or file was modified since last enrichment
-                        let stale = cachedEnrichedDate == nil || file.modDate != cachedEnrichedDate
-                        if stale {
+                        let cached = cachedPhotos[file.url]
+                        let unchanged = cached.map { c in
+                            c.fileSize == file.fileSize && c.fileModificationDate == file.modDate
+                        } ?? false
+
+                        let photo: PhotoFile
+                        if reuseCached, let cached, unchanged {
+                            // Fast path: reuse the cached PhotoFile verbatim,
+                            // only updating the live-photo pairing (which can
+                            // change without the photo's own bytes changing)
+                            // and the filename-derived stem field.
+                            var p = cached
+                            p.filename = stem
+                            p.livePhotoVideoURL = liveURL
+                            photo = p
+                        } else {
+                            // Slow path: probe + (re)build the PhotoFile. Also
+                            // taken when the file's bytes changed since the
+                            // last scan — `enrichedFileDate` is cleared so
+                            // enrichment re-reads its EXIF.
+                            // Prefer cached EXIF date; fall back to earliest filesystem date.
+                            // creationDate = when the file appeared on THIS volume (e.g. download time);
+                            // modDate = sometimes preserved from the original file (AirDrop, chat saves).
+                            // min() picks the one closer to the actual photo date.
+                            let dateTaken = (unchanged ? cached?.dateTaken : nil)
+                                ?? MetadataReader.earliestFilesystemDate(creation: file.creationDate, modification: file.modDate)
+                            let tags = unchanged ? (cached?.hierarchicalTags ?? []) : []
+                            let cachedEnrichedDate = cached?.enrichedFileDate
+                            // Re-enrich if never enriched or file was modified since last enrichment.
+                            let stale = !unchanged || cachedEnrichedDate == nil || file.modDate != cachedEnrichedDate
+                            if stale {
+                                needsEnrichment = true
+                            }
+
+                            let photoProbe = FileProviderDetector.probe(file.url)
+                            let locality: PhotoLocality = photoProbe.isFileProvider
+                                ? .remote(downloaded: photoProbe.status == .local)
+                                : .local
+                            let photoID = PhotoFile.stableID(for: file.url)
+
+                            photo = PhotoFile(
+                                id: photoID, url: file.url, filename: stem,
+                                fileSize: file.fileSize,
+                                dateTaken: dateTaken,
+                                livePhotoVideoURL: liveURL,
+                                hierarchicalTags: tags,
+                                countryCode: unchanged ? cached?.countryCode : nil,
+                                enrichedFileDate: stale ? nil : cachedEnrichedDate,
+                                fileModificationDate: file.modDate,
+                                gpsLatitude: unchanged ? cached?.gpsLatitude : nil,
+                                gpsLongitude: unchanged ? cached?.gpsLongitude : nil,
+                                faceRegions: unchanged ? (cached?.faceRegions ?? []) : [],
+                                locality: locality
+                            )
+                        }
+                        photos.append(photo)
+
+                        if cached == nil {
+                            addedURLs.append(file.url)
+                            needsEnrichment = true
+                        } else if !unchanged {
+                            modifiedURLs.append(file.url)
                             needsEnrichment = true
                         }
-
-                        let photoProbe = FileProviderDetector.probe(file.url)
-                        let locality: PhotoLocality = photoProbe.isFileProvider
-                            ? .remote(downloaded: photoProbe.status == .local)
-                            : .local
-                        let photoID = PhotoFile.stableID(for: file.url)
-
-                        photos.append(PhotoFile(
-                            id: photoID, url: file.url, filename: stem,
-                            fileSize: file.fileSize,
-                            dateTaken: dateTaken,
-                            livePhotoVideoURL: liveURL,
-                            hierarchicalTags: tags,
-                            countryCode: cached?.countryCode,
-                            enrichedFileDate: stale ? nil : cachedEnrichedDate,
-                            gpsLatitude: cached?.gpsLatitude,
-                            gpsLongitude: cached?.gpsLongitude,
-                            faceRegions: cached?.faceRegions ?? [],
-                            locality: locality
-                        ))
 
                         // Sidecar manifest row — `<basename>.xmp` (e.g.
                         // `IMG_1234.heic.xmp`).
@@ -210,7 +266,7 @@ enum FolderScanner {
                         if let sidecarURL = sidecarsByPhotoBasename[basenameKey] {
                             let sidecarProbe = FileProviderDetector.probe(sidecarURL)
                             sidecarManifest.append(SidecarCandidate(
-                                photoID: photoID,
+                                photoID: photo.id,
                                 sidecarURL: sidecarURL,
                                 currentVersion: sidecarProbe.version,
                                 downloadStatus: sidecarProbe.status
@@ -223,18 +279,50 @@ enum FolderScanner {
                         let stem = videoStem(file.url)
                         if !imageStemSet.contains(stem) {
                             standaloneVideoCount += 1
-                            let cached = cachedMetadata[file.url]
-                            let videoProbe = FileProviderDetector.probe(file.url)
-                            let locality: PhotoLocality = videoProbe.isFileProvider
-                                ? .remote(downloaded: videoProbe.status == .local)
-                                : .local
-                            photos.append(PhotoFile(
-                                id: PhotoFile.stableID(for: file.url), url: file.url, filename: stem,
-                                fileSize: file.fileSize,
-                                dateTaken: cached?.date ?? MetadataReader.earliestFilesystemDate(creation: file.creationDate, modification: file.modDate),
-                                isVideo: true,
-                                locality: locality
-                            ))
+                            seenURLs.insert(file.url)
+                            let cached = cachedPhotos[file.url]
+                            let unchanged = cached.map { c in
+                                c.fileSize == file.fileSize && c.fileModificationDate == file.modDate
+                            } ?? false
+
+                            let photo: PhotoFile
+                            if reuseCached, let cached, unchanged {
+                                var p = cached
+                                p.filename = stem
+                                photo = p
+                            } else {
+                                let dateTaken = (unchanged ? cached?.dateTaken : nil)
+                                    ?? MetadataReader.earliestFilesystemDate(creation: file.creationDate, modification: file.modDate)
+                                let cachedEnrichedDate = cached?.enrichedFileDate
+                                let stale = !unchanged || cachedEnrichedDate == nil || file.modDate != cachedEnrichedDate
+                                if stale { needsEnrichment = true }
+                                let videoProbe = FileProviderDetector.probe(file.url)
+                                let locality: PhotoLocality = videoProbe.isFileProvider
+                                    ? .remote(downloaded: videoProbe.status == .local)
+                                    : .local
+                                photo = PhotoFile(
+                                    id: PhotoFile.stableID(for: file.url), url: file.url, filename: stem,
+                                    fileSize: file.fileSize,
+                                    dateTaken: dateTaken,
+                                    isVideo: true,
+                                    hierarchicalTags: unchanged ? (cached?.hierarchicalTags ?? []) : [],
+                                    countryCode: unchanged ? cached?.countryCode : nil,
+                                    enrichedFileDate: stale ? nil : cachedEnrichedDate,
+                                    fileModificationDate: file.modDate,
+                                    gpsLatitude: unchanged ? cached?.gpsLatitude : nil,
+                                    gpsLongitude: unchanged ? cached?.gpsLongitude : nil,
+                                    faceRegions: unchanged ? (cached?.faceRegions ?? []) : [],
+                                    locality: locality
+                                )
+                            }
+                            photos.append(photo)
+                            if cached == nil {
+                                addedURLs.append(file.url)
+                                needsEnrichment = true
+                            } else if !unchanged {
+                                modifiedURLs.append(file.url)
+                                needsEnrichment = true
+                            }
                         }
                     }
 
@@ -270,11 +358,27 @@ enum FolderScanner {
                 }
 
                 flatPhotos.append(contentsOf: photos)
+                progressTick += photos.count
+                if progressTick >= 100, let onProgress {
+                    onProgress(flatPhotos.count)
+                    progressTick = 0
+                }
 
                 let sortedSubdirs = subdirs.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedDescending }
                 for subdir in sortedSubdirs {
                     stack.append((subdir, nodeIndex))
                 }
+            }
+
+            // Final progress flush so the UI ends on the true total.
+            if let onProgress { onProgress(flatPhotos.count) }
+
+            // Anything in the cache that didn't appear in the listing was
+            // moved/removed/unmounted between scans. The Store drops them
+            // from `allPhotos` so the grid reflects the change immediately.
+            var removedURLs: [URL] = []
+            for url in cachedPhotos.keys where !seenURLs.contains(url) {
+                removedURLs.append(url)
             }
 
             func buildFolder(from nodeIndex: Int) -> PhotoFolder {
@@ -311,7 +415,10 @@ enum FolderScanner {
                 rootFolder: root,
                 flatPhotos: flatPhotos,
                 needsEnrichment: needsEnrichment,
-                sidecarManifest: sidecarManifest
+                sidecarManifest: sidecarManifest,
+                addedURLs: addedURLs,
+                removedURLs: removedURLs,
+                modifiedURLs: modifiedURLs
             )
         }.value
     }

@@ -48,6 +48,12 @@ struct PhotoFile: Identifiable, Hashable, Codable, Sendable {
     var countryCode: String? = nil
     /// File modDate at the time metadata was last read; nil = never enriched
     var enrichedFileDate: Date? = nil
+    /// File modDate as of the most recent scan. Light scan compares this +
+    /// `fileSize` against the live filesystem listing to decide whether a
+    /// cached entry can be reused without re-probing the file provider or
+    /// re-reading EXIF. Distinct from `enrichedFileDate`, which only changes
+    /// when the enrichment pass succeeds.
+    var fileModificationDate: Date? = nil
     var gpsLatitude: Double? = nil
     var gpsLongitude: Double? = nil
     /// MWG `mwg-rs:RegionInfo` entries — one per detected face. Empty when the
@@ -71,10 +77,10 @@ struct PhotoFile: Identifiable, Hashable, Codable, Sendable {
     var keywords: [String] { hierarchicalTags.map(\.displayName) }
 
     enum CodingKeys: String, CodingKey {
-        case id, url, filename, fileSize, dateTaken, dateFromMetadata, isVideo, livePhotoVideoURL, hierarchicalTags, countryCode, enrichedFileDate, gpsLatitude, gpsLongitude, faceRegions
+        case id, url, filename, fileSize, dateTaken, dateFromMetadata, isVideo, livePhotoVideoURL, hierarchicalTags, countryCode, enrichedFileDate, fileModificationDate, gpsLatitude, gpsLongitude, faceRegions
     }
 
-    init(id: UUID, url: URL, filename: String, fileSize: Int64, dateTaken: Date?, dateFromMetadata: Bool = false, isVideo: Bool = false, livePhotoVideoURL: URL? = nil, hierarchicalTags: [HierarchicalTag] = [], countryCode: String? = nil, enrichedFileDate: Date? = nil, gpsLatitude: Double? = nil, gpsLongitude: Double? = nil, faceRegions: [FaceRegion] = [], locality: PhotoLocality = .local, sidecarStatus: SidecarStatus = .absent) {
+    init(id: UUID, url: URL, filename: String, fileSize: Int64, dateTaken: Date?, dateFromMetadata: Bool = false, isVideo: Bool = false, livePhotoVideoURL: URL? = nil, hierarchicalTags: [HierarchicalTag] = [], countryCode: String? = nil, enrichedFileDate: Date? = nil, fileModificationDate: Date? = nil, gpsLatitude: Double? = nil, gpsLongitude: Double? = nil, faceRegions: [FaceRegion] = [], locality: PhotoLocality = .local, sidecarStatus: SidecarStatus = .absent) {
         self.id = id
         self.url = url
         self.filename = filename
@@ -86,6 +92,7 @@ struct PhotoFile: Identifiable, Hashable, Codable, Sendable {
         self.hierarchicalTags = hierarchicalTags
         self.countryCode = countryCode
         self.enrichedFileDate = enrichedFileDate
+        self.fileModificationDate = fileModificationDate
         self.gpsLatitude = gpsLatitude
         self.gpsLongitude = gpsLongitude
         self.faceRegions = faceRegions
@@ -106,6 +113,7 @@ struct PhotoFile: Identifiable, Hashable, Codable, Sendable {
         hierarchicalTags = try c.decodeIfPresent([HierarchicalTag].self, forKey: .hierarchicalTags) ?? []
         countryCode = try c.decodeIfPresent(String.self, forKey: .countryCode)
         enrichedFileDate = try c.decodeIfPresent(Date.self, forKey: .enrichedFileDate)
+        fileModificationDate = try c.decodeIfPresent(Date.self, forKey: .fileModificationDate)
         gpsLatitude = try c.decodeIfPresent(Double.self, forKey: .gpsLatitude)
         gpsLongitude = try c.decodeIfPresent(Double.self, forKey: .gpsLongitude)
         faceRegions = try c.decodeIfPresent([FaceRegion].self, forKey: .faceRegions) ?? []

@@ -42,10 +42,14 @@ struct CollectionsView: View {
             }
         }
         .background(Design.bg)
-        .overlay(alignment: .top) { ScanProgressBanner() }
         .navigationTitle("Collections")
         .navigationBarTitleDisplayMode(.large)
         .toolbar {
+            if store.scanProgress != nil {
+                ToolbarItem(placement: .principal) {
+                    ScanProgressBanner()
+                }
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 SettingsToolbarButton(isPresented: $showSettings)
             }

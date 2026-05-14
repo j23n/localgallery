@@ -1,6 +1,7 @@
 import Foundation
 import UIKit
 import ImageIO
+import UniformTypeIdentifiers
 import WidgetKit
 import CryptoKit
 import os
@@ -397,20 +398,47 @@ actor WidgetSnapshotExporter {
         let thumbOpts: [CFString: Any] = [
             kCGImageSourceThumbnailMaxPixelSize: thumbMaxPixel,
             kCGImageSourceCreateThumbnailFromImageAlways: true,
+            // Bake EXIF orientation into the pixels so the JPEG we write below
+            // is "born upright" and the widget extension doesn't need to apply
+            // a transform at read time.
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceShouldCacheImmediately: true
         ]
         guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, thumbOpts as CFDictionary) else { return }
 
-        let size = CGSize(width: cg.width, height: cg.height)
-        let format = UIGraphicsImageRendererFormat()
-        format.opaque = true
-        format.scale = 1
-        let flat = UIGraphicsImageRenderer(size: size, format: format).image { _ in
-            UIImage(cgImage: cg).draw(in: CGRect(origin: .zero, size: size))
+        // Encode JPEG via CGImageDestination instead of routing through
+        // `UIGraphicsImageRenderer` — its default `UIGraphicsImageRendererFormat()`
+        // init touches `UIScreen.main` / `UITraitCollection.current.displayScale`,
+        // both of which assert main-thread on iOS 26. The widget export runs on
+        // a detached background task (BG-task wake path or post-scan), so the
+        // assertion fires as `_dispatch_assert_queue_fail` and crashes the app
+        // (EXC_BREAKPOINT). CGImageDestination has no such restriction and
+        // produces an equivalent JPEG from the already-oriented CGImage.
+        // Write to a temp file then rename so a torn write can't leave the
+        // widget reading a half-flushed thumbnail.
+        let tmp = dest.appendingPathExtension("tmp")
+        guard let destination = CGImageDestinationCreateWithURL(
+            tmp as CFURL,
+            UTType.jpeg.identifier as CFString,
+            1,
+            nil
+        ) else { return }
+        let destProps: [CFString: Any] = [
+            kCGImageDestinationLossyCompressionQuality: thumbQuality
+        ]
+        CGImageDestinationAddImage(destination, cg, destProps as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else {
+            try? fm.removeItem(at: tmp)
+            return
         }
-        if let data = flat.jpegData(compressionQuality: thumbQuality) {
-            try? data.write(to: dest, options: .atomic)
+        do {
+            if fm.fileExists(atPath: dest.path) {
+                _ = try fm.replaceItemAt(dest, withItemAt: tmp)
+            } else {
+                try fm.moveItem(at: tmp, to: dest)
+            }
+        } catch {
+            try? fm.removeItem(at: tmp)
         }
     }
 

@@ -40,19 +40,11 @@ final class LogStore: @unchecked Sendable {
     private(set) var entries: [Entry] = []
     private let maxEntries = 5_000
 
-    /// Drop log entries below this level before they enter the in-memory
-    /// ring buffer. Default `.info` so `Log.<cat>.debug(...)` calls don't
-    /// drown out the signal in LogsView. The underlying `os.Logger` sink
-    /// is unaffected — debug lines still flow to the system log if you
-    /// hook Console.app up to a connected Mac.
-    var minLevel: Entry.Level = .info
-
     private init() {}
 
     /// Thread-safe append. Bursts off the main thread coalesce naturally
     /// because the dispatch hop serializes inserts.
     nonisolated func append(level: Entry.Level, category: String, message: String) {
-        if level < self.minLevel { return }
         let entry = Entry(timestamp: Date(), level: level, category: category, message: message)
         if Thread.isMainThread {
             insert(entry)

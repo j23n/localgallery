@@ -1,6 +1,7 @@
 import Foundation
 import UIKit
 import ImageIO
+import UniformTypeIdentifiers
 import AVFoundation
 import QuickLookThumbnailing
 import os
@@ -257,19 +258,29 @@ final class ThumbnailService {
         return UIImage(cgImage: cgImage)
     }
 
-    /// JPEG-encode a CGImage after flattening onto an opaque bitmap — avoids
-    /// the `writeImageAtIndex: trying to save an opaque image with
-    /// AlphaPremulLast` warning emitted by `UIImage.jpegData` when the source
-    /// has an alpha channel.
+    /// JPEG-encode a CGImage directly via `CGImageDestination`. The previous
+    /// implementation routed through `UIGraphicsImageRenderer` to flatten any
+    /// alpha channel, but `UIGraphicsImageRendererFormat()`'s default init
+    /// reads `UIScreen.main.scale` / `UITraitCollection.current.displayScale`
+    /// — both main-thread-asserting on iOS 26 — and this helper runs from
+    /// `nonisolated static` thumbnail-decode paths on the cooperative pool.
+    /// Off-main entry would trip `_dispatch_assert_queue_fail` and crash.
+    /// `CGImageDestination` handles alpha implicitly for JPEG output (the
+    /// format can't represent alpha, so the destination drops the channel),
+    /// which is exactly the "flatten onto opaque" behavior we wanted from
+    /// the original UIGraphicsImageRenderer roundtrip — minus the UIKit hop.
     private nonisolated static func opaqueJPEGData(from cgImage: CGImage, quality: CGFloat) -> Data? {
-        let size = CGSize(width: cgImage.width, height: cgImage.height)
-        let format = UIGraphicsImageRendererFormat()
-        format.opaque = true
-        format.scale = 1
-        let flattened = UIGraphicsImageRenderer(size: size, format: format).image { _ in
-            UIImage(cgImage: cgImage).draw(in: CGRect(origin: .zero, size: size))
-        }
-        return flattened.jpegData(compressionQuality: quality)
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(
+            data as CFMutableData,
+            UTType.jpeg.identifier as CFString,
+            1,
+            nil
+        ) else { return nil }
+        let props: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: quality]
+        CGImageDestinationAddImage(destination, cgImage, props as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return data as Data
     }
 
     func clearThumbnailCache() {

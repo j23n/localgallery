@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import CoreImage
 import UIKit
 
 /// Renders a memory's photo list as a crossfading slideshow MP4 file.
@@ -236,12 +237,17 @@ enum SlideshowVideoRenderer {
 
 private extension UIImage {
     /// Returns a CGImage even when `cgImage` is nil (e.g. CIImage-backed UIImages).
+    /// Previously routed through `UIGraphicsBeginImageContextWithOptions` —
+    /// that's the legacy per-thread context-stack API which is fragile on
+    /// iOS 26's tightened UIKit-from-background rules. Slideshow rendering
+    /// happens off the main actor via `SlideshowVideoRenderer.render`, so we
+    /// use a `CIContext` (thread-safe, no UIKit dependency) to materialise
+    /// the CIImage backing into a CGImage instead.
     func normalizedCGImage() -> CGImage? {
         if let cg = cgImage { return cg }
-        UIGraphicsBeginImageContextWithOptions(size, false, scale)
-        draw(in: CGRect(origin: .zero, size: size))
-        let out = UIGraphicsGetImageFromCurrentImageContext()?.cgImage
-        UIGraphicsEndImageContext()
-        return out
+        if let ci = ciImage {
+            return CIContext(options: nil).createCGImage(ci, from: ci.extent)
+        }
+        return nil
     }
 }

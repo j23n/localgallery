@@ -178,30 +178,62 @@ enum FolderScanner {
                     var sidecarsByPhotoBasename: [String: URL] = [:]
 
                     let classifyStart = CFAbsoluteTimeGetCurrent()
+                    let keySet = Set(keys)
                     for itemURL in contents {
-                        let resourceValues = try? itemURL.resourceValues(forKeys: Set(keys))
+                        let ext = itemURL.pathExtension.lowercased()
+
+                        // Sidecar `.xmp` — record without a stat. We don't use
+                        // fileSize / modDate at this level (the sidecar manifest
+                        // emission stage probes on its own when needed).
+                        if ext == "xmp" {
+                            let key = itemURL.deletingPathExtension().lastPathComponent.lowercased()
+                            sidecarsByPhotoBasename[key] = itemURL
+                            continue
+                        }
+
+                        // Light-scan fast path: if the URL is already in
+                        // `cachedPhotos`, reuse the cached `(fileSize, modDate)`
+                        // and skip the per-file `resourceValues(forKeys:)` call.
+                        // That call is supposed to hit the cache populated by
+                        // `contentsOfDirectory(includingPropertiesForKeys:)`
+                        // but on iOS 26 + security-scoped bookmarks it doesn't,
+                        // so each call is a fresh stat (~350μs/file × 20k =
+                        // 7s of wall time). Trade-off: in-place file
+                        // modifications aren't detected until the next full
+                        // scan (auto-promoted past the 48h backstop). Full
+                        // scans skip this branch via `reuseCached == false`
+                        // and stat every file.
+                        if reuseCached, let cached = cachedPhotos[itemURL] {
+                            scannedFiles.append(ScanFile(
+                                url: itemURL,
+                                fileSize: cached.fileSize,
+                                modDate: cached.fileModificationDate,
+                                creationDate: nil,
+                                isImage: !cached.isVideo,
+                                isVideo: cached.isVideo
+                            ))
+                            continue
+                        }
+
+                        // Cache miss — new file, directory, or non-image junk.
+                        // The only branch that pays a fresh stat in light scan;
+                        // every file lands here in full scan.
+                        let resourceValues = try? itemURL.resourceValues(forKeys: keySet)
                         let isDir = resourceValues?.isDirectory ?? false
 
                         if isDir {
                             subdirs.append(itemURL)
-                        } else {
-                            let ext = itemURL.pathExtension.lowercased()
-                            if ext == "xmp" {
-                                // Sidecar URL: `IMG.heic.xmp` → key `img.heic`.
-                                let key = itemURL.deletingPathExtension().lastPathComponent.lowercased()
-                                sidecarsByPhotoBasename[key] = itemURL
-                            } else if !ext.isEmpty, let utType = UTType(filenameExtension: ext) {
-                                let isImage = utType.conforms(to: .image)
-                                let isVideo = utType.conforms(to: .movie)
-                                if isImage || isVideo {
-                                    scannedFiles.append(ScanFile(
-                                        url: itemURL,
-                                        fileSize: Int64(resourceValues?.fileSize ?? 0),
-                                        modDate: resourceValues?.contentModificationDate,
-                                        creationDate: resourceValues?.creationDate,
-                                        isImage: isImage, isVideo: isVideo
-                                    ))
-                                }
+                        } else if !ext.isEmpty, let utType = UTType(filenameExtension: ext) {
+                            let isImage = utType.conforms(to: .image)
+                            let isVideo = utType.conforms(to: .movie)
+                            if isImage || isVideo {
+                                scannedFiles.append(ScanFile(
+                                    url: itemURL,
+                                    fileSize: Int64(resourceValues?.fileSize ?? 0),
+                                    modDate: resourceValues?.contentModificationDate,
+                                    creationDate: resourceValues?.creationDate,
+                                    isImage: isImage, isVideo: isVideo
+                                ))
                             }
                         }
                     }

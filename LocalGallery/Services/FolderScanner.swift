@@ -105,6 +105,15 @@ enum FolderScanner {
             var addedURLs: [URL] = []
             var modifiedURLs: [URL] = []
             var seenURLs: Set<URL> = []
+            // Aggregate timing + cache-hit counters for the whole scan,
+            // logged once at the end. Per-folder line logs are emitted
+            // inside the loop. Reset on each scan call.
+            let scanStart = CFAbsoluteTimeGetCurrent()
+            var totalListMs: Double = 0
+            var totalLoopMs: Double = 0
+            var totalCacheHits = 0
+            var totalSlowPathPhotos = 0
+            var totalProbeMs: Double = 0
             // Throttle progress callbacks — fire every 500 files so the
             // main-actor hops + Observable invalidations from publishing
             // ScanProgress don't dominate the walk on big libraries.
@@ -117,6 +126,12 @@ enum FolderScanner {
             while !stack.isEmpty {
                 let (dirURL, parentIdx) = stack.removeLast()
                 let dirName = dirURL.lastPathComponent
+                let folderStart = CFAbsoluteTimeGetCurrent()
+                // Per-folder counters — rolled into the totals at the end.
+                var folderListMs: Double = 0
+                var folderCacheHits = 0
+                var folderSlowPath = 0
+                var folderProbeMs: Double = 0
 
                 var photos: [PhotoFile] = []
                 var subdirs: [URL] = []
@@ -129,11 +144,14 @@ enum FolderScanner {
 
                 let contents: [URL]?
                 do {
+                    let listStart = CFAbsoluteTimeGetCurrent()
                     contents = try fm.contentsOfDirectory(
                         at: dirURL,
                         includingPropertiesForKeys: keys,
                         options: [.skipsHiddenFiles, .skipsPackageDescendants]
                     )
+                    folderListMs = (CFAbsoluteTimeGetCurrent() - listStart) * 1000
+                    totalListMs += folderListMs
                 } catch {
                     Log.scan.error("contentsOfDirectory failed for \(dirURL.path): \(error.localizedDescription)")
                     contents = nil
@@ -225,6 +243,7 @@ enum FolderScanner {
                             p.filename = stem
                             p.livePhotoVideoURL = liveURL
                             photo = p
+                            folderCacheHits += 1
                         } else {
                             // Slow path: probe + (re)build the PhotoFile. Also
                             // taken when the file's bytes changed since the
@@ -244,7 +263,10 @@ enum FolderScanner {
                                 needsEnrichment = true
                             }
 
+                            folderSlowPath += 1
+                            let probeStart = CFAbsoluteTimeGetCurrent()
                             let photoProbe = FileProviderDetector.probe(file.url)
+                            folderProbeMs += (CFAbsoluteTimeGetCurrent() - probeStart) * 1000
                             let locality: PhotoLocality = photoProbe.isFileProvider
                                 ? .remote(downloaded: photoProbe.status == .local)
                                 : .local
@@ -286,7 +308,9 @@ enum FolderScanner {
                             if reuseCached, unchanged, let cached = cachedSidecarManifest[photo.id] {
                                 sidecarManifest.append(cached)
                             } else {
+                                let probeStart = CFAbsoluteTimeGetCurrent()
                                 let sidecarProbe = FileProviderDetector.probe(sidecarURL)
+                                folderProbeMs += (CFAbsoluteTimeGetCurrent() - probeStart) * 1000
                                 sidecarManifest.append(SidecarCandidate(
                                     photoID: photo.id,
                                     sidecarURL: sidecarURL,
@@ -313,13 +337,17 @@ enum FolderScanner {
                                 var p = cached
                                 p.filename = stem
                                 photo = p
+                                folderCacheHits += 1
                             } else {
                                 let dateTaken = (unchanged ? cached?.dateTaken : nil)
                                     ?? MetadataReader.earliestFilesystemDate(creation: file.creationDate, modification: file.modDate)
                                 let cachedEnrichedDate = cached?.enrichedFileDate
                                 let stale = !unchanged || cachedEnrichedDate == nil || file.modDate != cachedEnrichedDate
                                 if stale { needsEnrichment = true }
+                                folderSlowPath += 1
+                                let probeStart = CFAbsoluteTimeGetCurrent()
                                 let videoProbe = FileProviderDetector.probe(file.url)
+                                folderProbeMs += (CFAbsoluteTimeGetCurrent() - probeStart) * 1000
                                 let locality: PhotoLocality = videoProbe.isFileProvider
                                     ? .remote(downloaded: videoProbe.status == .local)
                                     : .local
@@ -391,6 +419,21 @@ enum FolderScanner {
                 for subdir in sortedSubdirs {
                     stack.append((subdir, nodeIndex))
                 }
+
+                // Per-folder timing summary. `list` = contentsOfDirectory; the
+                // rest of `total` is per-file loop work (cache lookups, URL
+                // string ops, PhotoFile build, probes). `hits` / `slow` tell
+                // us whether the light-scan fast path is engaging; `probe`
+                // isolates the FileProviderDetector cost (7-key resourceValues).
+                let folderFileCount = photos.count
+                let folderTotalMs = (CFAbsoluteTimeGetCurrent() - folderStart) * 1000
+                totalLoopMs += (folderTotalMs - folderListMs)
+                totalCacheHits += folderCacheHits
+                totalSlowPathPhotos += folderSlowPath
+                totalProbeMs += folderProbeMs
+                if folderFileCount > 0 {
+                    Log.scan.info("\(dirName): \(folderFileCount) files, total=\(String(format: "%.0f", folderTotalMs))ms list=\(String(format: "%.0f", folderListMs))ms probe=\(String(format: "%.0f", folderProbeMs))ms hits=\(folderCacheHits) slow=\(folderSlowPath)")
+                }
             }
 
             // Final progress flush so the UI ends on the true total.
@@ -434,6 +477,16 @@ enum FolderScanner {
             }
 
             let root = nodes.isEmpty ? nil : buildFolder(from: 0)
+
+            // End-of-scan rollup. `hits + slow` should equal the image+video
+            // count; if `slow` is high on a light scan, the cache lookup
+            // isn't engaging (cache wipe or URL canonicalization mismatch).
+            // `probe` is the aggregate FileProviderDetector cost — that's
+            // 7-key resourceValues calls including 3 iCloud-specific keys,
+            // so it shouldn't dominate on a local library.
+            let scanTotalMs = (CFAbsoluteTimeGetCurrent() - scanStart) * 1000
+            Log.scan.info("Scan totals: \(flatPhotos.count) files in \(nodes.count) folders, total=\(String(format: "%.0f", scanTotalMs))ms list=\(String(format: "%.0f", totalListMs))ms loop=\(String(format: "%.0f", totalLoopMs))ms probe=\(String(format: "%.0f", totalProbeMs))ms hits=\(totalCacheHits) slow=\(totalSlowPathPhotos) reuseCached=\(reuseCached)")
+
             return Result(
                 rootFolder: root,
                 flatPhotos: flatPhotos,

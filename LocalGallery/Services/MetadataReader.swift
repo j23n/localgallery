@@ -253,7 +253,7 @@ enum MetadataReader {
                 let start = xml.index(r.lowerBound, offsetBy: -min(80, xml.distance(from: xml.startIndex, to: r.lowerBound)))
                 let end = xml.index(r.lowerBound, offsetBy: min(200, xml.distance(from: r.lowerBound, to: xml.endIndex)))
                 let sample = String(xml[start..<end]).replacingOccurrences(of: "\n", with: " ")
-                Log.enrich.warning("XMP carries 'mwg-rs' but parser found no regions. Context: …\(sample)…")
+                Log.enrich.warning("XMP carries 'mwg-rs' but parser found no regions. Context: …\(Log.r.other(sample))…")
             }
         }
         return regions

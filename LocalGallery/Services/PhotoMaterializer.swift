@@ -69,7 +69,7 @@ final class PhotoMaterializer {
                 progress.completedUnitCount = progress.totalUnitCount
                 return photo.url
             } catch {
-                Log.scan.error("Materialize failed for \(photo.url.lastPathComponent): \(error.localizedDescription)")
+                Log.scan.error("Materialize failed for \(Log.r.filename(photo.url.lastPathComponent)): \(error.localizedDescription)")
                 throw MaterializationError.providerError(error.localizedDescription)
             }
         }

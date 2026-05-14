@@ -109,7 +109,7 @@ final class ThumbnailService {
             thumbnailCache.setObject(image, forKey: url as NSURL, cost: cost)
             return image
         } catch is CancellationError {
-            Log.thumb.debug("Cancelled: \(url.lastPathComponent)")
+            Log.thumb.debug("Cancelled: \(Log.r.filename(url.lastPathComponent))")
             return nil
         } catch {
             return nil
@@ -302,7 +302,7 @@ final class ThumbnailService {
             fullImageCache.setObject(image, forKey: url as NSURL, cost: cost)
             return image
         } catch is CancellationError {
-            Log.thumb.debug("Cancelled full image: \(url.lastPathComponent)")
+            Log.thumb.debug("Cancelled full image: \(Log.r.filename(url.lastPathComponent))")
             return nil
         } catch {
             return nil

@@ -110,13 +110,20 @@ struct SettingsView: View {
                     LabeledContent("Version", value: appVersion)
                     Toggle("Crash Reporting", isOn: $crashReportingEnabled)
 
+                    Button {
+                        ShareSheet.present(items: [LogRedactor.shared.keyFileURL])
+                    } label: {
+                        Label("Export Redaction Key", systemImage: "key.fill")
+                    }
+                    .tint(.primary)
+
                     if crashReportingEnabled, crashService.hasPendingCrash {
                         crashRows
                     }
                 } header: {
                     Text("Diagnostics")
                 } footer: {
-                    Text("When on, LocalGallery captures crash details and recent log entries on this device. Nothing is sent automatically — if a crash is captured, a banner appears here in Settings and you can choose to share the report with the developer. Logs include file names and folder paths from your library. Off by default. App Store crash analytics (system-level) are unaffected by this setting.")
+                    Text("When on, LocalGallery captures crash details and recent log entries on this device. Nothing is sent automatically — if a crash is captured, a banner appears here in Settings and you can choose to share the report with the developer. Folder names, person names, tags, memory titles, and file paths in logs are replaced with anonymous tokens like \"folder#7\". Export the Redaction Key on this device to reverse-map tokens back to the originals locally — the key file is never bundled with crash reports. App Store crash analytics (system-level) are unaffected by this setting.")
                 }
 
                 Section("About") {

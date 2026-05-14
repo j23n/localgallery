@@ -214,7 +214,7 @@ final class SidecarSyncService {
                 faceRegions: parsed.faceRegions
             )
         } catch {
-            Log.cache.error("Sidecar fetch failed for \(url.lastPathComponent): \(error.localizedDescription)")
+            Log.cache.error("Sidecar fetch failed for \(Log.r.filename(url.lastPathComponent)): \(error.localizedDescription)")
             return nil
         }
     }

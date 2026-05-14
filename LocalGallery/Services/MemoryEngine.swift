@@ -104,7 +104,7 @@ enum MemoryEngine {
                 return (photo, date)
             }
 
-            Log.memory.info("Pipeline: \(allPhotos.count) photos (\(photosWithDates.count) with dates), \(leafFolders.count) leaf folders, \(contacts.count) contacts, seed='\(seed)', seen=\(seenMemoryIDs.count) IDs, me='\(mePersonPath)'")
+            Log.memory.info("Pipeline: \(allPhotos.count) photos (\(photosWithDates.count) with dates), \(leafFolders.count) leaf folders, \(contacts.count) contacts, seed='\(seed)', seen=\(seenMemoryIDs.count) IDs, me='\(Log.r.person(mePersonPath))'")
 
             // === 1. On This Day ===
             let onThisDay = photosWithDates.filter { (_, date) in
@@ -330,12 +330,12 @@ enum MemoryEngine {
             for (idx, candidate) in candidates.enumerated() {
                 let cluster = clusterKey(for: candidate.id)
                 if usedClusters.contains(cluster) {
-                    Log.memory.debug("Skip '\(candidate.id)' (cluster '\(cluster)' already taken; jitteredScore=\(String(format: "%.1f", jitteredScores[sortedIndices[idx]])))")
+                    Log.memory.debug("Skip '\(Log.r.memory(candidate.id))' (cluster '\(Log.r.other(cluster))' already taken; jitteredScore=\(String(format: "%.1f", jitteredScores[sortedIndices[idx]])))")
                     continue
                 }
                 let seenSuffix = seenMemoryIDs[candidate.id] != nil ? " [seen]" : ""
                 let cooledSuffix = (surfacedClusters[cluster].map { $0 > coolDownThreshold } ?? false) ? " [cooled]" : ""
-                Log.memory.info("Pick '\(candidate.id)' score=\(String(format: "%.1f", candidate.score)) jitter=\(String(format: "%.1f", jitteredScores[sortedIndices[idx]]))\(seenSuffix)\(cooledSuffix) photos=\(candidate.photoIDs.count) title='\(candidate.title)'")
+                Log.memory.info("Pick '\(Log.r.memory(candidate.id))' score=\(String(format: "%.1f", candidate.score)) jitter=\(String(format: "%.1f", jitteredScores[sortedIndices[idx]]))\(seenSuffix)\(cooledSuffix) photos=\(candidate.photoIDs.count) title='\(Log.r.title(candidate.title))'")
                 selected.append(candidate)
                 usedClusters.insert(cluster)
                 if selected.count >= 10 { break }
@@ -376,7 +376,7 @@ enum MemoryEngine {
         let topPeople = personNameCounts
             .sorted { $0.value > $1.value }
             .prefix(5)
-            .map { "\($0.key)=\($0.value)" }
+            .map { "\(Log.r.person($0.key))=\($0.value)" }
             .joined(separator: ", ")
 
         Log.memory.info("""
@@ -527,7 +527,7 @@ enum MemoryEngine {
             let homeLat = allLats[allLats.count / 2]
             let homeLon = allLons[allLons.count / 2]
             let distanceThresholdKm = 50.0
-            Log.memory.info("Trips: no home cluster detected — fallback to global median (\(String(format: "%.3f", homeLat)), \(String(format: "%.3f", homeLon)))")
+            Log.memory.info("Trips: no home cluster detected — fallback to global median \(Log.r.other(String(format: "(%.3f, %.3f)", homeLat, homeLon)))")
             isAtHome = { photo in
                 guard let lat = photo.gpsLatitude, let lon = photo.gpsLongitude else { return false }
                 return haversineKm(lat1: homeLat, lon1: homeLon, lat2: lat, lon2: lon) <= distanceThresholdKm
@@ -682,9 +682,11 @@ enum MemoryEngine {
         if locationLabel == nil {
             let sampleTags = sorted.prefix(3).flatMap { $0.0.hierarchicalTags.map(\.fullPath) }
             let sampleCountries = sorted.prefix(3).compactMap { $0.0.countryCode }
-            Log.memory.debug("Trip \(tripKey): no location label. sampleTags=\(sampleTags) countryCodes=\(sampleCountries)")
+            let redactedTags = sampleTags.map { Log.r.tag($0) }
+            let redactedCountries = sampleCountries.map { Log.r.other($0) }
+            Log.memory.debug("Trip \(Log.r.trip(tripKey)): no location label. sampleTags=\(redactedTags) countryCodes=\(redactedCountries)")
         }
-        Log.memory.debug("Trip \(tripKey): days=\(days) photos=\(ids.count) → '\(title)'")
+        Log.memory.debug("Trip \(Log.r.trip(tripKey)): days=\(days) photos=\(ids.count) → '\(Log.r.title(title))'")
 
         candidates.append(Memory(
             id: "trip-\(tripKey)", type: .trip,

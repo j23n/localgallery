@@ -111,6 +111,10 @@ enum FolderScanner {
             let scanStart = CFAbsoluteTimeGetCurrent()
             var totalListMs: Double = 0
             var totalLoopMs: Double = 0
+            var totalClassifyMs: Double = 0
+            var totalPairMs: Double = 0
+            var totalImageLoopMs: Double = 0
+            var totalVideoLoopMs: Double = 0
             var totalCacheHits = 0
             var totalSlowPathPhotos = 0
             var totalProbeMs: Double = 0
@@ -129,6 +133,10 @@ enum FolderScanner {
                 let folderStart = CFAbsoluteTimeGetCurrent()
                 // Per-folder counters — rolled into the totals at the end.
                 var folderListMs: Double = 0
+                var folderClassifyMs: Double = 0
+                var folderPairMs: Double = 0
+                var folderImageLoopMs: Double = 0
+                var folderVideoLoopMs: Double = 0
                 var folderCacheHits = 0
                 var folderSlowPath = 0
                 var folderProbeMs: Double = 0
@@ -169,6 +177,7 @@ enum FolderScanner {
                     // photo basename.
                     var sidecarsByPhotoBasename: [String: URL] = [:]
 
+                    let classifyStart = CFAbsoluteTimeGetCurrent()
                     for itemURL in contents {
                         let resourceValues = try? itemURL.resourceValues(forKeys: Set(keys))
                         let isDir = resourceValues?.isDirectory ?? false
@@ -196,9 +205,11 @@ enum FolderScanner {
                             }
                         }
                     }
+                    folderClassifyMs = (CFAbsoluteTimeGetCurrent() - classifyStart) * 1000
 
                     // Second pass: pair live photos (image + video with same stem)
                     // Handle double-extension patterns like IMG_1234.heic.mov or IMG_1234.jpg.mov
+                    let pairStart = CFAbsoluteTimeGetCurrent()
                     let imageExtensions: Set<String> = ["heic", "heif", "jpg", "jpeg", "png", "tiff", "tif", "dng", "webp"]
                     let videoStem: (URL) -> String = { url in
                         var stem = url.deletingPathExtension().lastPathComponent.lowercased()
@@ -220,7 +231,9 @@ enum FolderScanner {
                             $0.url.deletingPathExtension().lastPathComponent.lowercased()
                         }
                     )
+                    folderPairMs = (CFAbsoluteTimeGetCurrent() - pairStart) * 1000
 
+                    let imageLoopStart = CFAbsoluteTimeGetCurrent()
                     var pairedCount = 0
                     for file in scannedFiles where file.isImage {
                         seenURLs.insert(file.url)
@@ -320,7 +333,10 @@ enum FolderScanner {
                             }
                         }
                     }
+                    folderImageLoopMs = (CFAbsoluteTimeGetCurrent() - imageLoopStart) * 1000
+
                     // Standalone videos only (no matching image)
+                    let videoLoopStart = CFAbsoluteTimeGetCurrent()
                     var standaloneVideoCount = 0
                     for file in scannedFiles where file.isVideo {
                         let stem = videoStem(file.url)
@@ -376,6 +392,7 @@ enum FolderScanner {
                             }
                         }
                     }
+                    folderVideoLoopMs = (CFAbsoluteTimeGetCurrent() - videoLoopStart) * 1000
 
                     let imageCount = scannedFiles.filter(\.isImage).count
                     let videoCount = scannedFiles.filter(\.isVideo).count
@@ -428,11 +445,18 @@ enum FolderScanner {
                 let folderFileCount = photos.count
                 let folderTotalMs = (CFAbsoluteTimeGetCurrent() - folderStart) * 1000
                 totalLoopMs += (folderTotalMs - folderListMs)
+                totalClassifyMs += folderClassifyMs
+                totalPairMs += folderPairMs
+                totalImageLoopMs += folderImageLoopMs
+                totalVideoLoopMs += folderVideoLoopMs
                 totalCacheHits += folderCacheHits
                 totalSlowPathPhotos += folderSlowPath
                 totalProbeMs += folderProbeMs
                 if folderFileCount > 0 {
-                    Log.scan.info("\(Log.r.folder(dirName)): \(folderFileCount) files, total=\(String(format: "%.0f", folderTotalMs))ms list=\(String(format: "%.0f", folderListMs))ms probe=\(String(format: "%.0f", folderProbeMs))ms hits=\(folderCacheHits) slow=\(folderSlowPath)")
+                    // `classify`: first-pass per-file resourceValues + UTType. `pair`:
+                    // videoByName / imageStemSet dict+set builds. `image` / `video`:
+                    // the per-file body loops (probe is a subset of these).
+                    Log.scan.info("\(Log.r.folder(dirName)): \(folderFileCount) files, total=\(String(format: "%.0f", folderTotalMs))ms list=\(String(format: "%.0f", folderListMs))ms classify=\(String(format: "%.0f", folderClassifyMs))ms pair=\(String(format: "%.0f", folderPairMs))ms image=\(String(format: "%.0f", folderImageLoopMs))ms video=\(String(format: "%.0f", folderVideoLoopMs))ms probe=\(String(format: "%.0f", folderProbeMs))ms hits=\(folderCacheHits) slow=\(folderSlowPath)")
                 }
             }
 
@@ -485,7 +509,7 @@ enum FolderScanner {
             // 7-key resourceValues calls including 3 iCloud-specific keys,
             // so it shouldn't dominate on a local library.
             let scanTotalMs = (CFAbsoluteTimeGetCurrent() - scanStart) * 1000
-            Log.scan.info("Scan totals: \(flatPhotos.count) files in \(nodes.count) folders, total=\(String(format: "%.0f", scanTotalMs))ms list=\(String(format: "%.0f", totalListMs))ms loop=\(String(format: "%.0f", totalLoopMs))ms probe=\(String(format: "%.0f", totalProbeMs))ms hits=\(totalCacheHits) slow=\(totalSlowPathPhotos) reuseCached=\(reuseCached)")
+            Log.scan.info("Scan totals: \(flatPhotos.count) files in \(nodes.count) folders, total=\(String(format: "%.0f", scanTotalMs))ms list=\(String(format: "%.0f", totalListMs))ms classify=\(String(format: "%.0f", totalClassifyMs))ms pair=\(String(format: "%.0f", totalPairMs))ms image=\(String(format: "%.0f", totalImageLoopMs))ms video=\(String(format: "%.0f", totalVideoLoopMs))ms probe=\(String(format: "%.0f", totalProbeMs))ms hits=\(totalCacheHits) slow=\(totalSlowPathPhotos) reuseCached=\(reuseCached)")
 
             return Result(
                 rootFolder: root,

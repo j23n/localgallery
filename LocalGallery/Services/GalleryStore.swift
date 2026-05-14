@@ -610,6 +610,14 @@ final class GalleryStore {
             allPhotos.map { ($0.url, $0) },
             uniquingKeysWith: { _, b in b }
         )
+        // Pass last scan's sidecar manifest in too so the light-scan fast
+        // path can skip the `.xmp` `FileProviderDetector.probe()` for
+        // unchanged photos — that probe dominates light-scan wall time on
+        // digiKam libraries (one 7-key resourceValues syscall per sidecar).
+        let cachedSidecarManifest = Dictionary(
+            self.lastSidecarManifest.map { ($0.photoID, $0) },
+            uniquingKeysWith: { _, b in b }
+        )
 
         // Heavy file I/O runs off the main actor so cached UI stays responsive.
         // Scanner progress hops back to the main actor to publish into
@@ -628,6 +636,7 @@ final class GalleryStore {
         let result = await FolderScanner.scan(
             at: url,
             cachedPhotos: cachedPhotos,
+            cachedSidecarManifest: cachedSidecarManifest,
             reuseCached: isLight,
             onProgress: progressCallback
         )

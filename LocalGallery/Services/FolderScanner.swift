@@ -74,6 +74,14 @@ enum FolderScanner {
     ///   - rootURL: The security-scoped folder.
     ///   - cachedPhotos: URL → previous-scan `PhotoFile`. Carries forward
     ///     EXIF / tags / GPS / locality.
+    ///   - cachedSidecarManifest: photoID → previous-scan `SidecarCandidate`.
+    ///     In light-scan mode, files whose photo is unchanged AND whose
+    ///     sidecar still appears in the directory listing reuse the cached
+    ///     entry instead of re-running `FileProviderDetector.probe()` on the
+    ///     `.xmp`. That probe is a 7-key `resourceValues` syscall (several
+    ///     iCloud-specific keys) and dominates the light-scan wall time on
+    ///     digiKam libraries where every photo has a sidecar. The next full
+    ///     scan (auto-promoted past the 48h backstop) re-probes everything.
     ///   - reuseCached: When true, files whose `(fileSize, modDate)` match
     ///     `cachedPhotos[url]` are reused without probing. When false,
     ///     every file is re-probed (the cached entry is still used as a
@@ -85,6 +93,7 @@ enum FolderScanner {
     static func scan(
         at rootURL: URL,
         cachedPhotos: [URL: PhotoFile] = [:],
+        cachedSidecarManifest: [UUID: SidecarCandidate] = [:],
         reuseCached: Bool = false,
         onProgress: (@Sendable (Int) -> Void)? = nil
     ) async -> Result {
@@ -96,9 +105,11 @@ enum FolderScanner {
             var addedURLs: [URL] = []
             var modifiedURLs: [URL] = []
             var seenURLs: Set<URL> = []
-            // Throttle progress callbacks — fire every 100 files so the
-            // main-actor hops don't dominate the walk.
+            // Throttle progress callbacks — fire every 500 files so the
+            // main-actor hops + Observable invalidations from publishing
+            // ScanProgress don't dominate the walk on big libraries.
             var progressTick = 0
+            let progressBatch = 500
 
             var nodes: [ScanFolderNode] = []
             var stack: [(URL, Int?)] = [(rootURL, nil)]
@@ -110,7 +121,11 @@ enum FolderScanner {
                 var photos: [PhotoFile] = []
                 var subdirs: [URL] = []
 
-                let keys: [URLResourceKey] = [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey, .creationDateKey, .typeIdentifierKey]
+                // .typeIdentifierKey was here previously but we never read
+                // it back — classification happens via `UTType(filenameExtension:)`
+                // on the extension string, which is cheaper than a per-file
+                // type-identifier resource fetch.
+                let keys: [URLResourceKey] = [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey, .creationDateKey]
 
                 let contents: [URL]?
                 do {
@@ -261,16 +276,24 @@ enum FolderScanner {
                         }
 
                         // Sidecar manifest row — `<basename>.xmp` (e.g.
-                        // `IMG_1234.heic.xmp`).
+                        // `IMG_1234.heic.xmp`). In light-scan fast path
+                        // we reuse the cached SidecarCandidate when the
+                        // photo is unchanged and we have a prior entry,
+                        // which skips the (expensive on file providers)
+                        // 7-key probe.
                         let basenameKey = file.url.lastPathComponent.lowercased()
                         if let sidecarURL = sidecarsByPhotoBasename[basenameKey] {
-                            let sidecarProbe = FileProviderDetector.probe(sidecarURL)
-                            sidecarManifest.append(SidecarCandidate(
-                                photoID: photo.id,
-                                sidecarURL: sidecarURL,
-                                currentVersion: sidecarProbe.version,
-                                downloadStatus: sidecarProbe.status
-                            ))
+                            if reuseCached, unchanged, let cached = cachedSidecarManifest[photo.id] {
+                                sidecarManifest.append(cached)
+                            } else {
+                                let sidecarProbe = FileProviderDetector.probe(sidecarURL)
+                                sidecarManifest.append(SidecarCandidate(
+                                    photoID: photo.id,
+                                    sidecarURL: sidecarURL,
+                                    currentVersion: sidecarProbe.version,
+                                    downloadStatus: sidecarProbe.status
+                                ))
+                            }
                         }
                     }
                     // Standalone videos only (no matching image)
@@ -359,7 +382,7 @@ enum FolderScanner {
 
                 flatPhotos.append(contentsOf: photos)
                 progressTick += photos.count
-                if progressTick >= 100, let onProgress {
+                if progressTick >= progressBatch, let onProgress {
                     onProgress(flatPhotos.count)
                     progressTick = 0
                 }

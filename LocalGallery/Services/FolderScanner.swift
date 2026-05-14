@@ -153,7 +153,7 @@ enum FolderScanner {
                     folderListMs = (CFAbsoluteTimeGetCurrent() - listStart) * 1000
                     totalListMs += folderListMs
                 } catch {
-                    Log.scan.error("contentsOfDirectory failed for \(dirURL.path): \(error.localizedDescription)")
+                    Log.scan.error("contentsOfDirectory failed for \(Log.r.path(dirURL)): \(error.localizedDescription)")
                     contents = nil
                 }
 
@@ -380,10 +380,10 @@ enum FolderScanner {
                     let imageCount = scannedFiles.filter(\.isImage).count
                     let videoCount = scannedFiles.filter(\.isVideo).count
                     if videoCount > 0 {
-                        Log.scan.debug("\(dirName): \(imageCount) images, \(videoCount) videos → \(pairedCount) live pairs, \(standaloneVideoCount) standalone videos")
+                        Log.scan.debug("\(Log.r.folder(dirName)): \(imageCount) images, \(videoCount) videos → \(pairedCount) live pairs, \(standaloneVideoCount) standalone videos")
                         if pairedCount == 0 && videoCount > 0 {
-                            let sampleImageStems = Array(imageStemSet.prefix(3))
-                            let sampleVideoStems = Array(videoByName.keys.prefix(3))
+                            let sampleImageStems = Array(imageStemSet.prefix(3)).map { Log.r.filename($0) }
+                            let sampleVideoStems = Array(videoByName.keys.prefix(3)).map { Log.r.filename($0) }
                             Log.scan.debug("  Image stems: \(sampleImageStems)")
                             Log.scan.debug("  Video stems: \(sampleVideoStems)")
                         }
@@ -432,7 +432,7 @@ enum FolderScanner {
                 totalSlowPathPhotos += folderSlowPath
                 totalProbeMs += folderProbeMs
                 if folderFileCount > 0 {
-                    Log.scan.info("\(dirName): \(folderFileCount) files, total=\(String(format: "%.0f", folderTotalMs))ms list=\(String(format: "%.0f", folderListMs))ms probe=\(String(format: "%.0f", folderProbeMs))ms hits=\(folderCacheHits) slow=\(folderSlowPath)")
+                    Log.scan.info("\(Log.r.folder(dirName)): \(folderFileCount) files, total=\(String(format: "%.0f", folderTotalMs))ms list=\(String(format: "%.0f", folderListMs))ms probe=\(String(format: "%.0f", folderProbeMs))ms hits=\(folderCacheHits) slow=\(folderSlowPath)")
                 }
             }
 

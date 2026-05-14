@@ -64,7 +64,7 @@ final class SearchIndex {
 
         guard !query.isEmpty else {
             if !requiredTags.isEmpty {
-                Log.search.debug("tags:\(requiredTags.map(\.displayName)) → \(results.count) matches")
+                Log.search.debug("tags:\(requiredTags.map { Log.r.tag($0.displayName) }) → \(results.count) matches")
             }
             return results
         }
@@ -87,7 +87,7 @@ final class SearchIndex {
                 corpus[photo.id]?.contains(q) ?? false
             }
         }
-        Log.search.debug("\"\(query)\" tags:\(requiredTags.map(\.displayName)) → \(results.count) matches\(matchedTag != nil ? " (exact tag)" : "")")
+        Log.search.debug("\"\(Log.r.other(query))\" tags:\(requiredTags.map { Log.r.tag($0.displayName) }) → \(results.count) matches\(matchedTag != nil ? " (exact tag)" : "")")
         return results
     }
 }

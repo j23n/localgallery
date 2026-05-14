@@ -466,7 +466,7 @@ final class GalleryStore {
     /// the contact's birthday).
     func linkPerson(_ personPath: String, toContactID contactID: String) {
         personContactLinks[personPath] = .manual(contactID: contactID)
-        Log.contacts.info("Linked '\(personPath)' to contact \(contactID)")
+        Log.contacts.info("Linked '\(Log.r.person(personPath))' to contact \(Log.r.contact(contactID))")
         forceRegenerateMemories()
     }
 
@@ -474,14 +474,14 @@ final class GalleryStore {
     /// auto-match by name does not re-apply.
     func unlinkPerson(_ personPath: String) {
         personContactLinks[personPath] = .disabled
-        Log.contacts.info("Unlinked '\(personPath)' (auto-match disabled)")
+        Log.contacts.info("Unlinked '\(Log.r.person(personPath))' (auto-match disabled)")
         forceRegenerateMemories()
     }
 
     /// Forget any manual override — auto-match by name resumes for this person.
     func resetPersonLink(_ personPath: String) {
         personContactLinks.removeValue(forKey: personPath)
-        Log.contacts.info("Reset link for '\(personPath)' (auto-match restored)")
+        Log.contacts.info("Reset link for '\(Log.r.person(personPath))' (auto-match restored)")
         forceRegenerateMemories()
     }
 
@@ -1404,7 +1404,7 @@ final class GalleryStore {
                 }
                 if didEvict { evicted += 1 }
             } catch {
-                Log.scan.warning("evictItem failed for \(photo.url.lastPathComponent): \(error.localizedDescription)")
+                Log.scan.warning("evictItem failed for \(Log.r.filename(photo.url.lastPathComponent)): \(error.localizedDescription)")
             }
         }
         // Refresh in-memory state regardless of evict success — next scan

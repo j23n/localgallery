@@ -163,12 +163,12 @@ enum EnrichmentService {
             if regionCount == 0 {
                 Log.enrich.warning("No MWG regions found — Person rail will fall back to center-crop. Check that your XMP has <mwg-rs:RegionInfo> blocks.")
             } else {
-                let sampleNames = regionNamesSeen.prefix(8).joined(separator: ", ")
+                let sampleNames = regionNamesSeen.prefix(8).map { Log.r.person($0) }.joined(separator: ", ")
                 Log.enrich.debug("Sample region names: \(sampleNames)")
             }
             let sampleTags = result.flatMap(\.hierarchicalTags).prefix(20)
             if !sampleTags.isEmpty {
-                let tagDetails = sampleTags.map { "\($0.fullPath) → ns:\($0.namespace ?? "nil") name:\($0.displayName)" }
+                let tagDetails = sampleTags.map { "\(Log.r.tag($0.fullPath)) → ns:\(Log.r.other($0.namespace ?? "nil")) name:\(Log.r.tag($0.displayName))" }
                 Log.enrich.debug("Sample hierarchical tags:\n  \(tagDetails.joined(separator: "\n  "))")
             }
             return result

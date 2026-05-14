@@ -119,7 +119,7 @@ struct FolderBrowserView: View {
         }
         .softTopScrollEdge()
         .refreshable {
-            await store.rescan()
+            await store.rescan(kind: .light)
         }
     }
 

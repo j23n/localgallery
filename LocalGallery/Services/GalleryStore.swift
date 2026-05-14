@@ -45,11 +45,13 @@ struct ScanProgress: Sendable, Equatable {
 @Observable
 @MainActor
 final class GalleryStore {
-    /// Hours since the last full scan after which an `.auto` scan promotes
-    /// itself to a full scan. The light-scan path skips file-provider probes
-    /// and EXIF re-reads for unchanged files, so we still want a full pass
-    /// occasionally to catch in-place edits and missed sidecars.
-    private static let fullScanInterval: TimeInterval = 24 * 60 * 60
+    /// Interval since the last full scan after which an `.auto` scan
+    /// promotes itself to a full one. The light-scan path skips file-provider
+    /// probes and EXIF re-reads for unchanged files, so we still want a full
+    /// pass occasionally to catch in-place EXIF edits and missed sidecars.
+    /// 48h is the deterministic guarantee — every two days a full scan
+    /// happens on the next foreground / pull-to-refresh, transparently.
+    private static let fullScanInterval: TimeInterval = 48 * 60 * 60
 
     var rootFolder: PhotoFolder?
     var allPhotos: [PhotoFile] = []
@@ -542,10 +544,24 @@ final class GalleryStore {
         await scanFolder(at: url, kind: .auto, silent: hadCache)
     }
 
-    /// `.full` by default — pull-to-refresh and the Settings "Reload
-    /// Library" button want the user-initiated semantics. Background paths
-    /// (foreground observer, `restoreFolder`) pass `.auto`.
-    func rescan(kind: ScanKind = .full, silent: Bool = true) async {
+    /// Scan trigger entry point. All call sites pass `kind` explicitly so the
+    /// behaviour is deterministic and grep-able:
+    ///
+    ///   - **`.light`** — pull-to-refresh in any view. Never promotes; the
+    ///     user pulled down to see new files, not to pay a 3-min full-rescan
+    ///     bill.
+    ///   - **`.auto`** — foreground observer + cold-launch `restoreFolder`.
+    ///     Light by default, but promotes to full if it's been more than
+    ///     `fullScanInterval` (48h) since the last full scan. This is the
+    ///     deterministic backstop: every two days a full pass happens
+    ///     transparently on the next foreground.
+    ///   - **`.full`** — Settings "Reload Library", "Re-download all
+    ///     sidecars", and the folder-picker's first scan. Explicit user
+    ///     intent, always runs the slow path.
+    ///
+    /// The default is `.auto` so a future caller that omits `kind` still
+    /// gets the safe-by-default behaviour.
+    func rescan(kind: ScanKind = .auto, silent: Bool = true) async {
         guard let url = bookmarks.activeURL else { return }
         await scanFolder(at: url, kind: kind, silent: silent)
     }

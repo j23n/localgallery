@@ -300,7 +300,7 @@ struct PhotoGridScreen: View {
                 } action: { _, collapsed in
                     largeTitleCollapsed = collapsed
                 }
-                .refreshable { await store.rescan() }
+                .refreshable { await store.rescan(kind: .light) }
                 .overlay(alignment: .trailing) {
                     if yearsCache.count > 1 && !selectMode {
                         YearScrubber(years: yearsCache) { sectionID in

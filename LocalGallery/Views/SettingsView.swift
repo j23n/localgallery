@@ -29,7 +29,7 @@ struct SettingsView: View {
                     .tint(.primary)
 
                     Button {
-                        Task { await store.rescan(silent: false) }
+                        Task { await store.rescan(kind: .full, silent: false) }
                     } label: {
                         Label("Reload Library", systemImage: "arrow.clockwise")
                     }
@@ -379,7 +379,7 @@ struct SettingsView: View {
             Button("Cancel", role: .cancel) { }
             Button("Re-download", role: .destructive) {
                 store.clearSidecarCache()
-                Task { await store.rescan(silent: true) }
+                Task { await store.rescan(kind: .full, silent: true) }
             }
         } message: {
             Text("This wipes the cached `.xmp` data and re-fetches everything on the next sync. Tags and country codes will reappear once the sync completes.")

@@ -84,6 +84,9 @@ targets:
           echo "note: set CFBundleVersion=$BUILD in $PLIST"
     dependencies:
       - target: LocalGalleryWidgets
+    scheme:
+      testTargets:
+        - LocalGalleryTests
 
   LocalGalleryWidgets:
     type: app-extension

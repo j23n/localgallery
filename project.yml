@@ -56,6 +56,10 @@ targets:
         BGTaskSchedulerPermittedIdentifiers:
           - com.j23n.localgallery.app.dailyMemories
           - com.j23n.localgallery.app.sidecarRefresh
+        # Apps use only SHA-256 / MD5 hashing for stable IDs and cache
+        # keys — no encryption, signing, or key exchange. Declaring this
+        # skips App Store Connect's export-compliance questionnaire.
+        ITSAppUsesNonExemptEncryption: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.j23n.localgallery.app
@@ -107,6 +111,7 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
+        ITSAppUsesNonExemptEncryption: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.j23n.localgallery.app.widgets

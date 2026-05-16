@@ -98,6 +98,7 @@ enum MemoryEngine {
             let currentMonthYear = calendar.dateComponents([.month, .year], from: today)
             var candidates: [Memory] = []
             let minPhotos = 15
+            let minOnThisDayPhotos = 10
 
             let photosWithDates = allPhotos.compactMap { photo -> (PhotoFile, Date)? in
                 guard let date = photo.dateTaken else { return nil }
@@ -112,7 +113,7 @@ enum MemoryEngine {
                 return c.month == todayComponents.month && c.day == todayComponents.day && c.year != currentYear
             }.sorted { $0.1 < $1.1 }
 
-            if onThisDay.count >= minPhotos {
+            if onThisDay.count >= minOnThisDayPhotos {
                 let years = Set(onThisDay.map { calendar.component(.year, from: $0.1) })
                 let ids = onThisDay.map(\.0.id)
                 candidates.append(Memory(
@@ -127,22 +128,24 @@ enum MemoryEngine {
                 ))
                 Log.memory.info("OnThisDay: \(ids.count) photos across \(years.count) years")
             } else if !onThisDay.isEmpty {
-                Log.memory.debug("OnThisDay: only \(onThisDay.count) photos (need \(minPhotos))")
+                Log.memory.debug("OnThisDay: only \(onThisDay.count) photos (need \(minOnThisDayPhotos))")
             }
 
             // === 2. X Years Ago ===
+            // Strict month + day + year match so the "On this day in YYYY"
+            // title reflects the actual photo set.
             var yearsAgoCount = 0
             for milestone in [1, 2, 3, 5, 10, 15, 20] {
-                guard let targetDate = calendar.date(byAdding: .year, value: -milestone, to: today),
-                      let windowStart = calendar.date(byAdding: .day, value: -3, to: targetDate),
-                      let windowEnd = calendar.date(byAdding: .day, value: 3, to: targetDate) else { continue }
+                guard let targetDate = calendar.date(byAdding: .year, value: -milestone, to: today) else { continue }
+                let targetYear = calendar.component(.year, from: targetDate)
 
-                let window = photosWithDates.filter { $0.1 >= windowStart && $0.1 <= windowEnd }
-                    .sorted { $0.1 < $1.1 }
-                guard window.count >= minPhotos,
+                let window = photosWithDates.filter { (_, date) in
+                    let c = calendar.dateComponents([.month, .day, .year], from: date)
+                    return c.month == todayComponents.month && c.day == todayComponents.day && c.year == targetYear
+                }.sorted { $0.1 < $1.1 }
+                guard window.count >= minOnThisDayPhotos,
                       let first = window.first?.1, let last = window.last?.1 else { continue }
 
-                let targetYear = calendar.component(.year, from: targetDate)
                 let ids = window.map(\.0.id)
                 candidates.append(Memory(
                     id: "yearsAgo-\(milestone)", type: .yearsAgo,

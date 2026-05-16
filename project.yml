@@ -68,7 +68,7 @@ targets:
         inputFiles:
           - $(SRCROOT)/.git/HEAD
         outputFiles:
-          - $(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)
+          - $(DERIVED_FILE_DIR)/build-number.stamp
         script: |
           set -euo pipefail
           export PATH="/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"
@@ -79,6 +79,8 @@ targets:
           fi
           PLIST="${TARGET_BUILD_DIR}/${INFOPLIST_PATH}"
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$PLIST"
+          mkdir -p "$DERIVED_FILE_DIR"
+          echo "$BUILD" > "$DERIVED_FILE_DIR/build-number.stamp"
           echo "note: set CFBundleVersion=$BUILD in $PLIST"
     dependencies:
       - target: LocalGalleryWidgets
@@ -118,7 +120,7 @@ targets:
         inputFiles:
           - $(SRCROOT)/.git/HEAD
         outputFiles:
-          - $(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)
+          - $(DERIVED_FILE_DIR)/build-number.stamp
         script: |
           set -euo pipefail
           export PATH="/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"
@@ -129,6 +131,8 @@ targets:
           fi
           PLIST="${TARGET_BUILD_DIR}/${INFOPLIST_PATH}"
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$PLIST"
+          mkdir -p "$DERIVED_FILE_DIR"
+          echo "$BUILD" > "$DERIVED_FILE_DIR/build-number.stamp"
           echo "note: set CFBundleVersion=$BUILD in $PLIST"
 
   LocalGalleryTests:

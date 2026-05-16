@@ -64,9 +64,22 @@ targets:
         CODE_SIGN_ENTITLEMENTS: LocalGallery/LocalGallery.entitlements
     postBuildScripts:
       - name: Set Build Number from Git
+        basedOnDependencyAnalysis: false
+        inputFiles:
+          - $(SRCROOT)/.git/HEAD
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)
         script: |
-          BUILD=$(git -C "$SRCROOT" rev-list --count HEAD)
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "${TARGET_BUILD_DIR}/${INFOPLIST_PATH}"
+          set -euo pipefail
+          export PATH="/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"
+          BUILD=$(/usr/bin/git -C "$SRCROOT" rev-list --count HEAD)
+          if [ -z "$BUILD" ]; then
+            echo "error: git rev-list --count HEAD returned empty" >&2
+            exit 1
+          fi
+          PLIST="${TARGET_BUILD_DIR}/${INFOPLIST_PATH}"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$PLIST"
+          echo "note: set CFBundleVersion=$BUILD in $PLIST"
     dependencies:
       - target: LocalGalleryWidgets
 
@@ -101,9 +114,22 @@ targets:
         SKIP_INSTALL: "YES"
     postBuildScripts:
       - name: Set Build Number from Git
+        basedOnDependencyAnalysis: false
+        inputFiles:
+          - $(SRCROOT)/.git/HEAD
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)
         script: |
-          BUILD=$(git -C "$SRCROOT" rev-list --count HEAD)
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "${TARGET_BUILD_DIR}/${INFOPLIST_PATH}"
+          set -euo pipefail
+          export PATH="/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"
+          BUILD=$(/usr/bin/git -C "$SRCROOT" rev-list --count HEAD)
+          if [ -z "$BUILD" ]; then
+            echo "error: git rev-list --count HEAD returned empty" >&2
+            exit 1
+          fi
+          PLIST="${TARGET_BUILD_DIR}/${INFOPLIST_PATH}"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$PLIST"
+          echo "note: set CFBundleVersion=$BUILD in $PLIST"
 
   LocalGalleryTests:
     type: bundle.unit-test

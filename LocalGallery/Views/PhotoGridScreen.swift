@@ -579,34 +579,21 @@ struct PhotoGridScreen: View {
 
         // Principal slot: scan progress takes priority over the date-range
         // title button when a scan is running, so the user sees live
-        // "X / Y · ~M:SS" instead of a stale date range.
-        if store.scanProgress != nil {
-            ToolbarItem(placement: .principal) {
-                ScanProgressBanner()
-            }
-        } else if showVisibleDateRange && !selectMode {
-            ToolbarItem(placement: .principal) {
-                Button {
-                    scrollToTopTrigger.toggle()
-                } label: {
-                    VStack(spacing: 1) {
-                        Text(title)
-                            .font(.headline)
-                            .fontWeight(.semibold)
-                        if let sub = displaySubtitle, !sub.isEmpty {
-                            Text(sub)
-                                .font(.caption2)
-                                .foregroundStyle(Design.ink2)
-                        }
-                    }
-                    .foregroundStyle(Design.ink)
-                }
-                .buttonStyle(.plain)
-                // Root uses .large title mode — fade the principal in only
-                // after the large title has scrolled away to avoid duplication.
-                .opacity(isRoot && !largeTitleCollapsed ? 0 : 1)
-                .animation(.easeInOut(duration: 0.15), value: largeTitleCollapsed)
-            }
+        // "X / Y · ~M:SS" instead of a stale date range. The branch lives
+        // inside `PrincipalToolbarContent` so the `store.scanProgress` read
+        // stays scoped to that view — otherwise every progress tick would
+        // re-evaluate this entire screen body and re-diff every visible
+        // grid cell, starving thumbnail `.task` closures on the main actor.
+        ToolbarItem(placement: .principal) {
+            PrincipalToolbarContent(
+                title: title,
+                displaySubtitle: displaySubtitle,
+                showVisibleDateRange: showVisibleDateRange,
+                selectMode: selectMode,
+                isRoot: isRoot,
+                largeTitleCollapsed: largeTitleCollapsed,
+                onTitleTap: { scrollToTopTrigger.toggle() }
+            )
         }
 
         ToolbarItemGroup(placement: .topBarTrailing) {
@@ -749,6 +736,50 @@ struct PhotoGridScreen: View {
         self.filtered = result.filtered
         self.sectionsCache = result.sections
         self.yearsCache = result.years
+    }
+}
+
+// MARK: - Principal toolbar content
+
+/// Wraps the principal toolbar slot so the `store.scanProgress` read stays
+/// scoped to this view's body. If `PhotoGridScreen.body` read scanProgress
+/// directly (which it used to, via the `if store.scanProgress != nil`
+/// branch), every progress tick during a scan would re-evaluate the whole
+/// screen body — re-diffing every visible cell on the main actor and
+/// starving the thumbnail `.task` closures that are queued on it.
+private struct PrincipalToolbarContent: View {
+    @Environment(GalleryStore.self) private var store
+    let title: String
+    let displaySubtitle: String?
+    let showVisibleDateRange: Bool
+    let selectMode: Bool
+    let isRoot: Bool
+    let largeTitleCollapsed: Bool
+    let onTitleTap: () -> Void
+
+    var body: some View {
+        if store.scanProgress != nil {
+            ScanProgressBanner()
+        } else if showVisibleDateRange && !selectMode {
+            Button(action: onTitleTap) {
+                VStack(spacing: 1) {
+                    Text(title)
+                        .font(.headline)
+                        .fontWeight(.semibold)
+                    if let sub = displaySubtitle, !sub.isEmpty {
+                        Text(sub)
+                            .font(.caption2)
+                            .foregroundStyle(Design.ink2)
+                    }
+                }
+                .foregroundStyle(Design.ink)
+            }
+            .buttonStyle(.plain)
+            // Root uses .large title mode — fade the principal in only
+            // after the large title has scrolled away to avoid duplication.
+            .opacity(isRoot && !largeTitleCollapsed ? 0 : 1)
+            .animation(.easeInOut(duration: 0.15), value: largeTitleCollapsed)
+        }
     }
 }
 

@@ -45,10 +45,14 @@ struct CollectionsView: View {
         .navigationTitle("Collections")
         .navigationBarTitleDisplayMode(.large)
         .toolbar {
-            if store.scanProgress != nil {
-                ToolbarItem(placement: .principal) {
-                    ScanProgressBanner()
-                }
+            // Always include the banner — it returns EmptyView when no
+            // scan is running. The `if store.scanProgress != nil` used to
+            // live here, but reading scanProgress in the parent body made
+            // every progress tick re-evaluate the whole CollectionsView
+            // body and re-diff its content. Now the read is scoped to
+            // ScanProgressBanner.body and the parent stays untouched.
+            ToolbarItem(placement: .principal) {
+                ScanProgressBanner()
             }
             ToolbarItem(placement: .topBarTrailing) {
                 SettingsToolbarButton(isPresented: $showSettings)

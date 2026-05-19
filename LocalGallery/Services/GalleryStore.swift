@@ -641,11 +641,6 @@ final class GalleryStore {
             onProgress: progressCallback
         )
 
-        // Back on main actor — update observed state only if content changed.
-        let existingURLs = Set(allPhotos.map(\.url))
-        let newURLs = Set(result.flatPhotos.map(\.url))
-        let contentChanged = existingURLs != newURLs || result.needsEnrichment
-
         self.lastSidecarManifest = result.sidecarManifest
         let remoteCount = result.flatPhotos.filter {
             if case .remote = $0.locality { return true } else { return false }
@@ -654,25 +649,54 @@ final class GalleryStore {
             Log.scan.info("Detected \(remoteCount) file-provider photos, \(result.sidecarManifest.count) sidecar candidates")
         }
 
-        // Merge cached sidecar entries onto photos before publishing —
-        // search/tag features need this to work for cloud libraries even
-        // before the next sync run completes.
+        // Merge cached sidecar entries onto the freshly-scanned photos.
         let mergedPhotos = mergeCachedSidecars(into: result.flatPhotos)
 
+        // Run enrichment on the scan output BEFORE publishing anything to
+        // the observed grid state. The displayed grid keeps showing the
+        // cached photos throughout the scan + enrichment window, so
+        // ThumbnailViews (keyed on the unchanged URLs) stay on their
+        // cached thumbnails instead of being torn down and re-loaded
+        // mid-sync. One `allPhotos` assignment below covers both phases.
+        let finalPhotos: [PhotoFile]
+        if result.needsEnrichment && !mergedPhotos.isEmpty {
+            finalPhotos = await enrichPhotos(mergedPhotos)
+        } else {
+            finalPhotos = mergedPhotos
+        }
+
+        // Patch the folder tree to carry the enriched photo values, so the
+        // Folders tab sees the same dates/tags as the flat grid.
+        let finalRoot: PhotoFolder?
+        if let root = result.rootFolder {
+            let photosByURL = Dictionary(finalPhotos.map { ($0.url, $0) }, uniquingKeysWith: { _, b in b })
+            finalRoot = Self.updateFolderPhotos(root, photosByURL: photosByURL)
+        } else {
+            finalRoot = nil
+        }
+
+        // Atomic swap — single assignment for both rootFolder and allPhotos,
+        // single rebuildSortAndIndex, single saveCache. Views observing
+        // sortedPhotos / allPhotos see one update at the end of the sync
+        // instead of one after the scan + one after enrichment.
+        let existingURLs = Set(allPhotos.map(\.url))
+        let newURLs = Set(finalPhotos.map(\.url))
+        let contentChanged = existingURLs != newURLs || result.needsEnrichment
+
         let scanKindLabel = isLight ? "light" : "full"
-        if contentChanged && (!result.flatPhotos.isEmpty || !silent) {
-            Log.scan.info("\(scanKindLabel) scan complete: \(result.flatPhotos.count) photos (+\(result.addedURLs.count) -\(result.removedURLs.count) ~\(result.modifiedURLs.count), needsEnrichment=\(result.needsEnrichment))")
-            self.rootFolder = result.rootFolder
-            self.allPhotos = mergedPhotos
+        if contentChanged && (!finalPhotos.isEmpty || !silent) {
+            Log.scan.info("\(scanKindLabel) scan complete: \(finalPhotos.count) photos (+\(result.addedURLs.count) -\(result.removedURLs.count) ~\(result.modifiedURLs.count), needsEnrichment=\(result.needsEnrichment))")
+            self.rootFolder = finalRoot
+            self.allPhotos = finalPhotos
             rebuildSortAndIndex()
             saveCache()
-        } else if result.flatPhotos.isEmpty && !silent {
+        } else if finalPhotos.isEmpty && !silent {
             Log.scan.info("\(scanKindLabel) scan complete: 0 photos")
-            self.rootFolder = result.rootFolder
+            self.rootFolder = finalRoot
             self.allPhotos = []
             rebuildSortAndIndex()
         } else {
-            Log.scan.info("\(scanKindLabel) scan complete, no changes (\(result.flatPhotos.count) photos)")
+            Log.scan.info("\(scanKindLabel) scan complete, no changes (\(finalPhotos.count) photos)")
         }
         isScanning = false
         lastSyncedAt = Date()
@@ -683,51 +707,44 @@ final class GalleryStore {
 
         // Hand the manifest to the sidecar sync service; it diffs against
         // the cache and either fetches silently or surfaces a prompt.
-        let allIDs = Set(mergedPhotos.map(\.id))
+        let allIDs = Set(finalPhotos.map(\.id))
         sidecarSync.plan(
             manifest: result.sidecarManifest,
             allPhotoIDs: allIDs,
             autoApprove: false
         )
 
-        // Enrich with EXIF dates and tags in background (only if needed).
-        // Memory generation is deferred until after enrichment so memories reflect the
-        // freshest EXIF dates / tags / GPS data.
-        if result.needsEnrichment && !allPhotos.isEmpty {
-            await enrichMetadata()
-            generateMemoriesIfNeeded()
-        } else {
-            generateMemoriesIfNeeded()
-        }
+        // Memory generation runs against the just-published `allPhotos`.
+        generateMemoriesIfNeeded()
 
         // Scan + enrichment have settled — clear progress so the banner
-        // dismisses. Light scans never set it; this is a no-op then.
+        // dismisses.
         self.scanProgress = nil
 
         // Refresh the widget snapshot after the scan/enrichment pass settles.
         exportWidgetSnapshot()
     }
 
-    /// Read EXIF dates and hierarchical tags for all photos in the background.
-    /// Updates allPhotos in a single assignment so dates/tags are live immediately.
-    private func enrichMetadata() async {
-        guard !isEnriching else { return }
+    /// Read EXIF dates and hierarchical tags for the stale entries in
+    /// `photos`. Pure transform: returns the enriched array without
+    /// mutating `allPhotos`. The caller (`performScan`) publishes the
+    /// result as part of its atomic swap.
+    private func enrichPhotos(_ photos: [PhotoFile]) async -> [PhotoFile] {
+        guard !isEnriching else { return photos }
         isEnriching = true
         defer { isEnriching = false }
 
-        let photos = allPhotos
         let staleCount = photos.filter { $0.enrichedFileDate == nil }.count
         Log.enrich.info("Starting metadata enrichment: \(staleCount) new/changed of \(photos.count) total")
 
         if staleCount == 0 {
             Log.enrich.info("All photos up-to-date, skipping")
-            return
+            return photos
         }
 
         // Flip the progress banner to the enriching phase. Total is known
         // up-front (the stale-file count), so the UI can render a percent
-        // and ETA. Light scans haven't set scanProgress; create it here so
-        // a newly-discovered batch of files surfaces progress regardless.
+        // and ETA.
         let enrichStart = clock.now()
         self.scanProgress = ScanProgress(
             phase: .enriching,
@@ -749,38 +766,14 @@ final class GalleryStore {
             }
         }
 
-        // Only apply if allPhotos hasn't been replaced during enrichment
-        guard allPhotos.count == photos.count,
-              allPhotos.first?.url == photos.first?.url else {
-            Log.enrich.warning("Skipped — allPhotos changed during enrichment")
-            return
-        }
-
-        // Check if enrichment actually changed any values
         let enrichedCount = zip(photos, enrichedPhotos).filter { old, new in
             old.dateTaken != new.dateTaken ||
             old.hierarchicalTags != new.hierarchicalTags ||
             old.countryCode != new.countryCode ||
             old.gpsLatitude != new.gpsLatitude
         }.count
-
-        guard enrichedCount > 0 else {
-            Log.enrich.info("No metadata changes after enrichment, skipping update")
-            return
-        }
-
-        Log.enrich.info("Enrichment changed \(enrichedCount) photos, publishing update")
-        // Single assignment fires one Observation update per dependent view.
-        self.allPhotos = enrichedPhotos
-        rebuildSortAndIndex()
-
-        // Also update folder tree and save cache
-        if let root = rootFolder {
-            let photosByURL = Dictionary(enrichedPhotos.map { ($0.url, $0) }, uniquingKeysWith: { _, b in b })
-            self.rootFolder = Self.updateFolderPhotos(root, photosByURL: photosByURL)
-        }
-        saveCache()
-        Log.enrich.info("Applied enriched metadata to live data")
+        Log.enrich.info("Enrichment changed \(enrichedCount) photos")
+        return enrichedPhotos
     }
 
     /// Re-apply `mergeCachedSidecars` to the live `allPhotos`. Called after

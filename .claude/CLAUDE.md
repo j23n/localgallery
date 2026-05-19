@@ -21,16 +21,24 @@ services under `Services/`.
 ### Services (`LocalGallery/Services/`)
 - **AppRouter** — `@Observable @MainActor` cross-tab nav state (tab selection, per-tab paths, deep-link queue).
 - **BookmarkManager** — security-scoped bookmark + balanced start/stop access.
+- **Clock** — `Clock` protocol + `SystemClock` (DI seam for time-sensitive code; `FixedClock` lives in the test bundle).
 - **ContactLinker** — `personContactLinks` index + linkState/effectiveContact lookups.
 - **ContactsService** — static wrapper around `CNContactStore`; returns `[ContactInfo]` snapshots for memory generation.
+- **CrashDiagnosticsService** — MetricKit `MXMetricManagerSubscriber` that persists the latest crash payload to disk for the in-app share flow.
 - **EXIFService** — lazy EXIF + photo-tools XMP read for the EXIF panel.
 - **EnrichmentService** — parallel `TaskGroup` enrichment of stale photo metadata.
+- **FileProviderDetector** — probes URLs for file-provider non-local status + `fileContentIdentifierKey`-based content versions.
 - **FolderScanner** — iterative folder traversal returning a `(rootFolder, flatPhotos, needsEnrichment)` tuple.
-- **LibraryCacheStore** / **MemoriesCacheStore** — JSON-on-disk caches for the scan result and the generated memories.
+- **GalleryPaths** — single source of truth for App Support / Caches URLs used by the JSON-on-disk stores.
+- **LibraryCacheStore** / **MemoriesCacheStore** / **SidecarCacheStore** — JSON-on-disk caches for the scan result, generated memories, and parsed `.xmp` sidecars.
+- **LogPersistence** / **LogStore** / **LogRedactor** — opt-in ring-buffer log capture (with identifier tokenisation) feeding the in-app `LogsView` and crash-share payload.
 - **MemoryEngine** — once-a-day memory generation (on this day, years ago, trips, birthdays, etc.).
 - **MemoryRefreshService** — indirection between the BG-task handler in AppDelegate and the Store.
 - **MetadataReader** — pure stateless EXIF / XMP / video-date readers used by the scanner + enricher.
+- **PhotoExporter** — re-encodes a photo to JPEG at a chosen quality for share-sheet export.
+- **PhotoMaterializer** — kicks off + tracks file-provider downloads for non-local photos opened in the viewer.
 - **SearchIndex** + **TagIndex** — sorted photo list, search corpus, tag → photos index, async tag aggregator.
+- **SidecarSyncService** / **SidecarRefreshService** — bulk-fetches `.xmp` sidecars from file providers and refreshes them on a BG task.
 - **SlideshowMusic** — `AVAudioEngine`-based ambient pad synthesis for the six slideshow music themes.
 - **SlideshowVideoRenderer** — renders a memory's photo list as a crossfading MP4 file (1080×1080, H.264).
 - **ThumbnailService** — in-memory + on-disk thumbnail and full-resolution caches.
@@ -38,7 +46,7 @@ services under `Services/`.
 - **WidgetSnapshotExporter** — writes photo/folder/memory snapshots + thumbnails to the App Group container for widget extensions.
 
 ### Models (`LocalGallery/Models/`)
-- **PhotoFile** — the core photo value type; carries metadata, tags, GPS, and a SHA-256-derived stable UUID.
+- **PhotoFile** — the core photo value type; carries metadata, tags, GPS, locality, sidecar status, and a SHA-256-derived stable UUID (helper lives on `PhotoFile`/`PhotoFolder`).
 - **PhotoFolder** — folder node with subfolders, photos, and a SHA-256-derived stable UUID.
 - **Memory** / **MemoryType** — a generated memory (on this day, trip, birthday, etc.) and its classification enum.
 - **HierarchicalTag** / **TagNamespace** — structured tag value type + SF Symbol helpers for the six photo-tools taxonomy roots.
@@ -46,16 +54,24 @@ services under `Services/`.
 - **EXIFData** — camera/lens/GPS fields from image metadata.
 - **PhotoToolsMetadata** — fields from the `photo-tools` custom XMP namespace (tagger version, country code, CLIP info).
 - **PersonLink** — typed enum for how a `People/<name>` tag is linked to an address-book contact.
+- **FaceRegion** — MWG `mwg-rs:RegionInfo` rectangle used to crop person thumbnails to the matching face.
 - **FolderSortOrder** — sort options surfaced in the folder browser.
 - **ContactInfo** — lightweight `CNContact` snapshot (name + birthday) used for birthday memory generation.
 
 ### Views (`LocalGallery/Views/`)
-- **AllPhotosView / FolderBrowserView / CollectionsView / PhotoViewerView / PhotoGridScreen / SettingsView / EXIFPanelView / MemorySlideshowView / PeopleContactLinking** — SwiftUI views, all `@Environment(GalleryStore.self) private var store`.
+- **AllPhotosView / FolderBrowserView / CollectionsView / PhotoViewerView / PhotoGridScreen / SettingsView / EXIFPanelView / MemorySlideshowView / PeopleContactLinking / LogsView** — SwiftUI views, all `@Environment(GalleryStore.self) private var store`.
+- **EXIFFormatters** — shared number/exposure/coord formatters used by `EXIFPanelView`.
+- **PhotoChrome** — overlay chrome (date+location pill, top/bottom bars) for `PhotoViewerView` and `MemorySlideshowView`.
 
 ### Components (`LocalGallery/Components/`)
 - **ThumbnailView** — async thumbnail cell with progress placeholder.
+- **PersonThumbnailView** — face-region-cropped person avatar used by the People rail.
 - **FolderGridView** — reusable grid of photos for a folder or tag filter.
 - **GridLayoutConfig** — shared grid layout config (4 size tiers, portrait/landscape column tables).
+- **PhotoShareKit** — share-sheet builders (quality menu, exporter wiring) shared by viewer and slideshow.
+- **RemoteBadge** — small cloud-icon overlay drawn on non-local thumbnails.
+- **ScanProgressBanner** — top-of-grid progress strip driven by `GalleryStore.scanProgress`.
+- **SettingsToolbarButton** — gear-icon toolbar button reused from multiple tabs.
 - **DocumentPicker** / **ShareSheet** / **VideoPlayerView** — UIKit wrapper components.
 
 ### Other

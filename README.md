@@ -24,7 +24,7 @@ Pair it with [Syncthing](https://syncthing.net/) (via [SyncTrain](https://apps.a
 ## Requirements
 
 - Xcode 16.0+
-- iOS 17.0+
+- iOS 18.0+
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen)
 
 ## Build
@@ -40,7 +40,7 @@ xcodegen
 open LocalGallery.xcodeproj
 ```
 
-Then build and run on a simulator or device (iOS 17+).
+Then build and run on a simulator or device (iOS 18+).
 
 ## Setup
 

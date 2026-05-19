@@ -113,13 +113,32 @@ enum EnrichmentService {
                         )
                     }
                 }
+                // Throttle progress callbacks so a 25k-photo enrichment
+                // doesn't queue 25k `Task { @MainActor in scanProgress = ... }`
+                // jobs back-to-back. Each callback fires an Observable
+                // invalidation that re-evaluates PhotoGridScreen's body (its
+                // toolbar reads `scanProgress`), re-diffs every visible cell,
+                // and starves the thumbnail `.task` closures queued on the
+                // same actor — i.e. thumbnails wouldn't paint until
+                // enrichment drained. Mirrors the 500-file throttle on the
+                // scanner side.
                 var collected: [EnrichedResult] = []
+                let progressBatch = 250
+                var lastProgressTick = 0
                 for await item in group {
                     if let item { collected.append(item) }
-                    onProgress?(collected.count, staleTotal)
+                    if collected.count - lastProgressTick >= progressBatch {
+                        onProgress?(collected.count, staleTotal)
+                        lastProgressTick = collected.count
+                    }
                     if collected.count % 5000 == 0 {
                         Log.enrich.info("Processed \(collected.count)/\(staleIndices.count)…")
                     }
+                }
+                // Final flush so the bar reaches the true total instead of
+                // stopping at the last batch boundary.
+                if lastProgressTick != collected.count {
+                    onProgress?(collected.count, staleTotal)
                 }
                 return collected
             }

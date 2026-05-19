@@ -128,9 +128,17 @@ struct PhotoFile: Identifiable, Hashable, Codable, Sendable {
     }
 
     /// Deterministic UUID derived from the file URL path for stable identity across scans.
-    /// SHA-256 truncated to 16 bytes with RFC 4122 variant + version-5 marker — namespace-less; matches localmusic.
     static func stableID(for url: URL) -> UUID {
-        let digest = SHA256.hash(data: Data(url.standardized.path.utf8))
+        StableUUID.derive(from: url.standardized.path)
+    }
+}
+
+/// SHA-256-truncated deterministic UUID with RFC 4122 variant + version-5 marker.
+/// Namespace-less; matches localmusic. Used by `PhotoFile` and `PhotoFolder` so
+/// the grid doesn't flicker on rescan.
+enum StableUUID {
+    static func derive(from input: String) -> UUID {
+        let digest = SHA256.hash(data: Data(input.utf8))
         var bytes = Array(digest.prefix(16))
         bytes[6] = (bytes[6] & 0x0F) | 0x50   // version 5
         bytes[8] = (bytes[8] & 0x3F) | 0x80   // variant RFC 4122

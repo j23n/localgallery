@@ -88,7 +88,10 @@ final class GalleryStore {
     }
     /// Memory IDs the user has tapped into (opened the slideshow). Keyed by
     /// memory ID → last-seen date. Memories seen within ~6 months are
-    /// deprioritised so the rail stays fresh.
+    /// deprioritised so the rail stays fresh. Pruned at load to entries
+    /// inside the last 12 months — entries older than that have no scoring
+    /// effect (the engine only checks `> sixMonthsAgo`) and would otherwise
+    /// accumulate forever as the user uses the app across years.
     @ObservationIgnored var seenMemoryIDs: [String: Date] = [:] {
         didSet { persistSeenMemoryIDs() }
     }
@@ -250,13 +253,16 @@ final class GalleryStore {
         }
         if let data = defaults.data(forKey: "seenMemoryIDs"),
            let dict = try? JSONDecoder().decode([String: Date].self, from: data) {
-            seenMemoryIDs = dict
+            // Drop entries older than the engine's scoring window so the dict
+            // can't grow unbounded across years of use.
+            let cutoff = Calendar.current.date(byAdding: .month, value: -12, to: clock.now()) ?? .distantPast
+            seenMemoryIDs = dict.filter { $0.value > cutoff }
         }
         if let data = defaults.data(forKey: "surfacedClusters"),
            let dict = try? JSONDecoder().decode([String: Date].self, from: data) {
             // Drop entries outside the cool-down window so the map can't
             // grow unbounded across years of use.
-            let cutoff = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? .distantPast
+            let cutoff = Calendar.current.date(byAdding: .day, value: -7, to: clock.now()) ?? .distantPast
             surfacedClusters = dict.filter { $0.value > cutoff }
         }
         if defaults.object(forKey: "birthdayMemoriesEnabled") != nil {

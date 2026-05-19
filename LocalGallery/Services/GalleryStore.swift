@@ -493,9 +493,8 @@ final class GalleryStore {
             from: paths.libraryCacheURL,
             memoriesURL: paths.memoriesCacheURL
         ) else { return false }
-        self.rootFolder = cached.rootFolder
-        self.allPhotos = cached.allPhotos
-        rebuildSortAndIndex()
+        // No persist — we just read this off disk, no need to write it back.
+        apply(.scanResult(photos: cached.allPhotos, root: cached.rootFolder, persistCache: false))
         return true
     }
 
@@ -577,6 +576,62 @@ final class GalleryStore {
         case .auto:
             guard let last = lastFullScanAt else { return .full }
             return now.timeIntervalSince(last) >= Self.fullScanInterval ? .full : .light
+        }
+    }
+
+    // MARK: - Photo-library mutations
+
+    /// All in-memory mutations to `allPhotos` / `rootFolder` go through
+    /// `apply(_:)`. The invariant — "indexes and the on-disk library cache
+    /// match `allPhotos`" — lives next to the mutation cases instead of
+    /// being re-derived at every call site.
+    ///
+    /// Per-case behaviour:
+    ///   - `.scanResult` rebuilds indexes; persists the library cache when
+    ///     `persistCache` is true. (The empty/non-silent branch sets false
+    ///     so a transient access failure doesn't wipe a good cache.)
+    ///   - `.sidecarsMerged` rebuilds indexes and persists.
+    ///   - `.photoLocalityChanged`, `.allDownloadsCleared`, and
+    ///     `.sidecarCacheCleared` only update in-memory locality / sidecar
+    ///     status — no rebuild, no save. The next scan repopulates from
+    ///     disk; this matches the pre-refactor behaviour for those paths
+    ///     and avoids churning the cache on every download completion.
+    ///
+    /// The widget snapshot, memory regeneration, and sidecar-sync planning
+    /// are intentionally NOT triggered from here — they depend on
+    /// scan-specific arguments (manifest, allIDs) and stay in `performScan`.
+    private enum PhotoLibraryMutation {
+        case scanResult(photos: [PhotoFile], root: PhotoFolder?, persistCache: Bool)
+        case sidecarsMerged(photos: [PhotoFile])
+        case photoLocalityChanged(id: UUID, locality: PhotoLocality)
+        case allDownloadsCleared
+        case sidecarCacheCleared
+    }
+
+    private func apply(_ mutation: PhotoLibraryMutation) {
+        switch mutation {
+        case let .scanResult(photos, root, persistCache):
+            self.rootFolder = root
+            self.allPhotos = photos
+            rebuildSortAndIndex()
+            if persistCache { saveCache() }
+        case let .sidecarsMerged(photos):
+            self.allPhotos = photos
+            rebuildSortAndIndex()
+            saveCache()
+        case let .photoLocalityChanged(id, locality):
+            guard let idx = allPhotos.firstIndex(where: { $0.id == id }) else { return }
+            allPhotos[idx].locality = locality
+        case .allDownloadsCleared:
+            for i in allPhotos.indices {
+                if case .remote = allPhotos[i].locality {
+                    allPhotos[i].locality = .remote(downloaded: false)
+                }
+            }
+        case .sidecarCacheCleared:
+            for i in allPhotos.indices {
+                allPhotos[i].sidecarStatus = .absent
+            }
         }
     }
 
@@ -673,15 +728,13 @@ final class GalleryStore {
         let scanKindLabel = isLight ? "light" : "full"
         if contentChanged && (!finalPhotos.isEmpty || !silent) {
             Log.scan.info("\(scanKindLabel) scan complete: \(finalPhotos.count) photos (+\(result.addedURLs.count) -\(result.removedURLs.count) ~\(result.modifiedURLs.count), needsEnrichment=\(result.needsEnrichment))")
-            self.rootFolder = finalRoot
-            self.allPhotos = finalPhotos
-            rebuildSortAndIndex()
-            saveCache()
+            apply(.scanResult(photos: finalPhotos, root: finalRoot, persistCache: true))
         } else if finalPhotos.isEmpty && !silent {
+            // Explicit user-driven scan that found nothing — surface the empty
+            // state but don't overwrite the on-disk cache; a transient folder
+            // access failure shouldn't blow away a good cache.
             Log.scan.info("\(scanKindLabel) scan complete: 0 photos")
-            self.rootFolder = finalRoot
-            self.allPhotos = []
-            rebuildSortAndIndex()
+            apply(.scanResult(photos: [], root: finalRoot, persistCache: false))
         } else {
             Log.scan.info("\(scanKindLabel) scan complete, no changes (\(finalPhotos.count) photos)")
         }
@@ -769,9 +822,7 @@ final class GalleryStore {
     func reapplySidecarMerges() {
         let merged = mergeCachedSidecars(into: allPhotos)
         guard merged != allPhotos else { return }
-        self.allPhotos = merged
-        rebuildSortAndIndex()
-        saveCache()
+        apply(.sidecarsMerged(photos: merged))
         Log.cache.info("Re-applied sidecar merges to live photos")
     }
 
@@ -1289,12 +1340,9 @@ final class GalleryStore {
         // Mark this photo as downloaded in the in-memory model so the grid
         // badge clears without waiting for a rescan. Cache write is deferred
         // to the next save.
-        if let idx = allPhotos.firstIndex(where: { $0.id == photo.id }) {
-            var updated = allPhotos[idx]
-            if case .remote = updated.locality {
-                updated.locality = .remote(downloaded: true)
-                allPhotos[idx] = updated
-            }
+        if let existing = allPhotos.first(where: { $0.id == photo.id }),
+           case .remote = existing.locality {
+            apply(.photoLocalityChanged(id: photo.id, locality: .remote(downloaded: true)))
         }
         return url
     }
@@ -1397,11 +1445,7 @@ final class GalleryStore {
         }
         // Refresh in-memory state regardless of evict success — next scan
         // will re-detect actual download status.
-        for i in allPhotos.indices {
-            if case .remote = allPhotos[i].locality {
-                allPhotos[i].locality = .remote(downloaded: false)
-            }
-        }
+        apply(.allDownloadsCleared)
         Log.scan.info("Cleared \(evicted) downloads")
         return evicted
     }
@@ -1411,9 +1455,7 @@ final class GalleryStore {
     /// nuclear button.
     func clearSidecarCache() {
         sidecarCache.clear()
-        for i in allPhotos.indices {
-            allPhotos[i].sidecarStatus = .absent
-        }
+        apply(.sidecarCacheCleared)
     }
 }
 

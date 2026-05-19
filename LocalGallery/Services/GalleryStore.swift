@@ -75,7 +75,6 @@ final class GalleryStore {
     var hiddenPeople: Set<String> = [] {
         didSet {
             defaults.set(Array(hiddenPeople), forKey: "hiddenPeople")
-            guard !_isInitializing else { return }
             forceRegenerateMemories()
         }
     }
@@ -111,7 +110,7 @@ final class GalleryStore {
     /// "Chile with Anna, Bob & me". Empty string = unset.
     var mePersonPath: String = "" {
         didSet {
-            guard oldValue != mePersonPath, !_isInitializing else { return }
+            guard oldValue != mePersonPath else { return }
             defaults.set(mePersonPath, forKey: "mePersonPath")
             // Trip titles depend on this — regenerate so the change surfaces
             // immediately instead of waiting for the daily gate.
@@ -137,18 +136,12 @@ final class GalleryStore {
     /// Pre-fetch neighbour photos in the viewer when the user lands on a
     /// file-provider placeholder. Default `true`; disable to save bandwidth.
     var prefetchAdjacentRemotePhotos: Bool = true {
-        didSet {
-            guard !_isInitializing else { return }
-            defaults.set(prefetchAdjacentRemotePhotos, forKey: "prefetchAdjacentRemotePhotos")
-        }
+        didSet { defaults.set(prefetchAdjacentRemotePhotos, forKey: "prefetchAdjacentRemotePhotos") }
     }
     /// When `false`, prefetch (only — explicit taps always go through) is
     /// gated on Wi-Fi/wired connectivity. Default `false` (Wi-Fi-only).
     var useCellularForDownloads: Bool = false {
-        didSet {
-            guard !_isInitializing else { return }
-            defaults.set(useCellularForDownloads, forKey: "useCellularForDownloads")
-        }
+        didSet { defaults.set(useCellularForDownloads, forKey: "useCellularForDownloads") }
     }
 
     /// Master toggle for birthday memories. When `false`, `generateMemories`
@@ -156,17 +149,13 @@ final class GalleryStore {
     /// surfaces automatically once Contacts access is granted.
     var birthdayMemoriesEnabled: Bool = true {
         didSet {
-            guard oldValue != birthdayMemoriesEnabled, !_isInitializing else { return }
+            guard oldValue != birthdayMemoriesEnabled else { return }
             defaults.set(birthdayMemoriesEnabled, forKey: "birthdayMemoriesEnabled")
             // Force a regenerate so today's rail reflects the toggle change
             // immediately rather than waiting for the daily gate.
             forceRegenerateMemories()
         }
     }
-    /// Set to `false` at the end of `init()` so didSet observers can skip
-    /// expensive side-effects (like cache clears) while restoring persisted
-    /// state.
-    @ObservationIgnored private var _isInitializing = true
 
     @ObservationIgnored private var isEnriching = false
     /// In-flight scan, keyed by URL. Concurrent callers for the same URL await
@@ -340,8 +329,6 @@ final class GalleryStore {
                 await self?.loadContacts()
             }
         }
-
-        _isInitializing = false
     }
 
     /// Tracks the calendar day that produced the last widget export. Seeded
@@ -928,10 +915,18 @@ final class GalleryStore {
     /// Clear the once-per-day gate + cached memories and immediately re-run detection.
     /// Wired to a long-press on the "Memories" section header in CollectionsView.
     /// Uses a time-based seed so each tap gives a fresh selection.
+    ///
+    /// No-op when no photos are loaded yet. This is the load-time invariant
+    /// that lets the persisted-setting didSet observers (`hiddenPeople`,
+    /// `mePersonPath`, `birthdayMemoriesEnabled`) call this unconditionally
+    /// instead of guarding on an `_isInitializing` flag — there's nothing to
+    /// regenerate before the library cache loads, and the first scan's
+    /// own `generateMemoriesIfNeeded` will populate memories from scratch.
     func forceRegenerateMemories() {
+        guard !allPhotos.isEmpty else { return }
         memoriesGeneratedDay = nil
         memories = []
-        MemoriesCacheStore.clear()
+        MemoriesCacheStore.clear(at: paths.memoriesCacheURL)
         Log.memory.info("Force-regenerating memories")
         generateMemoriesIfNeeded(seed: "\(clock.now().timeIntervalSinceReferenceDate)")
     }

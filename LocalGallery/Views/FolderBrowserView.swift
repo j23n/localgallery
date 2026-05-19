@@ -30,10 +30,14 @@ struct FolderBrowserView: View {
         .navigationTitle(displayFolder?.name ?? (isRoot ? "Folders" : ""))
         .navigationBarTitleDisplayMode(isRoot ? .large : .inline)
         .toolbar {
-            if store.scanProgress != nil {
-                ToolbarItem(placement: .principal) {
-                    ScanProgressBanner()
-                }
+            // Always include the banner — it returns EmptyView when no
+            // scan is running. The `if store.scanProgress != nil` used to
+            // live here, but reading scanProgress in the parent body made
+            // every progress tick re-evaluate FolderBrowserView and the
+            // List of folder rows below it. Scoping the read to
+            // ScanProgressBanner.body keeps the parent untouched.
+            ToolbarItem(placement: .principal) {
+                ScanProgressBanner()
             }
             ToolbarItemGroup(placement: .topBarTrailing) {
                 if displayFolder != nil && !(displayFolder?.subfolders.isEmpty ?? true) {

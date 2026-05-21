@@ -36,28 +36,16 @@ actor WidgetSnapshotExporter {
         return f
     }()
 
-    /// One person whose linked contact's birthday is today. Pre-computed on
-    /// the main actor by `GalleryStore.exportWidgetSnapshot`, so the
-    /// exporter doesn't need access to `Contacts.framework` or the
-    /// `PersonLink` enum.
-    struct BirthdayResolution: Sendable, Hashable {
-        let tagFullPath: String
-        /// Preferred display name (full contact name, or the tag's leaf when
-        /// the contact has no usable name).
-        let displayName: String
-    }
-
     /// Inputs collected on the main actor before crossing into the actor.
+    /// `memories` should be the same list rendered by the in-app rail
+    /// (`GalleryStore.visibleMemories`) so widget taps always land on a
+    /// memory the app can resolve.
     struct Inputs: Sendable {
         let allPhotos: [PhotoFile]
         let memories: [Memory]
         let allTags: [TagSuggestion]
         let rootFolder: PhotoFolder?
         let leafFolders: [PhotoFolder]
-        /// People whose linked contact has a birthday matching today. Empty
-        /// when birthdays are disabled, Contacts permission isn't granted, or
-        /// nobody on file is celebrating today.
-        let todayBirthdays: [BirthdayResolution]
     }
 
     static let shared = WidgetSnapshotExporter()
@@ -92,7 +80,6 @@ actor WidgetSnapshotExporter {
         let memoryItems = buildMemoryItems(
             memories: inputs.memories,
             allPhotos: inputs.allPhotos,
-            todayBirthdays: inputs.todayBirthdays,
             folderIdByURL: folderIdByPhotoURL
         )
 
@@ -139,9 +126,9 @@ actor WidgetSnapshotExporter {
 
     /// Hex-encoded MD5 of every input that affects the published snapshot —
     /// photo identity *and* mutable fields (date, tags, folder), plus tag/
-    /// memory/folder/birthday inventories and the calendar day. Catches
-    /// equal-count edits (delete-one-add-one, retag, mtime bump) that the
-    /// previous count-only signature missed.
+    /// memory/folder inventories and the calendar day. Catches equal-count
+    /// edits (delete-one-add-one, retag, mtime bump) that the previous
+    /// count-only signature missed.
     private static func contentFingerprint(inputs: Inputs) -> String {
         var hasher = Insecure.MD5()
 
@@ -176,11 +163,6 @@ actor WidgetSnapshotExporter {
         for f in inputs.leafFolders.sorted(by: { $0.id.uuidString < $1.id.uuidString }) {
             let mod = f.dateModified.map { String($0.timeIntervalSince1970) } ?? "nil"
             hasher.update(data: Data("\(f.id.uuidString)|\(f.name)|\(mod)|\(f.photos.count)\n".utf8))
-        }
-
-        hasher.update(data: Data("birthdays:\n".utf8))
-        for b in inputs.todayBirthdays.sorted(by: { $0.tagFullPath < $1.tagFullPath }) {
-            hasher.update(data: Data("\(b.tagFullPath)|\(b.displayName)\n".utf8))
         }
 
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
@@ -243,10 +225,14 @@ actor WidgetSnapshotExporter {
 
     // MARK: - Memory snapshot
 
+    /// Direct projection of the in-app rail: every memory in `memories`
+    /// (assumed to be `GalleryStore.visibleMemories` order) becomes a
+    /// `MemorySnapshotItem` with the same id, so widget deep-links always
+    /// resolve to a memory the app can render. Priority comes from the
+    /// engine's own score so the rail's top entry is the widget's top entry.
     private func buildMemoryItems(
         memories: [Memory],
         allPhotos: [PhotoFile],
-        todayBirthdays: [BirthdayResolution],
         folderIdByURL: [URL: String]
     ) -> [MemorySnapshotItem] {
         let cal = Calendar.current
@@ -256,87 +242,31 @@ actor WidgetSnapshotExporter {
         let photoByID = Dictionary(uniqueKeysWithValues: allPhotos.map { ($0.id, $0) })
 
         var items: [MemorySnapshotItem] = []
-
-        // 1. App-generated memories with a dateRange covering today (the existing
-        //    `onThisDay` / `yearsAgo` slots already encode "valid today").
-        for memory in memories where memory.type == .onThisDay || memory.type == .yearsAgo {
+        for memory in memories {
             let refs = orderedRefs(for: memory, photoByID: photoByID, folderIdByURL: folderIdByURL)
             guard !refs.isEmpty else { continue }
-            let kind: MemorySnapshotKind = memory.type == .onThisDay ? .onThisDay : .yearsAgo
-            let priority: Int = memory.type == .yearsAgo ? 60 : 50
             items.append(MemorySnapshotItem(
                 id: memory.id,
-                kind: kind,
+                kind: snapshotKind(for: memory.type),
                 title: memory.title,
                 subtitle: memory.subtitle,
                 photoRefs: refs,
                 validFrom: startOfToday,
                 validTo: startOfTomorrow,
-                priority: priority
+                priority: Int(memory.score.rounded())
             ))
         }
-
-        // 2. Birthdays — synthesize a memory for every pre-resolved entry.
-        //    The main app filtered out unlinked / disabled / non-matching
-        //    people already, so we just emit one item per resolution. We
-        //    build the tag→photos index once and key it on lowercased
-        //    fullPath, matching the convention used elsewhere in the app
-        //    (`GalleryStore._photosForTag`) — so case-only differences
-        //    between the canonical tag list and a photo's raw XMP entry
-        //    don't drop photos.
-        if !todayBirthdays.isEmpty {
-            var photosByTag: [String: [PhotoFile]] = [:]
-            for photo in allPhotos {
-                for tag in photo.hierarchicalTags {
-                    photosByTag[tag.fullPath.lowercased(), default: []].append(photo)
-                }
-            }
-            for resolution in todayBirthdays {
-                let photos = photosByTag[resolution.tagFullPath.lowercased()] ?? []
-                guard !photos.isEmpty else { continue }
-                let sorted = photos.sorted { ($0.dateTaken ?? .distantPast) > ($1.dateTaken ?? .distantPast) }
-                let refs = Array(sorted.prefix(12)).map { makeRef(photo: $0, folderIdByURL: folderIdByURL) }
-                let dates = photos.compactMap(\.dateTaken).sorted()
-                let dateRange: ClosedRange<Date>? = (dates.first).flatMap { first in
-                    dates.last.map { first...$0 }
-                }
-                items.append(MemorySnapshotItem(
-                    id: "birthday-" + resolution.tagFullPath,
-                    kind: .birthday,
-                    title: "Happy birthday, \(resolution.displayName)",
-                    subtitle: MemoryEngine.subtitleWithCount(dateRange: dateRange, count: photos.count),
-                    photoRefs: refs,
-                    validFrom: startOfToday,
-                    validTo: startOfTomorrow,
-                    priority: 100
-                ))
-            }
-        }
-
-        // 3. Fallback: use the first trip/person/folder/density memory so the widget
-        //    always shows real content. Opt-in so new MemoryTypes don't silently
-        //    appear here without a deliberate decision.
-        if items.isEmpty {
-            let evergreen: Set<MemoryType> = [.trip, .personOverTime, .folderEvent, .photoDensity, .birthday]
-            let fallback = memories.first { evergreen.contains($0.type) }
-            if let fallback {
-                let refs = orderedRefs(for: fallback, photoByID: photoByID, folderIdByURL: folderIdByURL)
-                if !refs.isEmpty {
-                    items.append(MemorySnapshotItem(
-                        id: fallback.id,
-                        kind: .other,
-                        title: fallback.title,
-                        subtitle: fallback.subtitle,
-                        photoRefs: refs,
-                        validFrom: startOfToday,
-                        validTo: startOfTomorrow,
-                        priority: 10
-                    ))
-                }
-            }
-        }
-
         return items.sorted { $0.priority > $1.priority }
+    }
+
+    private func snapshotKind(for type: MemoryType) -> MemorySnapshotKind {
+        switch type {
+        case .onThisDay:   return .onThisDay
+        case .yearsAgo:    return .yearsAgo
+        case .birthday:    return .birthday
+        case .trip, .folderEvent, .photoDensity, .personOverTime:
+            return .other
+        }
     }
 
     private func orderedRefs(

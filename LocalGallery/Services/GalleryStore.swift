@@ -1190,27 +1190,10 @@ final class GalleryStore {
     /// Cheap to call: the exporter de-duplicates work and only re-encodes
     /// thumbnails whose source files changed.
     ///
-    /// Birthday resolution happens here on the main actor — we walk every
-    /// People/* tag through `effectiveContact(forPersonPath:displayName:)` so
-    /// both manual links and the auto-match-by-name fallback are honored,
-    /// keeping `Contacts.framework` out of the exporter.
+    /// We pass `visibleMemories` verbatim so the widget rail mirrors the
+    /// in-app rail — every widget item id resolves to a memory the app can
+    /// open.
     func exportWidgetSnapshot() {
-        let cal = Calendar.current
-        let today = cal.dateComponents([.month, .day], from: clock.now())
-        var birthdays: [WidgetSnapshotExporter.BirthdayResolution] = []
-        if birthdayMemoriesEnabled {
-            for tag in allTags where tag.namespace?.lowercased() == "people" {
-                if hiddenPeople.contains(tag.fullPath) { continue }
-                guard let contact = effectiveContact(forPersonPath: tag.fullPath, displayName: tag.displayName),
-                      let birthday = contact.birthday,
-                      birthday.month == today.month, birthday.day == today.day else { continue }
-                let displayName = contact.fullName == "(No name)" ? tag.displayName : contact.fullName
-                birthdays.append(WidgetSnapshotExporter.BirthdayResolution(
-                    tagFullPath: tag.fullPath,
-                    displayName: displayName
-                ))
-            }
-        }
         // Widgets read from the App Group container in a separate process —
         // file-provider placeholders are not guaranteed readable there. Drop
         // them so the widget never tries to render bytes that aren't local.
@@ -1225,8 +1208,7 @@ final class GalleryStore {
             memories: visibleMemories,
             allTags: allTags,
             rootFolder: rootFolder,
-            leafFolders: _cachedLeafFolders,
-            todayBirthdays: birthdays
+            leafFolders: _cachedLeafFolders
         ))
     }
 

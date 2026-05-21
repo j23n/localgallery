@@ -103,9 +103,14 @@ struct MemorySlideshowView: View {
         .photoShareSheet(request: $shareRequest)
         .onAppear {
             OrientationLock.lock(.portrait, rotateTo: .portrait)
-            audio.play(theme: theme)
             startTimer()
             store.markMemorySeen(memory.id)
+        }
+        .task {
+            // Off the first-frame path: the synth + engine startup can stall
+            // main for several hundred ms when the theme's PCM cache is
+            // missing (cold install, or NSCachesDirectory got purged).
+            await audio.play(theme: theme)
         }
         .onDisappear {
             OrientationLock.lock(.all)
@@ -195,7 +200,10 @@ struct MemorySlideshowView: View {
                     Menu {
                         Picker("Music", selection: Binding(
                             get: { theme },
-                            set: { storedTheme = $0.rawValue; audio.play(theme: $0) }
+                            set: { newTheme in
+                                storedTheme = newTheme.rawValue
+                                Task { await audio.play(theme: newTheme) }
+                            }
                         )) {
                             ForEach(SlideshowMusicTheme.allCases) { t in
                                 Text(t.displayName).tag(t)
@@ -367,11 +375,18 @@ private struct SlideshowImage: View {
     let size: CGSize
     @Environment(GalleryStore.self) private var store
     @State private var image: UIImage?
+    /// Sync hit on the in-memory thumbnail cache. Shown under the full-res
+    /// image so the canvas isn't black during the 2000px decode — matters
+    /// especially for the first slide, whose full image is never pre-decoded
+    /// elsewhere (only the memory card's cover thumbnail is).
+    @State private var placeholder: UIImage?
 
     var body: some View {
         ZStack {
             if let image {
                 renderedImage(image)
+            } else if let placeholder {
+                renderedImage(placeholder)
             } else {
                 Color.black
             }
@@ -379,6 +394,7 @@ private struct SlideshowImage: View {
         .frame(width: size.width, height: size.height)
         .clipped()
         .task(id: url) {
+            placeholder = store.cachedThumbnail(for: url)
             image = await store.loadFullImage(for: url)
         }
     }
@@ -413,8 +429,8 @@ private struct SlideshowImage: View {
 final class SlideshowAudioController {
     private let player = SlideshowMusicPlayer()
 
-    func play(theme: SlideshowMusicTheme) {
-        player.play(theme: theme)
+    func play(theme: SlideshowMusicTheme) async {
+        await player.play(theme: theme)
     }
 
     func stop() {

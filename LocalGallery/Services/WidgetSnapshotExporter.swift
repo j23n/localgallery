@@ -36,16 +36,32 @@ actor WidgetSnapshotExporter {
         return f
     }()
 
+    /// A `Memory` plus the day window during which the widget should surface
+    /// it. Used for calendar-tied memories the engine can produce in advance
+    /// (onThisDay, yearsAgo, birthdays) so the widget stays correct even if
+    /// the app isn't launched for several days. When the user finally opens
+    /// the app on the matching day, foreground catch-up regenerates `Memory`
+    /// with the same id, so the widget deep link still resolves.
+    struct ScheduledMemory: Sendable, Hashable {
+        let memory: Memory
+        let validFrom: Date
+        let validTo: Date
+    }
+
     /// Inputs collected on the main actor before crossing into the actor.
     /// `memories` should be the same list rendered by the in-app rail
     /// (`GalleryStore.visibleMemories`) so widget taps always land on a
-    /// memory the app can resolve.
+    /// memory the app can resolve. `scheduled` carries future-dated
+    /// calendar-tied items (onThisDay/yearsAgo/birthdays for the next ~week)
+    /// that the widget rotates to on their day without needing a fresh app
+    /// launch.
     struct Inputs: Sendable {
         let allPhotos: [PhotoFile]
         let memories: [Memory]
         let allTags: [TagSuggestion]
         let rootFolder: PhotoFolder?
         let leafFolders: [PhotoFolder]
+        let scheduled: [ScheduledMemory]
     }
 
     static let shared = WidgetSnapshotExporter()
@@ -79,6 +95,7 @@ actor WidgetSnapshotExporter {
 
         let memoryItems = buildMemoryItems(
             memories: inputs.memories,
+            scheduled: inputs.scheduled,
             allPhotos: inputs.allPhotos,
             folderIdByURL: folderIdByPhotoURL
         )
@@ -165,6 +182,15 @@ actor WidgetSnapshotExporter {
             hasher.update(data: Data("\(f.id.uuidString)|\(f.name)|\(mod)|\(f.photos.count)\n".utf8))
         }
 
+        hasher.update(data: Data("scheduled:\n".utf8))
+        let scheduledSorted = inputs.scheduled.sorted { lhs, rhs in
+            if lhs.validFrom != rhs.validFrom { return lhs.validFrom < rhs.validFrom }
+            return lhs.memory.id < rhs.memory.id
+        }
+        for s in scheduledSorted {
+            hasher.update(data: Data("\(s.memory.id)|\(s.validFrom.timeIntervalSince1970)|\(s.memory.photoIDs.count)\n".utf8))
+        }
+
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
@@ -230,8 +256,14 @@ actor WidgetSnapshotExporter {
     /// `MemorySnapshotItem` with the same id, so widget deep-links always
     /// resolve to a memory the app can render. Priority comes from the
     /// engine's own score so the rail's top entry is the widget's top entry.
+    ///
+    /// `scheduled` adds future-dated calendar-tied items (onThisDay,
+    /// yearsAgo, birthdays for the next few days) with per-item validity
+    /// windows so the widget can rotate to them on their day even if the
+    /// app isn't opened in between.
     private func buildMemoryItems(
         memories: [Memory],
+        scheduled: [ScheduledMemory],
         allPhotos: [PhotoFile],
         folderIdByURL: [URL: String]
     ) -> [MemorySnapshotItem] {
@@ -254,6 +286,20 @@ actor WidgetSnapshotExporter {
                 validFrom: startOfToday,
                 validTo: startOfTomorrow,
                 priority: Int(memory.score.rounded())
+            ))
+        }
+        for entry in scheduled {
+            let refs = orderedRefs(for: entry.memory, photoByID: photoByID, folderIdByURL: folderIdByURL)
+            guard !refs.isEmpty else { continue }
+            items.append(MemorySnapshotItem(
+                id: entry.memory.id,
+                kind: snapshotKind(for: entry.memory.type),
+                title: entry.memory.title,
+                subtitle: entry.memory.subtitle,
+                photoRefs: refs,
+                validFrom: entry.validFrom,
+                validTo: entry.validTo,
+                priority: Int(entry.memory.score.rounded())
             ))
         }
         return items.sorted { $0.priority > $1.priority }

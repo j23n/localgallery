@@ -595,11 +595,26 @@ struct PhotoViewerView: View {
 
     // MARK: Filmstrip
 
+    /// Half-width of the filmstrip window. The strip materialises a slice of
+    /// `photos` centred on `currentPhotoID` (2*window + 1 items) rather than
+    /// the full array — at 20k photos, ForEach identity bookkeeping and
+    /// `ScrollViewReader.scrollTo` over the entire LazyHStack add hundreds of
+    /// milliseconds to viewer presentation.
+    private static let filmstripWindow = 50
+
+    private var filmstripPhotos: ArraySlice<PhotoFile> {
+        guard !photos.isEmpty else { return photos.prefix(0) }
+        let curIdx = currentIndex ?? 0
+        let lower = max(0, curIdx - Self.filmstripWindow)
+        let upper = min(photos.count, curIdx + Self.filmstripWindow + 1)
+        return photos[lower..<upper]
+    }
+
     private var filmstrip: some View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: 4) {
-                    ForEach(photos) { photo in
+                    ForEach(filmstripPhotos) { photo in
                         Button {
                             withAnimation(.easeOut(duration: 0.2)) {
                                 currentPhotoID = photo.id

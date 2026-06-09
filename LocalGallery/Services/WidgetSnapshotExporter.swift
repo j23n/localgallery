@@ -23,8 +23,12 @@ actor WidgetSnapshotExporter {
     private static let thumbQuality: CGFloat = 0.85
     /// Cap parallel `CGImageSourceCreateThumbnailAtIndex` decodes during thumb
     /// generation. With 500 photos in the index pool a first-run could otherwise
-    /// spawn 500 simultaneous decoders and pin a phone's CPU.
-    private static let thumbnailConcurrency = 8
+    /// spawn 500 simultaneous decoders and pin a phone's CPU. Kept at 4 to match
+    /// `ThumbnailService`'s decode gate: higher fan-out exhausts the shared
+    /// IOSurface pool when an export overlaps grid scrolling, surfacing as a
+    /// flood of `CMPhotoJFIFUtilities -17102` / `IOSurface creation failed`
+    /// errors and dropped (`-50`) thumbnails.
+    private static let thumbnailConcurrency = 4
 
     /// Day-only formatter reused across exports — `ISO8601DateFormatter()` is
     /// expensive to allocate, and we only need a stable date string for the
@@ -377,9 +381,12 @@ actor WidgetSnapshotExporter {
             // Bake EXIF orientation into the pixels so the JPEG we write below
             // is "born upright" and the widget extension doesn't need to apply
             // a transform at read time.
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceShouldCacheImmediately: true
+            kCGImageSourceCreateThumbnailWithTransform: true
         ]
+        // No `kCGImageSourceShouldCacheImmediately`: the `opaqueCopy()` redraw
+        // below forces the decode anyway (into a malloc-backed context), so the
+        // eager flag would only add a second IOSurface-backed buffer per photo
+        // and worsen pool pressure during a large export.
         guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, thumbOpts as CFDictionary) else { return }
 
         // Encode JPEG via CGImageDestination instead of routing through
@@ -402,7 +409,10 @@ actor WidgetSnapshotExporter {
         let destProps: [CFString: Any] = [
             kCGImageDestinationLossyCompressionQuality: thumbQuality
         ]
-        CGImageDestinationAddImage(destination, cg, destProps as CFDictionary)
+        // Flatten the thumbnail's `premultipliedLast` alpha before encoding so
+        // ImageIO doesn't log "save an opaque image with 'AlphaPremulLast'" for
+        // every widget thumbnail (JPEG drops the channel regardless).
+        CGImageDestinationAddImage(destination, cg.opaqueCopy(), destProps as CFDictionary)
         guard CGImageDestinationFinalize(destination) else {
             try? fm.removeItem(at: tmp)
             return

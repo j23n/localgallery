@@ -109,7 +109,10 @@ enum PhotoExporter {
             throw ExportError.writeFailed
         }
         let destOptions: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: quality.jpegQuality]
-        CGImageDestinationAddImage(dest, cgImage, destOptions as CFDictionary)
+        // Flatten the thumbnail's `premultipliedLast` alpha before encoding so
+        // ImageIO doesn't log the "save an opaque image with 'AlphaPremulLast'"
+        // warning (JPEG can't carry alpha; the channel is dropped regardless).
+        CGImageDestinationAddImage(dest, cgImage.opaqueCopy(), destOptions as CFDictionary)
         guard CGImageDestinationFinalize(dest) else {
             throw ExportError.writeFailed
         }

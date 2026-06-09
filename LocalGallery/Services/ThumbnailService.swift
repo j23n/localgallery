@@ -265,10 +265,11 @@ final class ThumbnailService {
     /// — both main-thread-asserting on iOS 26 — and this helper runs from
     /// `nonisolated static` thumbnail-decode paths on the cooperative pool.
     /// Off-main entry would trip `_dispatch_assert_queue_fail` and crash.
-    /// `CGImageDestination` handles alpha implicitly for JPEG output (the
-    /// format can't represent alpha, so the destination drops the channel),
-    /// which is exactly the "flatten onto opaque" behavior we wanted from
-    /// the original UIGraphicsImageRenderer roundtrip — minus the UIKit hop.
+    ///
+    /// CGImageSource thumbnails come back tagged `premultipliedLast`, so we
+    /// flatten to an opaque bitmap via `opaqueCopy()` before handing the image
+    /// to the destination — otherwise ImageIO logs a "trying to save an opaque
+    /// image with 'AlphaPremulLast' … ignoring alpha" warning on every write.
     private nonisolated static func opaqueJPEGData(from cgImage: CGImage, quality: CGFloat) -> Data? {
         let data = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(
@@ -278,7 +279,7 @@ final class ThumbnailService {
             nil
         ) else { return nil }
         let props: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: quality]
-        CGImageDestinationAddImage(destination, cgImage, props as CFDictionary)
+        CGImageDestinationAddImage(destination, cgImage.opaqueCopy(), props as CFDictionary)
         guard CGImageDestinationFinalize(destination) else { return nil }
         return data as Data
     }

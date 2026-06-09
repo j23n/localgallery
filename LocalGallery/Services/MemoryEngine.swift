@@ -37,6 +37,144 @@ enum MemoryEngine {
         return "\(formatDateRange(range.lowerBound, range.upperBound)) · \(countText)"
     }
 
+    // MARK: - Similar-photo dedup
+
+    /// Drops near-duplicate photos from a chronologically-sorted memory feed:
+    /// keep the first photo in any rolling `windowSeconds` window. Burst
+    /// shots (3–10 frames in a few seconds) collapse to a single
+    /// representative, and the slideshow stops dwelling on the same scene.
+    static let memoryDedupWindow: TimeInterval = 60
+
+    /// Returns `sorted` with any entry that lands within `windowSeconds` of
+    /// the previously kept entry removed. `sorted` is expected to be
+    /// ascending by date.
+    static func dedupByTimeWindow(
+        _ sorted: [(PhotoFile, Date)],
+        windowSeconds: TimeInterval = memoryDedupWindow
+    ) -> [(PhotoFile, Date)] {
+        var out: [(PhotoFile, Date)] = []
+        out.reserveCapacity(sorted.count)
+        var lastKept: Date?
+        for entry in sorted {
+            if let last = lastKept, entry.1.timeIntervalSince(last) < windowSeconds {
+                continue
+            }
+            out.append(entry)
+            lastKept = entry.1
+        }
+        return out
+    }
+
+    /// Same as `dedupByTimeWindow` but for plain `PhotoFile` arrays where
+    /// the date lives on the photo itself. Photos without a `dateTaken`
+    /// pass through unchanged (no signal to dedup against).
+    static func dedupByTimeWindow(
+        _ photos: [PhotoFile],
+        windowSeconds: TimeInterval = memoryDedupWindow
+    ) -> [PhotoFile] {
+        var out: [PhotoFile] = []
+        out.reserveCapacity(photos.count)
+        var lastKept: Date?
+        for photo in photos {
+            guard let date = photo.dateTaken else {
+                out.append(photo)
+                continue
+            }
+            if let last = lastKept, date.timeIntervalSince(last) < windowSeconds {
+                continue
+            }
+            out.append(photo)
+            lastKept = date
+        }
+        return out
+    }
+
+    // MARK: - Calendar-tied generators (per-day, deterministic)
+
+    /// `OnThisDay` for an arbitrary `day`. Same logic the main pipeline runs
+    /// for today — extracted so the widget exporter can pre-compute upcoming
+    /// days and surface them without waiting for the app to be relaunched on
+    /// the matching date. Returns `nil` when the photo set is too thin to
+    /// meet `minPhotos`.
+    static func generateOnThisDay(
+        for day: Date,
+        in photosWithDates: [(PhotoFile, Date)],
+        calendar: Calendar,
+        minPhotos: Int = 10
+    ) -> Memory? {
+        let dayComps = calendar.dateComponents([.month, .day], from: day)
+        let currentYear = calendar.component(.year, from: day)
+        let raw = photosWithDates.filter { (_, date) in
+            let c = calendar.dateComponents([.month, .day, .year], from: date)
+            return c.month == dayComps.month && c.day == dayComps.day && c.year != currentYear
+        }.sorted { $0.1 < $1.1 }
+        let deduped = dedupByTimeWindow(raw)
+        guard deduped.count >= minPhotos else {
+            if !raw.isEmpty {
+                Log.memory.debug("OnThisDay (\(Log.r.other(Self.iso8601Day.string(from: day)))): only \(deduped.count) after dedup; need \(minPhotos) (raw=\(raw.count))")
+            }
+            return nil
+        }
+        let years = Set(deduped.map { calendar.component(.year, from: $0.1) })
+        let ids = deduped.map(\.0.id)
+        Log.memory.info("OnThisDay (\(Log.r.other(Self.iso8601Day.string(from: day)))): \(ids.count) photos across \(years.count) years (deduped from \(raw.count))")
+        return Memory(
+            id: "onThisDay", type: .onThisDay,
+            title: "On this day",
+            subtitle: nil,
+            photoIDs: ids,
+            coverPhotoID: ids[ids.count / 2],
+            dateRange: deduped.first!.1...deduped.last!.1,
+            score: 50.0 + Double(years.count) * 5.0,
+            yearsAgo: nil, personName: nil
+        )
+    }
+
+    /// `YearsAgo` memories for an arbitrary `day`, one per milestone year
+    /// that has enough photos. Same logic the main pipeline runs for today —
+    /// extracted so the widget exporter can pre-compute upcoming days.
+    static func generateYearsAgo(
+        for day: Date,
+        in photosWithDates: [(PhotoFile, Date)],
+        calendar: Calendar,
+        minPhotos: Int = 10
+    ) -> [Memory] {
+        let dayComps = calendar.dateComponents([.month, .day], from: day)
+        var out: [Memory] = []
+        for milestone in [1, 2, 3, 5, 10, 15, 20] {
+            guard let targetDate = calendar.date(byAdding: .year, value: -milestone, to: day) else { continue }
+            let targetYear = calendar.component(.year, from: targetDate)
+            let raw = photosWithDates.filter { (_, date) in
+                let c = calendar.dateComponents([.month, .day, .year], from: date)
+                return c.month == dayComps.month && c.day == dayComps.day && c.year == targetYear
+            }.sorted { $0.1 < $1.1 }
+            let deduped = dedupByTimeWindow(raw)
+            guard deduped.count >= minPhotos,
+                  let first = deduped.first?.1, let last = deduped.last?.1 else { continue }
+            let ids = deduped.map(\.0.id)
+            out.append(Memory(
+                id: "yearsAgo-\(milestone)", type: .yearsAgo,
+                title: "On this day in \(targetYear)",
+                subtitle: nil,
+                photoIDs: ids,
+                coverPhotoID: ids[ids.count / 2],
+                dateRange: first...last,
+                score: milestone >= 10 ? 45.0 : milestone >= 5 ? 40.0 : 35.0,
+                yearsAgo: milestone, personName: nil
+            ))
+        }
+        return out
+    }
+
+    /// Day-only ISO formatter used by the calendar-generator log lines.
+    /// `nonisolated(unsafe)` because `ISO8601DateFormatter` is documented
+    /// thread-safe and we want one shared instance.
+    private nonisolated(unsafe) static let iso8601Day: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withFullDate]
+        return f
+    }()
+
     // MARK: - Cluster Key
 
     /// Memories that share a cluster key are mutually exclusive in a single
@@ -94,7 +232,6 @@ enum MemoryEngine {
             let calendar = Calendar.current
             let today = now
             let todayComponents = calendar.dateComponents([.month, .day], from: today)
-            let currentYear = calendar.component(.year, from: today)
             let currentMonthYear = calendar.dateComponents([.month, .year], from: today)
             var candidates: [Memory] = []
             let minPhotos = 15
@@ -108,68 +245,35 @@ enum MemoryEngine {
             Log.memory.info("Pipeline: \(allPhotos.count) photos (\(photosWithDates.count) with dates), \(leafFolders.count) leaf folders, \(contacts.count) contacts, seed='\(seed)', seen=\(seenMemoryIDs.count) IDs, me='\(Log.r.person(mePersonPath))'")
 
             // === 1. On This Day ===
-            let onThisDay = photosWithDates.filter { (_, date) in
-                let c = calendar.dateComponents([.month, .day, .year], from: date)
-                return c.month == todayComponents.month && c.day == todayComponents.day && c.year != currentYear
-            }.sorted { $0.1 < $1.1 }
-
-            if onThisDay.count >= minOnThisDayPhotos {
-                let years = Set(onThisDay.map { calendar.component(.year, from: $0.1) })
-                let ids = onThisDay.map(\.0.id)
-                candidates.append(Memory(
-                    id: "onThisDay", type: .onThisDay,
-                    title: "On this day",
-                    subtitle: nil,
-                    photoIDs: ids,
-                    coverPhotoID: ids[ids.count / 2],
-                    dateRange: onThisDay.first!.1...onThisDay.last!.1,
-                    score: 50.0 + Double(years.count) * 5.0,
-                    yearsAgo: nil, personName: nil
-                ))
-                Log.memory.info("OnThisDay: \(ids.count) photos across \(years.count) years")
-            } else if !onThisDay.isEmpty {
-                Log.memory.debug("OnThisDay: only \(onThisDay.count) photos (need \(minOnThisDayPhotos))")
+            if let memory = generateOnThisDay(
+                for: today,
+                in: photosWithDates,
+                calendar: calendar,
+                minPhotos: minOnThisDayPhotos
+            ) {
+                candidates.append(memory)
             }
 
             // === 2. X Years Ago ===
-            // Strict month + day + year match so the "On this day in YYYY"
-            // title reflects the actual photo set.
-            var yearsAgoCount = 0
-            for milestone in [1, 2, 3, 5, 10, 15, 20] {
-                guard let targetDate = calendar.date(byAdding: .year, value: -milestone, to: today) else { continue }
-                let targetYear = calendar.component(.year, from: targetDate)
-
-                let window = photosWithDates.filter { (_, date) in
-                    let c = calendar.dateComponents([.month, .day, .year], from: date)
-                    return c.month == todayComponents.month && c.day == todayComponents.day && c.year == targetYear
-                }.sorted { $0.1 < $1.1 }
-                guard window.count >= minOnThisDayPhotos,
-                      let first = window.first?.1, let last = window.last?.1 else { continue }
-
-                let ids = window.map(\.0.id)
-                candidates.append(Memory(
-                    id: "yearsAgo-\(milestone)", type: .yearsAgo,
-                    title: "On this day in \(targetYear)",
-                    subtitle: nil,
-                    photoIDs: ids,
-                    coverPhotoID: ids[ids.count / 2],
-                    dateRange: first...last,
-                    score: milestone >= 10 ? 45.0 : milestone >= 5 ? 40.0 : 35.0,
-                    yearsAgo: milestone, personName: nil
-                ))
-                yearsAgoCount += 1
-            }
-            Log.memory.info("YearsAgo: produced \(yearsAgoCount) memories")
+            let yearsAgo = generateYearsAgo(
+                for: today,
+                in: photosWithDates,
+                calendar: calendar,
+                minPhotos: minOnThisDayPhotos
+            )
+            candidates.append(contentsOf: yearsAgo)
+            Log.memory.info("YearsAgo: produced \(yearsAgo.count) memories")
 
             // === 3. (Person-over-time memories removed — only birthdays surface people now)
 
             // === 4. Folder-based Event Memories ===
             var folderEventCount = 0
             for folder in leafFolders {
-                let withDates = folder.photos.compactMap { photo -> (PhotoFile, Date)? in
+                let withDatesRaw = folder.photos.compactMap { photo -> (PhotoFile, Date)? in
                     guard let date = photo.dateTaken else { return nil }
                     return (photo, date)
                 }.sorted { $0.1 < $1.1 }
+                let withDates = dedupByTimeWindow(withDatesRaw)
                 guard withDates.count >= minPhotos,
                       let first = withDates.first?.1, let last = withDates.last?.1,
                       calendar.dateComponents([.month, .year], from: last) != currentMonthYear
@@ -206,7 +310,7 @@ enum MemoryEngine {
                       calendar.dateComponents([.month, .year], from: dayDate) != currentMonthYear
                 else { continue }
 
-                let sorted = dayEntries.sorted { $0.1 < $1.1 }
+                let sorted = dedupByTimeWindow(dayEntries.sorted { $0.1 < $1.1 })
                 let ids = sorted.map(\.0.id)
                 guard let first = sorted.first?.1, let last = sorted.last?.1 else { continue }
                 let dayKey = "\(dayComp.year ?? 0)-\(dayComp.month ?? 0)-\(dayComp.day ?? 0)"
@@ -471,9 +575,10 @@ enum MemoryEngine {
 
             // Sort by date when available; undated photos go to the end so the
             // cover (most recent) prefers a real timestamp.
-            let sorted = bundle.photos.sorted { a, b in
+            let sortedRaw = bundle.photos.sorted { a, b in
                 (a.dateTaken ?? .distantPast) < (b.dateTaken ?? .distantPast)
             }
+            let sorted = dedupByTimeWindow(sortedRaw)
             let ids = sorted.map(\.id)
             guard let coverID = ids.last else { continue }
 
@@ -668,8 +773,9 @@ enum MemoryEngine {
         into candidates: inout [Memory]
     ) {
         guard entries.count >= 15 else { return }
-        let sorted = entries.sorted { $0.1 < $1.1 }
-        guard let first = sorted.first?.1, let last = sorted.last?.1 else { return }
+        let sorted = dedupByTimeWindow(entries.sorted { $0.1 < $1.1 })
+        guard sorted.count >= 15,
+              let first = sorted.first?.1, let last = sorted.last?.1 else { return }
 
         let currentMonthYear = calendar.dateComponents([.month, .year], from: today)
         guard calendar.dateComponents([.month, .year], from: last) != currentMonthYear else { return }

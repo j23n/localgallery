@@ -1190,27 +1190,16 @@ final class GalleryStore {
     /// Cheap to call: the exporter de-duplicates work and only re-encodes
     /// thumbnails whose source files changed.
     ///
-    /// Birthday resolution happens here on the main actor — we walk every
-    /// People/* tag through `effectiveContact(forPersonPath:displayName:)` so
-    /// both manual links and the auto-match-by-name fallback are honored,
-    /// keeping `Contacts.framework` out of the exporter.
+    /// We pass `visibleMemories` verbatim so the widget rail mirrors the
+    /// in-app rail — every widget item id resolves to a memory the app can
+    /// open. Calendar-tied memories (`onThisDay`, `yearsAgo`, birthdays)
+    /// for the next `scheduledMemoryHorizonDays` days are computed up-front
+    /// so the widget can rotate to them on their day even if the app isn't
+    /// relaunched in between. Each scheduled item carries its own validity
+    /// window; when the user finally opens the app on the matching day,
+    /// foreground catch-up regenerates a memory with the same id so the
+    /// widget deep link resolves.
     func exportWidgetSnapshot() {
-        let cal = Calendar.current
-        let today = cal.dateComponents([.month, .day], from: clock.now())
-        var birthdays: [WidgetSnapshotExporter.BirthdayResolution] = []
-        if birthdayMemoriesEnabled {
-            for tag in allTags where tag.namespace?.lowercased() == "people" {
-                if hiddenPeople.contains(tag.fullPath) { continue }
-                guard let contact = effectiveContact(forPersonPath: tag.fullPath, displayName: tag.displayName),
-                      let birthday = contact.birthday,
-                      birthday.month == today.month, birthday.day == today.day else { continue }
-                let displayName = contact.fullName == "(No name)" ? tag.displayName : contact.fullName
-                birthdays.append(WidgetSnapshotExporter.BirthdayResolution(
-                    tagFullPath: tag.fullPath,
-                    displayName: displayName
-                ))
-            }
-        }
         // Widgets read from the App Group container in a separate process —
         // file-provider placeholders are not guaranteed readable there. Drop
         // them so the widget never tries to render bytes that aren't local.
@@ -1220,14 +1209,80 @@ final class GalleryStore {
             case .remote(let downloaded): return downloaded
             }
         }
+        let scheduled = computeScheduledMemories(photos: widgetPhotos)
         widgetExport.schedule(WidgetSnapshotExporter.Inputs(
             allPhotos: widgetPhotos,
             memories: visibleMemories,
             allTags: allTags,
             rootFolder: rootFolder,
             leafFolders: _cachedLeafFolders,
-            todayBirthdays: birthdays
+            scheduled: scheduled
         ))
+    }
+
+    /// How far ahead to pre-publish calendar-tied memories into the widget
+    /// snapshot. 7 days covers a typical "user opens the app weekly" cadence
+    /// without bloating thumbnail storage.
+    private static let scheduledMemoryHorizonDays = 7
+
+    /// Pre-compute the next `scheduledMemoryHorizonDays` days of calendar-
+    /// tied memories (onThisDay, yearsAgo, birthdays) so the widget can
+    /// surface them on the matching day without waiting for the next app
+    /// launch. Excludes day 0 — that's already in `visibleMemories`.
+    ///
+    /// Photos get bucketed by (month, day) once up-front so each day's
+    /// onThisDay/yearsAgo filter walks a small candidate set instead of the
+    /// full library — keeps the main-actor cost flat for large libraries.
+    private func computeScheduledMemories(photos: [PhotoFile]) -> [WidgetSnapshotExporter.ScheduledMemory] {
+        let cal = Calendar.current
+        let today = cal.startOfDay(for: clock.now())
+
+        let photosWithDates = photos.compactMap { photo -> (PhotoFile, Date)? in
+            guard let date = photo.dateTaken else { return nil }
+            return (photo, date)
+        }
+        var byMonthDay: [DateComponents: [(PhotoFile, Date)]] = [:]
+        for entry in photosWithDates {
+            let key = cal.dateComponents([.month, .day], from: entry.1)
+            byMonthDay[key, default: []].append(entry)
+        }
+
+        var out: [WidgetSnapshotExporter.ScheduledMemory] = []
+        for offset in 1...Self.scheduledMemoryHorizonDays {
+            guard let day = cal.date(byAdding: .day, value: offset, to: today) else { continue }
+            let nextDay = cal.date(byAdding: .day, value: 1, to: day) ?? day.addingTimeInterval(86400)
+            let dayComps = cal.dateComponents([.month, .day], from: day)
+            let bucket = byMonthDay[dayComps] ?? []
+
+            var dayMemories: [Memory] = []
+            if let m = MemoryEngine.generateOnThisDay(for: day, in: bucket, calendar: cal) {
+                dayMemories.append(m)
+            }
+            dayMemories.append(contentsOf: MemoryEngine.generateYearsAgo(for: day, in: bucket, calendar: cal))
+            if birthdayMemoriesEnabled {
+                // Birthdays walk all photos by People/* tag rather than by
+                // date bucket, so we pass `photos` directly.
+                MemoryEngine.generateBirthdayMemories(
+                    from: photos,
+                    contacts: contacts,
+                    links: personContactLinks,
+                    lowerNameIndex: contactLinker.contactsByLowerName,
+                    calendar: cal,
+                    todayComponents: dayComps,
+                    hiddenPeople: hiddenPeople,
+                    into: &dayMemories
+                )
+            }
+
+            for memory in dayMemories where !hiddenMemories.contains(memory.id) {
+                out.append(WidgetSnapshotExporter.ScheduledMemory(
+                    memory: memory,
+                    validFrom: day,
+                    validTo: nextDay
+                ))
+            }
+        }
+        return out
     }
 
     var leafFolders: [PhotoFolder] { _cachedLeafFolders }

@@ -427,10 +427,24 @@ final class SlideshowMusicPlayer {
         engine.mainMixerNode.outputVolume = 0.18
     }
 
-    func play(theme: SlideshowMusicTheme) {
+    /// Async so the buffer load (potentially a cold synth render on cache
+    /// miss) happens on a background task rather than blocking the main
+    /// actor — the slideshow's first frame paints while we're still
+    /// rendering audio. Engine.start + `scheduleBuffer + play` still run on
+    /// main once the samples are ready.
+    func play(theme: SlideshowMusicTheme) async {
         if currentTheme == theme && isRunning { return }
         currentTheme = theme
-        guard let buffer = loadOrSynthBuffer(for: theme) else { return }
+        let sampleRate = format.sampleRate
+        let samples = await Task.detached(priority: .userInitiated) { () -> [Float]? in
+            if let cached = SlideshowMusicCache.loadSamples(for: theme) {
+                return cached
+            }
+            let rendered = SlideshowMusicSynth.render(theme: theme, sampleRate: sampleRate)
+            SlideshowMusicCache.write(samples: rendered, for: theme)
+            return rendered
+        }.value
+        guard let samples, let buffer = makeBuffer(from: samples) else { return }
         if !engine.isRunning {
             do { try engine.start() } catch { return }
         }
@@ -444,18 +458,6 @@ final class SlideshowMusicPlayer {
         player.stop()
         engine.stop()
         isRunning = false
-    }
-
-    /// Disk-backed first, in-line synth as fallback. Caches the synthesized
-    /// samples so the next slideshow open doesn't re-render either.
-    private func loadOrSynthBuffer(for theme: SlideshowMusicTheme) -> AVAudioPCMBuffer? {
-        if let samples = SlideshowMusicCache.loadSamples(for: theme),
-           let buffer = makeBuffer(from: samples) {
-            return buffer
-        }
-        let samples = SlideshowMusicSynth.render(theme: theme, sampleRate: format.sampleRate)
-        SlideshowMusicCache.write(samples: samples, for: theme)
-        return makeBuffer(from: samples)
     }
 
     private func makeBuffer(from samples: [Float]) -> AVAudioPCMBuffer? {

@@ -643,14 +643,72 @@ final class GalleryStore {
 
     private func performScan(at url: URL, kind: ScanKind, silent: Bool) async {
         let resolved = resolvedScanKind(for: kind, now: clock.now())
-        let isLight = resolved == .light
 
         // Spinner state is reserved for non-silent scans (Settings "Reload
-        // Library", cold launch without cache). Progress banner shows for
-        // both kinds — even a light scan over a 25k-photo library takes
-        // long enough that the user benefits from a "we're checking, give
-        // us a sec" cue.
+        // Library", cold launch without cache). It spans both passes of a
+        // two-phase scan and is cleared once, below.
         if !silent { isScanning = true }
+
+        // Two-phase scan: when a full scan is on tap AND we already hold a
+        // cache to reuse, run a quick light pass first. The light pass walks
+        // the tree but reuses cached PhotoFiles for unchanged files (no
+        // FileProvider probe, no EXIF re-read), so newly added / changed
+        // files surface in seconds instead of waiting out the full pass's
+        // ~3-min probe + enrichment over the whole library. The full pass
+        // then follows for the deterministic backstop: probe/locality
+        // refresh, in-place EXIF edits, and missed sidecars.
+        //
+        // Skipped when `allPhotos` is empty (cold launch with no cache):
+        // with nothing to reuse, the light pass pays the same per-file cost
+        // as the full pass, so a pre-pass would just scan everything twice
+        // for no speed-up.
+        if resolved == .full && !allPhotos.isEmpty {
+            await runScanPass(at: url, light: true, silent: silent)
+        }
+
+        // Final pass: full when requested, light for the `.light` kind.
+        let result = await runScanPass(at: url, light: resolved == .light, silent: silent)
+
+        isScanning = false
+        lastSyncedAt = Date()
+        if resolved == .full {
+            lastFullScanAt = lastSyncedAt
+            defaults.set(lastFullScanAt, forKey: "lastFullScanAt")
+        }
+
+        // Post-scan work runs once, against the just-published `allPhotos`,
+        // after the final pass — the light pre-pass deliberately skips all of
+        // it so it stays quick.
+        //
+        // Hand the manifest to the sidecar sync service; it diffs against
+        // the cache and either fetches silently or surfaces a prompt.
+        let allIDs = Set(allPhotos.map(\.id))
+        sidecarSync.plan(
+            manifest: result.sidecarManifest,
+            allPhotoIDs: allIDs,
+            autoApprove: false
+        )
+
+        // Memory generation runs against the just-published `allPhotos`.
+        generateMemoriesIfNeeded()
+
+        // Scan + enrichment have settled — clear progress so the banner
+        // dismisses.
+        self.scanProgress = nil
+
+        // Refresh the widget snapshot after the scan/enrichment pass settles.
+        exportWidgetSnapshot()
+    }
+
+    /// One scan pass: walk `url`, enrich new/changed files, and publish the
+    /// result to `allPhotos` / `rootFolder`. Returns the scanner result so the
+    /// caller can drive the once-per-scan post-processing (sidecar plan,
+    /// memory generation, widget export) after the final pass of a two-phase
+    /// scan. Owns `scanProgress` for its scanning/enriching phases but leaves
+    /// `isScanning` / `lastFullScanAt` / final progress teardown to
+    /// `performScan`, which spans both passes.
+    @discardableResult
+    private func runScanPass(at url: URL, light: Bool, silent: Bool) async -> FolderScanner.Result {
         let startedAt = clock.now()
         self.scanProgress = ScanProgress(phase: .scanning, processed: 0, total: nil, startedAt: startedAt)
 
@@ -685,7 +743,7 @@ final class GalleryStore {
             at: url,
             cachedPhotos: cachedPhotos,
             cachedSidecarManifest: cachedSidecarManifest,
-            reuseCached: isLight,
+            reuseCached: light,
             onProgress: progressCallback
         )
 
@@ -725,13 +783,13 @@ final class GalleryStore {
 
         // Atomic swap — single assignment for both rootFolder and allPhotos,
         // single rebuildSortAndIndex, single saveCache. Views observing
-        // sortedPhotos / allPhotos see one update at the end of the sync
+        // sortedPhotos / allPhotos see one update at the end of the pass
         // instead of one after the scan + one after enrichment.
         let existingURLs = Set(allPhotos.map(\.url))
         let newURLs = Set(finalPhotos.map(\.url))
         let contentChanged = existingURLs != newURLs || result.needsEnrichment
 
-        let scanKindLabel = isLight ? "light" : "full"
+        let scanKindLabel = light ? "light" : "full"
         if contentChanged && (!finalPhotos.isEmpty || !silent) {
             Log.scan.info("\(scanKindLabel) scan complete: \(finalPhotos.count) photos (+\(result.addedURLs.count) -\(result.removedURLs.count) ~\(result.modifiedURLs.count), needsEnrichment=\(result.needsEnrichment))")
             apply(.scanResult(photos: finalPhotos, root: finalRoot, persistCache: true))
@@ -744,31 +802,8 @@ final class GalleryStore {
         } else {
             Log.scan.info("\(scanKindLabel) scan complete, no changes (\(finalPhotos.count) photos)")
         }
-        isScanning = false
-        lastSyncedAt = Date()
-        if resolved == .full {
-            lastFullScanAt = lastSyncedAt
-            defaults.set(lastFullScanAt, forKey: "lastFullScanAt")
-        }
 
-        // Hand the manifest to the sidecar sync service; it diffs against
-        // the cache and either fetches silently or surfaces a prompt.
-        let allIDs = Set(finalPhotos.map(\.id))
-        sidecarSync.plan(
-            manifest: result.sidecarManifest,
-            allPhotoIDs: allIDs,
-            autoApprove: false
-        )
-
-        // Memory generation runs against the just-published `allPhotos`.
-        generateMemoriesIfNeeded()
-
-        // Scan + enrichment have settled — clear progress so the banner
-        // dismisses.
-        self.scanProgress = nil
-
-        // Refresh the widget snapshot after the scan/enrichment pass settles.
-        exportWidgetSnapshot()
+        return result
     }
 
     /// Read EXIF dates and hierarchical tags for the stale entries in

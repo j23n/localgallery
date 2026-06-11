@@ -28,6 +28,10 @@ struct CollectionsView: View {
     @State private var renderProgress: Double = 0
     @State private var renderedVideoURL: URL?
     @State private var renderError: String?
+    /// Held so "Cancel" actually cancels the render — clearing the overlay
+    /// state alone would leave the H.264 encode (and its remote-photo
+    /// downloads) running to completion in the background.
+    @State private var renderTask: Task<Void, Never>?
 
     var body: some View {
         Group {
@@ -138,7 +142,11 @@ struct CollectionsView: View {
                 Text("Rendering slideshow… \(Int(renderProgress * 100))%")
                     .font(.system(size: 13))
                     .foregroundStyle(Design.ink2)
-                Button("Cancel") { renderingMemory = nil }
+                Button("Cancel") {
+                    renderTask?.cancel()
+                    renderTask = nil
+                    renderingMemory = nil
+                }
                     .font(.system(size: 13))
                     .foregroundStyle(Design.accentColor)
             }
@@ -157,14 +165,16 @@ struct CollectionsView: View {
         renderProgress = 0
         renderedVideoURL = nil
 
-        Task.detached(priority: .userInitiated) {
+        renderTask = Task.detached(priority: .userInitiated) {
             // Pre-flight: pull non-local photos down before the renderer
             // tries to read their bytes — without this it would silently
             // fail on placeholders.
             let remote = photos.filter { $0.locality != .local }
             for p in remote {
+                if Task.isCancelled { return }
                 _ = try? await mgr.ensureMaterialized(p)
             }
+            if Task.isCancelled { return }
 
             let loader: (URL, CGSize) async -> UIImage? = { url, _ in
                 await mgr.loadFullImage(for: url)
@@ -183,6 +193,10 @@ struct CollectionsView: View {
                 }
             } catch {
                 await MainActor.run {
+                    // Same guard as the success path: a cancelled render's
+                    // throw must not pop the error alert over whatever the
+                    // user moved on to.
+                    guard renderingMemory?.id == memory.id else { return }
                     renderingMemory = nil
                     renderError = String(describing: error)
                 }

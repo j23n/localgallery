@@ -89,7 +89,7 @@ private struct PhotoShareController: ViewModifier {
                     do {
                         return try await PhotoExporter.export(photo, quality: req.quality)
                     } catch {
-                        Log.ui.error("Photo export failed: \(error.localizedDescription)")
+                        Log.ui.error("Photo export failed: \(Log.r.error(error))")
                         return nil
                     }
                 }

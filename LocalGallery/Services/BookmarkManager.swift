@@ -40,7 +40,7 @@ final class BookmarkManager {
             )
             defaults.set(bookmarkData, forKey: bookmarkKey)
         } catch {
-            Log.cache.error("Failed to save bookmark: \(error.localizedDescription)")
+            Log.cache.error("Failed to save bookmark: \(Log.r.error(error))")
         }
     }
 
@@ -59,16 +59,22 @@ final class BookmarkManager {
             }
             return url
         } catch {
-            Log.cache.error("Failed to resolve bookmark: \(error.localizedDescription)")
+            Log.cache.error("Failed to resolve bookmark: \(Log.r.error(error))")
             return nil
         }
     }
 
     /// Balanced start: stops any currently-active scope before starting the new
-    /// one, so a single instance never holds two scopes at once.
+    /// one, so a single instance never holds two scopes at once. `activeURL` is
+    /// only recorded when the start call succeeds — recording it on failure
+    /// would make the next `stopAccessing()` unbalanced (a documented kernel
+    /// resource leak) and hide the access failure from diagnostics.
     func startAccessing(_ url: URL) {
         stopAccessing()
-        _ = url.startAccessingSecurityScopedResource()
+        guard url.startAccessingSecurityScopedResource() else {
+            Log.cache.error("Security-scoped access denied for \(Log.r.path(url))")
+            return
+        }
         activeURL = url
     }
 

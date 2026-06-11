@@ -6,6 +6,22 @@ import AVFoundation
 /// folder-scan + enrichment pipeline consumes. All methods are nonisolated
 /// statics so the scanner / enricher can call them from detached tasks.
 enum MetadataReader {
+    /// EXIF "yyyy:MM:dd HH:mm:ss" parser. Fixed-format parsing requires the
+    /// POSIX locale + Gregorian calendar — with the device's own settings a
+    /// non-Gregorian calendar (Buddhist, Japanese) parses to wrong years.
+    /// No `timeZone` override: EXIF capture dates carry no zone, so the
+    /// device zone is the least-wrong interpretation. Static because
+    /// `DateFormatter` init is expensive and this runs once per enriched
+    /// photo; `nonisolated(unsafe)` because `DateFormatter` is documented
+    /// thread-safe (iOS 7+) and the instance is never mutated after init.
+    nonisolated(unsafe) static let exifDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.calendar = Calendar(identifier: .gregorian)
+        f.dateFormat = "yyyy:MM:dd HH:mm:ss"
+        return f
+    }()
+
     typealias Result = (
         date: Date?,
         hierarchicalTags: [HierarchicalTag],
@@ -35,16 +51,13 @@ enum MetadataReader {
             let exifDict = properties[kCGImagePropertyExifDictionary] as? [CFString: Any]
             let tiffDict = properties[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
 
-            let dateFormatter = DateFormatter()
-            dateFormatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
-
             let dateStrings = [
                 exifDict?[kCGImagePropertyExifDateTimeOriginal] as? String,
                 exifDict?[kCGImagePropertyExifDateTimeDigitized] as? String,
                 tiffDict?[kCGImagePropertyTIFFDateTime] as? String,
             ]
             for dateString in dateStrings {
-                if let s = dateString, let d = dateFormatter.date(from: s) {
+                if let s = dateString, let d = Self.exifDateFormatter.date(from: s) {
                     captureDate = d
                     break
                 }
@@ -85,8 +98,12 @@ enum MetadataReader {
         }
 
         // XMP sidecar file (.xmp) — same fields as embedded, plus MWG regions.
-        // Sidecar wins when both sources exist (digiKam typically writes the
-        // authoritative copy there); otherwise keep what the embedded XMP gave us.
+        // Per-field precedence when both sources exist:
+        //   - tags: union; on a case-insensitive path conflict the EMBEDDED
+        //     copy wins (sidecar tags are appended, dedup below is first-wins)
+        //   - countryCode: EMBEDDED wins, sidecar fills the gap
+        //   - faceRegions: SIDECAR wins (digiKam writes the authoritative
+        //     region list there), embedded only used when the sidecar has none
         let sidecar = readXMPSidecar(for: url)
         rawTags.append(contentsOf: sidecar.rawTags)
         if countryCode == nil { countryCode = sidecar.countryCode }
@@ -162,7 +179,10 @@ enum MetadataReader {
     /// Used by `SidecarSyncService` after fetching `.xmp` contents from a
     /// file provider (we hold the bytes in memory; no need to re-read disk).
     static func parseXMPBytes(_ data: Data) -> (rawTags: [String], countryCode: String?, faceRegions: [FaceRegion]) {
-        guard let xml = String(data: data, encoding: .utf8) else { return ([], nil, []) }
+        // XMP packets are usually UTF-8 but the spec also allows UTF-16
+        // (BOM-prefixed) — fall back so those don't silently parse as empty.
+        guard let xml = String(data: data, encoding: .utf8)
+                ?? String(data: data, encoding: .utf16) else { return ([], nil, []) }
 
         var rawTags: [String] = []
 

@@ -6,21 +6,18 @@ import ImageIO
 /// tasks so the heavy CGImageSource read stays off the main actor.
 enum EXIFService {
     static func loadEXIF(for photo: PhotoFile) async -> EXIFData? {
-        do {
-            return try await readEXIF(url: photo.url)
-        } catch is CancellationError {
-            return nil
-        } catch {
-            return nil
-        }
+        // `readEXIF` only throws CancellationError (the cooperative checks).
+        try? await readEXIF(url: photo.url)
     }
 
     /// Reads the `photo-tools` custom XMP namespace (§1.2 of xmp-schema.md)
     /// from embedded XMP and the optional `.xmp` sidecar.
+    ///
+    /// Nonisolated async, so the body already runs on the global executor —
+    /// off whatever actor the caller is on — with structured cancellation
+    /// intact. No `Task.detached` needed.
     static func loadPhotoToolsMetadata(for photo: PhotoFile) async -> PhotoToolsMetadata {
-        await Task.detached(priority: .userInitiated) {
-            readPhotoToolsMetadata(url: photo.url)
-        }.value
+        readPhotoToolsMetadata(url: photo.url)
     }
 
     private static func readPhotoToolsMetadata(url: URL) -> PhotoToolsMetadata {
@@ -100,9 +97,7 @@ enum EXIFService {
         data.iso = (exifDict?[kCGImagePropertyExifISOSpeedRatings] as? [Int])?.first
 
         if let dateString = exifDict?[kCGImagePropertyExifDateTimeOriginal] as? String {
-            let formatter = DateFormatter()
-            formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
-            data.dateTimeOriginal = formatter.date(from: dateString)
+            data.dateTimeOriginal = MetadataReader.exifDateFormatter.date(from: dateString)
         }
 
         if let lat = gpsDict?[kCGImagePropertyGPSLatitude] as? Double,

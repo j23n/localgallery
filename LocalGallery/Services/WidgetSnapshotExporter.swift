@@ -449,7 +449,7 @@ actor WidgetSnapshotExporter {
             let data = try encoder.encode(value)
             try data.write(to: url, options: .atomic)
         } catch {
-            Log.widget.error("Failed to write \(Log.r.filename(url.lastPathComponent)): \(error.localizedDescription)")
+            Log.widget.error("Failed to write \(Log.r.filename(url.lastPathComponent)): \(Log.r.error(error))")
         }
     }
 }

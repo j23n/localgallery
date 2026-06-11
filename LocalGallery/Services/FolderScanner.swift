@@ -43,6 +43,11 @@ enum FolderScanner {
         /// URLs whose `fileSize` or `fileModificationDate` changed since the
         /// cache. Disjoint from `addedURLs`.
         let modifiedURLs: [URL]
+        /// Standardized paths of directories whose listing threw. Photos
+        /// under them are absent from `flatPhotos`/`removedURLs` — the Store
+        /// carries the cached entries forward so a transient I/O error
+        /// doesn't wipe a subtree's tags and enrichment.
+        let failedDirectoryPaths: [String]
     }
 
     /// Internal scratch nodes used during traversal — flat array indexed by
@@ -105,6 +110,10 @@ enum FolderScanner {
             var addedURLs: [URL] = []
             var modifiedURLs: [URL] = []
             var seenURLs: Set<URL> = []
+            // Directories whose listing threw (transient provider error,
+            // brief unmount). Their whole subtree is missing from `seenURLs`,
+            // so they're excluded from removal accounting below.
+            var failedDirectoryPaths: [String] = []
             // Aggregate timing + cache-hit counters for the whole scan,
             // logged once at the end. Per-folder line logs are emitted
             // inside the loop. Reset on each scan call.
@@ -161,8 +170,9 @@ enum FolderScanner {
                     folderListMs = (CFAbsoluteTimeGetCurrent() - listStart) * 1000
                     totalListMs += folderListMs
                 } catch {
-                    Log.scan.error("contentsOfDirectory failed for \(Log.r.path(dirURL)): \(error.localizedDescription)")
+                    Log.scan.error("contentsOfDirectory failed for \(Log.r.path(dirURL)): \(Log.r.error(error))")
                     contents = nil
+                    failedDirectoryPaths.append(dirURL.standardizedFileURL.path)
                 }
 
                 if let contents {
@@ -302,11 +312,6 @@ enum FolderScanner {
                                 ?? MetadataReader.earliestFilesystemDate(creation: file.creationDate, modification: file.modDate)
                             let tags = unchanged ? (cached?.hierarchicalTags ?? []) : []
                             let cachedEnrichedDate = cached?.enrichedFileDate
-                            // Re-enrich if never enriched or file was modified since last enrichment.
-                            let stale = !unchanged || cachedEnrichedDate == nil || file.modDate != cachedEnrichedDate
-                            if stale {
-                                needsEnrichment = true
-                            }
 
                             folderSlowPath += 1
                             let probeStart = CFAbsoluteTimeGetCurrent()
@@ -315,6 +320,22 @@ enum FolderScanner {
                             let locality: PhotoLocality = photoProbe.isFileProvider
                                 ? .remote(downloaded: photoProbe.status == .local)
                                 : .local
+                            // A former placeholder whose bytes arrived since
+                            // the last scan needs a real EXIF pass — its first
+                            // enrichment ran against a byteless file.
+                            let becameDownloaded: Bool
+                            if case .remote(downloaded: false)? = cached?.locality {
+                                becameDownloaded = photoProbe.status == .local
+                            } else {
+                                becameDownloaded = false
+                            }
+                            // Re-enrich if never enriched, modified since last
+                            // enrichment, or just downloaded.
+                            let stale = !unchanged || cachedEnrichedDate == nil
+                                || file.modDate != cachedEnrichedDate || becameDownloaded
+                            if stale {
+                                needsEnrichment = true
+                            }
                             let photoID = PhotoFile.stableID(for: file.url)
 
                             photo = PhotoFile(
@@ -390,8 +411,6 @@ enum FolderScanner {
                                 let dateTaken = (unchanged ? cached?.dateTaken : nil)
                                     ?? MetadataReader.earliestFilesystemDate(creation: file.creationDate, modification: file.modDate)
                                 let cachedEnrichedDate = cached?.enrichedFileDate
-                                let stale = !unchanged || cachedEnrichedDate == nil || file.modDate != cachedEnrichedDate
-                                if stale { needsEnrichment = true }
                                 folderSlowPath += 1
                                 let probeStart = CFAbsoluteTimeGetCurrent()
                                 let videoProbe = FileProviderDetector.probe(file.url)
@@ -399,6 +418,17 @@ enum FolderScanner {
                                 let locality: PhotoLocality = videoProbe.isFileProvider
                                     ? .remote(downloaded: videoProbe.status == .local)
                                     : .local
+                                // Same placeholder→downloaded re-enrich
+                                // trigger as the image loop above.
+                                let becameDownloaded: Bool
+                                if case .remote(downloaded: false)? = cached?.locality {
+                                    becameDownloaded = videoProbe.status == .local
+                                } else {
+                                    becameDownloaded = false
+                                }
+                                let stale = !unchanged || cachedEnrichedDate == nil
+                                    || file.modDate != cachedEnrichedDate || becameDownloaded
+                                if stale { needsEnrichment = true }
                                 photo = PhotoFile(
                                     id: PhotoFile.stableID(for: file.url), url: file.url, filename: stem,
                                     fileSize: file.fileSize,
@@ -498,8 +528,16 @@ enum FolderScanner {
             // Anything in the cache that didn't appear in the listing was
             // moved/removed/unmounted between scans. The Store drops them
             // from `allPhotos` so the grid reflects the change immediately.
+            // Exception: a directory whose listing *failed* hides its whole
+            // subtree from `seenURLs` — treating those photos as removed
+            // would wipe their tags/enrichment over a one-off I/O error, so
+            // they're kept until a scan can actually list their parent again.
             var removedURLs: [URL] = []
             for url in cachedPhotos.keys where !seenURLs.contains(url) {
+                let path = url.standardizedFileURL.path
+                if failedDirectoryPaths.contains(where: { path.hasPrefix($0 + "/") }) {
+                    continue
+                }
                 removedURLs.append(url)
             }
 
@@ -550,7 +588,8 @@ enum FolderScanner {
                 sidecarManifest: sidecarManifest,
                 addedURLs: addedURLs,
                 removedURLs: removedURLs,
-                modifiedURLs: modifiedURLs
+                modifiedURLs: modifiedURLs,
+                failedDirectoryPaths: failedDirectoryPaths
             )
         }.value
     }

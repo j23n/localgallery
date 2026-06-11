@@ -87,7 +87,10 @@ struct ThumbnailView: View {
         }
         .animation(.easeIn(duration: 0.2), value: thumbnail != nil)
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
-        .task(id: url) {
+        // Keyed on size too: pinch-zooming the grid to a larger tier must
+        // re-decode already-visible cells, or they keep their small decode
+        // and render soft until recycled.
+        .task(id: ThumbKey(url: url, size: Int(size))) {
             let result = await store.thumbnail(
                 for: url,
                 size: CGSize(width: size, height: size),
@@ -98,6 +101,13 @@ struct ThumbnailView: View {
             self.thumbnailMissing = (result == nil)
         }
     }
+}
+
+/// Identity for the thumbnail-loading task — re-fires on URL *or* cell-size
+/// change.
+private struct ThumbKey: Hashable {
+    let url: URL
+    let size: Int
 }
 
 // MARK: - Shimmer Placeholder

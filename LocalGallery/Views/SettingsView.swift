@@ -376,7 +376,7 @@ struct SettingsView: View {
                 Task {
                     _ = await store.clearAllDownloads()
                     isClearingDownloads = false
-                    cloudStats = store.computeCloudStorageStats()
+                    cloudStats = await store.computeCloudStorageStats()
                 }
             }
         } message: {
@@ -392,7 +392,7 @@ struct SettingsView: View {
             Text("This wipes the cached `.xmp` data and re-fetches everything on the next sync. Tags and country codes will reappear once the sync completes.")
         }
         .task {
-            cloudStats = store.computeCloudStorageStats()
+            cloudStats = await store.computeCloudStorageStats()
         }
     }
 

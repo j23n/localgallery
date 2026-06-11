@@ -368,9 +368,9 @@ enum SlideshowMusicCache {
         do {
             try data.write(to: url, options: .atomic)
         } catch {
-            // Swift 6 strict concurrency: capture URL outside the autoclosure.
-            let path = url.path
-            Log.ui.warning("Failed to write music cache \(path): \(error.localizedDescription)")
+            // Swift 6 strict concurrency: capture the token outside the autoclosure.
+            let path = Log.r.path(url)
+            Log.ui.warning("Failed to write music cache \(path): \(Log.r.error(error))")
         }
     }
 

@@ -10,3 +10,14 @@ enum PersonLink: Codable, Equatable, Sendable {
     /// suppressing the auto-match by name.
     case disabled
 }
+
+/// Decode wrapper that swallows per-element failures. The Store decodes the
+/// persisted `[String: PersonLink]` through this so one unreadable entry
+/// (e.g. after a case rename in a future version) degrades to losing that
+/// entry instead of silently wiping every manual link the user ever made.
+struct FailableDecodable<T: Decodable>: Decodable {
+    let value: T?
+    init(from decoder: any Decoder) throws {
+        value = try? T(from: decoder)
+    }
+}

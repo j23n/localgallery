@@ -18,8 +18,17 @@ final class SearchIndex {
     @ObservationIgnored private var corpus: [UUID: String] = [:]
 
     /// Date-descending sort. Photos missing `dateTaken` go to the bottom.
+    /// Ties (shared timestamps, undated photos) break on the URL path:
+    /// `sorted` isn't documented stable and the input order comes from
+    /// filesystem enumeration, so without a tiebreaker tied photos can
+    /// shuffle between rescans — the flicker the stable IDs exist to prevent.
     func sortPhotos(_ photos: [PhotoFile]) -> [PhotoFile] {
-        photos.sorted { ($0.dateTaken ?? .distantPast) > ($1.dateTaken ?? .distantPast) }
+        photos.sorted {
+            let a = $0.dateTaken ?? .distantPast
+            let b = $1.dateTaken ?? .distantPast
+            if a != b { return a > b }
+            return $0.url.path < $1.url.path
+        }
     }
 
     /// Rebuild every index from `allPhotos`. One pass per call.

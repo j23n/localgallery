@@ -62,7 +62,7 @@ final class GalleryStore {
     var scanProgress: ScanProgress?
     var lastSyncedAt: Date?
     /// Timestamp of the most recent FULL scan completion. Persisted so the
-    /// 24-hour `.auto`-mode promotion survives relaunch.
+    /// `fullScanInterval` `.auto`-mode promotion survives relaunch.
     private(set) var lastFullScanAt: Date?
     private(set) var memories: [Memory] = []
     private(set) var topPeople: [TagSuggestion] = []
@@ -161,12 +161,23 @@ final class GalleryStore {
     }
 
     @ObservationIgnored private var isEnriching = false
-    /// In-flight scan, keyed by URL. Concurrent callers for the same URL await
-    /// the existing task instead of starting a second traversal (app launch +
-    /// willEnterForeground + pull-to-refresh can otherwise overlap).
-    @ObservationIgnored private var activeScanTask: (url: URL, task: Task<Void, Never>)?
-    /// Most recent scanner-emitted sidecar manifest. Pass 5 (`SidecarSyncService`)
-    /// consumes this; until then it's just stashed for inspection.
+    /// Re-entrancy guard for memory generation: `generateMemoriesIfNeeded`
+    /// spawns an unawaited Task and the daily gate is only set on completion,
+    /// so without this two triggers in quick succession would both generate.
+    @ObservationIgnored private var isGeneratingMemories = false
+    /// Bumped by `forceRegenerateMemories` so an in-flight generation (whose
+    /// inputs predate the change that forced the regen) can't set the daily
+    /// gate when it lands.
+    @ObservationIgnored private var memoryGenerationEpoch = 0
+    /// In-flight scan, keyed by URL + resolved kind. Concurrent callers for
+    /// the same URL await the existing task instead of starting a second
+    /// traversal (app launch + willEnterForeground + pull-to-refresh can
+    /// otherwise overlap). The kind is kept so a `.full` request isn't
+    /// silently satisfied by an in-flight light scan.
+    @ObservationIgnored private var activeScanTask: (url: URL, kind: ScanKind, task: Task<Void, Never>)?
+    /// Most recent scanner-emitted sidecar manifest. `SidecarSyncService`
+    /// diffs it after every scan; `SidecarRefreshService` re-reads it on the
+    /// BG sidecar-refresh task.
     @ObservationIgnored var lastSidecarManifest: [FolderScanner.SidecarCandidate] = []
     @ObservationIgnored private var memoriesGeneratedDay: Date? {
         didSet { persistMemoriesGeneratedDay() }
@@ -248,8 +259,10 @@ final class GalleryStore {
             lastFullScanAt = raw
         }
         if let data = defaults.data(forKey: "personContactLinks"),
-           let dict = try? JSONDecoder().decode([String: PersonLink].self, from: data) {
-            personContactLinks = dict
+           let dict = try? JSONDecoder().decode([String: FailableDecodable<PersonLink>].self, from: data) {
+            // Per-entry tolerant decode — one bad entry must not wipe the
+            // user's entire set of manual contact links.
+            personContactLinks = dict.compactMapValues(\.value)
         }
         if let data = defaults.data(forKey: "seenMemoryIDs"),
            let dict = try? JSONDecoder().decode([String: Date].self, from: data) {
@@ -531,8 +544,8 @@ final class GalleryStore {
 
         // Rescan in background — cached URLs are from a previous session.
         // `.auto` picks light when we have fresh cache + recent full scan,
-        // and full otherwise (cold install, post-upgrade, >24h since last
-        // full pass).
+        // and full otherwise (cold install, post-upgrade, >fullScanInterval
+        // since last full pass).
         await scanFolder(at: url, kind: .auto, silent: hadCache)
     }
 
@@ -561,15 +574,33 @@ final class GalleryStore {
     // MARK: - Folder Scanning (Iterative)
 
     func scanFolder(at url: URL, kind: ScanKind = .full, silent: Bool = false) async {
-        if let active = activeScanTask, active.url == url {
+        let resolved = resolvedScanKind(for: kind, now: clock.now())
+        if let active = activeScanTask {
+            if active.url == url {
+                await active.task.value
+                // The spawner's cleanup races this resumption; clear the
+                // finished entry ourselves so the re-run below can't loop on
+                // a stale `activeScanTask`.
+                if activeScanTask?.task == active.task { activeScanTask = nil }
+                // A `.full` request must not be silently downgraded by an
+                // in-flight light scan — "Reload Library" during a foreground
+                // auto-scan would otherwise no-op. Re-run with the stronger
+                // kind once the in-flight pass settles.
+                if resolved == .full && active.kind != .full {
+                    await scanFolder(at: url, kind: .full, silent: silent)
+                }
+                return
+            }
+            // Different root in flight (user picked a new folder mid-scan).
+            // Let it settle first so two performScans never interleave their
+            // apply()/saveCache() calls.
             await active.task.value
-            return
         }
         let task: Task<Void, Never> = Task { @MainActor [weak self] in
             guard let self else { return }
-            await self.performScan(at: url, kind: kind, silent: silent)
+            await self.performScan(at: url, kind: resolved, silent: silent)
         }
-        activeScanTask = (url, task)
+        activeScanTask = (url, resolved, task)
         await task.value
         if activeScanTask?.task == task { activeScanTask = nil }
     }
@@ -627,6 +658,13 @@ final class GalleryStore {
             saveCache()
         case let .photoLocalityChanged(id, locality):
             guard let idx = allPhotos.firstIndex(where: { $0.id == id }) else { return }
+            // Placeholder → downloaded: the first enrichment ran against a
+            // byteless file, so clear the marker and the next enrichment
+            // pass reads the real EXIF/GPS.
+            if case .remote(downloaded: false) = allPhotos[idx].locality,
+               case .remote(downloaded: true) = locality {
+                allPhotos[idx].enrichedFileDate = nil
+            }
             allPhotos[idx].locality = locality
         case .allDownloadsCleared:
             for i in allPhotos.indices {
@@ -670,7 +708,7 @@ final class GalleryStore {
         let result = await runScanPass(at: url, light: resolved == .light, silent: silent)
 
         isScanning = false
-        lastSyncedAt = Date()
+        lastSyncedAt = clock.now()
         if resolved == .full {
             lastFullScanAt = lastSyncedAt
             defaults.set(lastFullScanAt, forKey: "lastFullScanAt")
@@ -755,8 +793,27 @@ final class GalleryStore {
             Log.scan.info("Detected \(remoteCount) file-provider photos, \(result.sidecarManifest.count) sidecar candidates")
         }
 
+        // Carry forward cached photos under directories whose listing failed
+        // (transient provider error, brief unmount) — the scanner couldn't
+        // see them this pass, and dropping them would wipe their tags and
+        // enrichment over a one-off I/O error. They stay in the flat grid
+        // (not the folder tree) until a scan can list their parent again.
+        var scannedPhotos = result.flatPhotos
+        if !result.failedDirectoryPaths.isEmpty {
+            let scannedURLs = Set(scannedPhotos.map(\.url))
+            let preserved = allPhotos.filter { photo in
+                guard !scannedURLs.contains(photo.url) else { return false }
+                let path = photo.url.standardizedFileURL.path
+                return result.failedDirectoryPaths.contains { path.hasPrefix($0 + "/") }
+            }
+            if !preserved.isEmpty {
+                Log.scan.warning("Preserving \(preserved.count) cached photos under \(result.failedDirectoryPaths.count) unreadable directories")
+                scannedPhotos += preserved
+            }
+        }
+
         // Merge cached sidecar entries onto the freshly-scanned photos.
-        let mergedPhotos = mergeCachedSidecars(into: result.flatPhotos)
+        let mergedPhotos = mergeCachedSidecars(into: scannedPhotos)
 
         // Run enrichment on the scan output BEFORE publishing anything to
         // the observed grid state. The displayed grid keeps showing the
@@ -997,11 +1054,20 @@ final class GalleryStore {
             Log.bg.info("Memories already generated today; skipping BG regeneration")
             return
         }
-        memoriesGeneratedDay = today
+        guard !isGeneratingMemories else { return }
+        isGeneratingMemories = true
+        defer { isGeneratingMemories = false }
+        let epoch = memoryGenerationEpoch
         let snapshot = allPhotos
         let leaves = _cachedLeafFolders
         let daySeed = WidgetDayKey.string(for: today)
         await generateMemories(from: snapshot, leafFolders: leaves, seed: daySeed)
+        // Gate only on completion: if the BG task expired and cancelled us
+        // mid-generation, the day must stay unconsumed so the next foreground
+        // entry retries instead of keeping yesterday's memories all day.
+        if !Task.isCancelled && epoch == memoryGenerationEpoch {
+            memoriesGeneratedDay = today
+        }
     }
 
     /// Clear the once-per-day gate + cached memories and immediately re-run detection.
@@ -1016,6 +1082,7 @@ final class GalleryStore {
     /// own `generateMemoriesIfNeeded` will populate memories from scratch.
     func forceRegenerateMemories() {
         guard !allPhotos.isEmpty else { return }
+        memoryGenerationEpoch += 1
         memoriesGeneratedDay = nil
         memories = []
         MemoriesCacheStore.clear(at: paths.memoriesCacheURL)
@@ -1032,11 +1099,22 @@ final class GalleryStore {
         let memoriesStale = memoriesGeneratedDay.map { !cal.isDate($0, inSameDayAs: today) } ?? true
         let memoriesEmpty = memories.isEmpty
         guard (memoriesStale || memoriesEmpty), !allPhotos.isEmpty else { return }
-        memoriesGeneratedDay = today
+        guard !isGeneratingMemories else { return }
+        isGeneratingMemories = true
+        let epoch = memoryGenerationEpoch
         let snapshot = allPhotos
         let leaves = _cachedLeafFolders
         let daySeed = seed ?? WidgetDayKey.string(for: today)
-        Task { await generateMemories(from: snapshot, leafFolders: leaves, seed: daySeed) }
+        Task {
+            defer { isGeneratingMemories = false }
+            await generateMemories(from: snapshot, leafFolders: leaves, seed: daySeed)
+            // Gate only on completion — a process death or cancellation
+            // mid-generation must not consume the daily gate; an epoch bump
+            // means a force-regen superseded this run's inputs.
+            if !Task.isCancelled && epoch == memoryGenerationEpoch {
+                memoriesGeneratedDay = today
+            }
+        }
     }
 
     func sortFolders(_ folders: [PhotoFolder]) -> [PhotoFolder] {
@@ -1081,7 +1159,8 @@ final class GalleryStore {
     /// one photo dated within the past 2 years; featured bypass the recency
     /// gate (the user explicitly promoted them). Sorted by total photo count.
     var visiblePeopleForRail: [TagSuggestion] {
-        let twoYearsAgo = Calendar.current.date(byAdding: .year, value: -2, to: Date()) ?? Date()
+        let now = clock.now()
+        let twoYearsAgo = Calendar.current.date(byAdding: .year, value: -2, to: now) ?? now
         let featuredSet = Set(featuredPeople)
         let visible = topPeople.filter { !hiddenPeople.contains($0.fullPath) }
         let featuredInOrder = featuredPeople.compactMap { path in visible.first { $0.fullPath == path } }
@@ -1309,7 +1388,10 @@ final class GalleryStore {
                 )
             }
 
-            for memory in dayMemories where !hiddenMemories.contains(memory.id) {
+            // Same finalize step as `generate` (photo cap + subtitle) so a
+            // pre-published scheduled item looks identical to the memory the
+            // foreground catch-up regenerates on its day.
+            for memory in MemoryEngine.finalize(dayMemories) where !hiddenMemories.contains(memory.id) {
                 out.append(WidgetSnapshotExporter.ScheduledMemory(
                     memory: memory,
                     validFrom: day,
@@ -1330,6 +1412,15 @@ final class GalleryStore {
     }
 
     // MARK: - Memories
+
+    /// True once today's memory generation has completed. `AppRouter` uses
+    /// this to decide whether a widget deep link targeting a not-yet-existing
+    /// scheduled memory should stay queued (today's generation still pending)
+    /// or be dropped (the memory is genuinely gone).
+    var hasGeneratedMemoriesToday: Bool {
+        guard let day = memoriesGeneratedDay else { return false }
+        return Calendar.current.isDate(day, inSameDayAs: clock.now())
+    }
 
     /// Resolve photo IDs from a memory back to PhotoFile instances.
     func photos(for memory: Memory) -> [PhotoFile] {
@@ -1373,6 +1464,13 @@ final class GalleryStore {
             seenMemoryIDs: self.seenMemoryIDs,
             surfacedClusters: self.surfacedClusters
         )
+
+        // An expired BG task cancels mid-generation — don't publish a
+        // potentially partial result set over a good cached one.
+        guard !Task.isCancelled else {
+            Log.memory.info("Memory generation cancelled; discarding results")
+            return
+        }
 
         let elapsed = (CFAbsoluteTimeGetCurrent() - t) * 1000
         self.memories = results
@@ -1436,7 +1534,7 @@ final class GalleryStore {
         // Mark this photo as downloaded in the in-memory model so the grid
         // badge clears without waiting for a rescan. Cache write is deferred
         // to the next save.
-        if let existing = allPhotos.first(where: { $0.id == photo.id }),
+        if let existing = searchService.photo(byID: photo.id),
            case .remote = existing.locality {
             apply(.photoLocalityChanged(id: photo.id, locality: .remote(downloaded: true)))
         }
@@ -1448,7 +1546,7 @@ final class GalleryStore {
     }
 
     func prefetchMaterialize(_ photos: [PhotoFile]) {
-        materializer.prefetch(photos)
+        materializer.prefetch(photos, allowCellular: useCellularForDownloads)
     }
 
     // MARK: - Cloud storage
@@ -1469,17 +1567,24 @@ final class GalleryStore {
         }
     }
 
-    /// Walk `allPhotos` and bucket them by download status. Cheap; only does
-    /// metadata reads (no downloads triggered). The Settings sheet caches
-    /// the result so repeat opens don't re-walk.
-    func computeCloudStorageStats() -> CloudStorageStats {
+    /// Walk the remote photos and bucket them by download status. One
+    /// `resourceValues` probe per remote photo, so the walk runs off the
+    /// main actor (`nonisolated async`) — a multi-thousand-photo cloud
+    /// library would otherwise hitch the Settings sheet open animation.
+    /// No downloads are triggered; the Settings sheet caches the result so
+    /// repeat opens don't re-walk.
+    func computeCloudStorageStats() async -> CloudStorageStats {
+        let remote = allPhotos.filter {
+            if case .remote = $0.locality { return true } else { return false }
+        }
+        return await Self.probeStorageStats(remote)
+    }
+
+    private nonisolated static func probeStorageStats(_ remotePhotos: [PhotoFile]) async -> CloudStorageStats {
         var materializedCount = 0
         var materializedBytes: Int64 = 0
         var placeholderCount = 0
-        var totalRemote = 0
-        for photo in allPhotos {
-            guard case .remote = photo.locality else { continue }
-            totalRemote += 1
+        for photo in remotePhotos {
             let probe = FileProviderDetector.probe(photo.url)
             if probe.status == .local {
                 materializedCount += 1
@@ -1492,7 +1597,7 @@ final class GalleryStore {
             materializedCount: materializedCount,
             materializedBytes: materializedBytes,
             placeholderCount: placeholderCount,
-            totalRemote: totalRemote
+            totalRemote: remotePhotos.count
         )
     }
 
@@ -1536,7 +1641,7 @@ final class GalleryStore {
                 }
                 if didEvict { evicted += 1 }
             } catch {
-                Log.scan.warning("evictItem failed for \(Log.r.filename(photo.url.lastPathComponent)): \(error.localizedDescription)")
+                Log.scan.warning("evictItem failed for \(Log.r.filename(photo.url.lastPathComponent)): \(Log.r.error(error))")
             }
         }
         // Refresh in-memory state regardless of evict success — next scan

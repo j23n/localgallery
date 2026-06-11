@@ -52,6 +52,10 @@ final class ThumbnailService {
 
     private let thumbnailDiskCacheDir: URL
 
+    /// How long a `.nothumb` negative-cache sentinel suppresses QuickLook
+    /// retries before the provider gets asked again.
+    private static let sentinelTTL: TimeInterval = 24 * 60 * 60
+
     static var defaultDiskCacheDir: URL {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("thumbnails", isDirectory: true)
@@ -91,10 +95,22 @@ final class ThumbnailService {
         let sentinelPath = thumbnailDiskCacheDir.appendingPathComponent(stableID + ".nothumb")
 
         // Sentinel: provider didn't vend a thumbnail on a previous attempt.
-        // Skip the generator entirely so a 50k-photo cloud library doesn't
-        // burn battery re-asking on every scroll.
-        if FileManager.default.fileExists(atPath: sentinelPath.path) {
-            return nil
+        // Skip the generator so a 50k-photo cloud library doesn't burn battery
+        // re-asking on every scroll. Only honoured for placeholder decodes —
+        // once the file is downloaded the ImageIO path can succeed, so a
+        // stale negative result must not blank the cell. Sentinels also
+        // expire after `sentinelTTL`: the original failure may have been
+        // transient (provider timeout, rate limit).
+        if useQuickLook {
+            if let written = (try? sentinelPath.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate {
+                if Date().timeIntervalSince(written) < Self.sentinelTTL {
+                    return nil
+                }
+                try? FileManager.default.removeItem(at: sentinelPath)
+            }
+        } else {
+            // Locality flipped to local: drop any placeholder-era sentinel.
+            try? FileManager.default.removeItem(at: sentinelPath)
         }
 
         do {

@@ -23,8 +23,9 @@ enum EnrichmentService {
 
     /// Enrich every photo whose `enrichedFileDate` is nil. Returns the same
     /// array with stale entries replaced; entries already enriched are
-    /// passed through unchanged. Cooperative — checks `Task.isCancelled`
-    /// per photo so a foreground rescan can short-circuit.
+    /// passed through unchanged. Cooperative — the caller's cancellation is
+    /// forwarded into the detached task, and each child task checks
+    /// `Task.isCancelled` before reading.
     ///
     /// `onProgress` is invoked from the detached task as each photo finishes
     /// (in TaskGroup completion order, not necessarily input order). The first
@@ -37,7 +38,11 @@ enum EnrichmentService {
     ) async -> [PhotoFile] {
         let startTime = CFAbsoluteTimeGetCurrent()
 
-        return await Task.detached(priority: .background) {
+        // Detached for the .background priority, with the caller's
+        // cancellation forwarded explicitly (a bare `Task.detached` would
+        // swallow it and the per-photo `Task.isCancelled` checks would
+        // never trip).
+        let work = Task.detached(priority: .background) { () -> [PhotoFile] in
             var result = photos
             let staleIndices = result.indices.filter { result[$0].enrichedFileDate == nil }
             let staleTotal = staleIndices.count
@@ -53,6 +58,29 @@ enum EnrichmentService {
                     let photo = result[idx]
                     group.addTask {
                         guard !Task.isCancelled else { return nil }
+
+                        // Non-downloaded placeholders have no bytes —
+                        // CGImageSource/AVAsset would read nothing. Skip the
+                        // read but still mark them enriched-for-now; the
+                        // locality transition (scanner full-scan probe, or
+                        // `ensureMaterialized` in the Store) clears
+                        // `enrichedFileDate` when the download lands so the
+                        // real EXIF pass happens then. Tags/GPS for
+                        // placeholders come from the sidecar cache instead.
+                        if case .remote(downloaded: false) = photo.locality {
+                            return EnrichedResult(
+                                index: idx,
+                                dateTaken: photo.dateTaken,
+                                dateFromMetadata: photo.dateFromMetadata,
+                                hierarchicalTags: photo.hierarchicalTags,
+                                countryCode: photo.countryCode,
+                                gpsLatitude: photo.gpsLatitude,
+                                gpsLongitude: photo.gpsLongitude,
+                                enrichedFileDate: photo.fileModificationDate ?? Date(),
+                                faceRegions: photo.faceRegions
+                            )
+                        }
+
                         let modDate = (try? FileManager.default.attributesOfItem(atPath: photo.url.path)[.modificationDate]) as? Date
 
                         if photo.isVideo {
@@ -191,6 +219,11 @@ enum EnrichmentService {
                 Log.enrich.debug("Sample hierarchical tags:\n  \(tagDetails.joined(separator: "\n  "))")
             }
             return result
-        }.value
+        }
+        return await withTaskCancellationHandler {
+            await work.value
+        } onCancel: {
+            work.cancel()
+        }
     }
 }

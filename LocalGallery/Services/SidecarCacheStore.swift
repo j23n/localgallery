@@ -65,8 +65,12 @@ final class SidecarCacheStore {
     }
 
     /// Wipe everything. Used by the "Re-download all sidecars" Settings
-    /// action.
+    /// action. Cancels any debounced save in flight — otherwise a `put`
+    /// from the previous 200 ms wakes after the delete and resurrects the
+    /// file with pre-clear entries, silently no-opping the re-download.
     func clear() {
+        saveTask?.cancel()
+        saveTask = nil
         entries.removeAll()
         try? FileManager.default.removeItem(at: url)
     }
@@ -95,7 +99,7 @@ final class SidecarCacheStore {
                 let data = try JSONEncoder().encode(payload)
                 try data.write(to: target, options: .atomic)
             } catch {
-                Log.cache.error("Failed to save sidecar cache: \(error.localizedDescription)")
+                Log.cache.error("Failed to save sidecar cache: \(Log.r.error(error))")
             }
         }
     }
@@ -119,7 +123,7 @@ final class SidecarCacheStore {
             Log.cache.info("Loaded \(out.count) sidecar entries from cache v\(payload.version)")
             return out
         } catch {
-            Log.cache.error("Failed to load sidecar cache: \(error.localizedDescription)")
+            Log.cache.error("Failed to load sidecar cache: \(Log.r.error(error))")
             return [:]
         }
     }

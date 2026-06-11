@@ -76,13 +76,12 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         } catch {
             // Common reasons: simulator (where BG tasks aren't supported) or
             // user disabled "Background App Refresh". Not actionable from code.
-            Log.bg.warning("Failed to schedule background refresh: \(error.localizedDescription)")
+            Log.bg.warning("Failed to schedule background refresh: \(Log.r.error(error))")
         }
     }
 
-    /// Schedule the next sidecar refresh ~12h out (per Pass 8 plan; mirrors
-    /// the half-day cadence of memory refresh). Best-effort like the daily
-    /// memories task.
+    /// Schedule the next sidecar refresh ~12h out — twice the cadence of the
+    /// daily memories task. Best-effort, same as memories.
     nonisolated static func scheduleSidecarRefresh() {
         let request = BGAppRefreshTaskRequest(identifier: sidecarRefreshIdentifier)
         request.earliestBeginDate = Date(timeIntervalSinceNow: 12 * 60 * 60)
@@ -90,7 +89,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             try BGTaskScheduler.shared.submit(request)
             Log.bg.info("Scheduled sidecar refresh for ~12h from now")
         } catch {
-            Log.bg.warning("Failed to schedule sidecar refresh: \(error.localizedDescription)")
+            Log.bg.warning("Failed to schedule sidecar refresh: \(Log.r.error(error))")
         }
     }
 
@@ -223,7 +222,10 @@ struct LocalGalleryApp: App {
                 .onChange(of: store.rootFolder?.id) { _, _ in
                     router.consumePendingIfReady(store: store)
                 }
-                .onChange(of: store.memories.count) { _, _ in
+                // `memories` (not `.count`) so a same-size regeneration still
+                // re-evaluates — Memory equality is id-based, so this fires
+                // whenever the id set changes.
+                .onChange(of: store.memories) { _, _ in
                     router.consumePendingIfReady(store: store)
                 }
         }

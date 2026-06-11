@@ -49,7 +49,11 @@ struct MemoriesProvider: TimelineProvider {
         let validNow = snapshot.items
             .filter { $0.validFrom <= now && now < $0.validTo }
             .sorted { $0.priority > $1.priority }
-        let pick = validNow.first ?? snapshot.items.first
+        // Fallback when the app hasn't been opened past the pre-published
+        // horizon: only evergreen items (trips, folders) — a calendar-tied
+        // item (last week's "On this day", a passed birthday) would render
+        // as if it were today's.
+        let pick = validNow.first ?? snapshot.items.first { $0.kind == .other }
         let image = pick?.photoRefs.first.flatMap(WidgetSnapshotReader.thumbnail)
         return MemoriesEntry(date: now, item: pick, image: image)
     }

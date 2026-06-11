@@ -71,7 +71,7 @@ struct PhotoFile: Identifiable, Hashable, Codable, Sendable {
     var exif: EXIFData? = nil
 
     /// Flat leaf names derived from `hierarchicalTags`. Used for substring search
-    /// and the legacy "Tags" list in EXIFPanelView.
+    /// and the legacy "Tags" list in PhotoInfoPanel.
     var keywords: [String] { hierarchicalTags.map(\.displayName) }
 
     enum CodingKeys: String, CodingKey {

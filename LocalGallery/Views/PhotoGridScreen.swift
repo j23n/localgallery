@@ -548,7 +548,7 @@ struct PhotoGridScreen: View {
                 }
                 if let person = featureContextPerson {
                     Button {
-                        store.setFeaturedPhoto(personPath: person.fullPath, photoID: photo.id)
+                        store.people.setFeaturedPhoto(personPath: person.fullPath, photoID: photo.id)
                     } label: {
                         Label("Set as featured image", systemImage: "star")
                     }

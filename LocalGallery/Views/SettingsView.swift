@@ -13,6 +13,7 @@ struct SettingsView: View {
 
     var body: some View {
         @Bindable var store = store
+        @Bindable var memories = store.memories
         NavigationStack {
             List {
                 Section("Photo Library") {
@@ -57,7 +58,7 @@ struct SettingsView: View {
                 }
 
                 Section("People") {
-                    Toggle(isOn: $store.birthdayMemoriesEnabled) {
+                    Toggle(isOn: $memories.birthdaysEnabled) {
                         Label("Birthday Memories", systemImage: "birthday.cake")
                     }
 
@@ -86,7 +87,7 @@ struct SettingsView: View {
                         HiddenPeopleList()
                     } label: {
                         LabeledContent {
-                            Text(store.hiddenPeople.isEmpty ? "None" : String(store.hiddenPeople.count))
+                            Text(store.people.hiddenPeople.isEmpty ? "None" : String(store.people.hiddenPeople.count))
                                 .foregroundStyle(.secondary)
                         } label: {
                             Label("Hidden People", systemImage: "person.crop.circle.badge.xmark")
@@ -186,8 +187,8 @@ struct SettingsView: View {
 
     /// Display name of the currently-marked "me" person, or "Not set".
     private var meSummary: String {
-        guard !store.mePersonPath.isEmpty,
-              let me = store.peopleTags.first(where: { $0.fullPath == store.mePersonPath })
+        guard !store.people.mePersonPath.isEmpty,
+              let me = store.people.peopleTags.first(where: { $0.fullPath == store.people.mePersonPath })
         else { return "Not set" }
         return me.displayName
     }
@@ -197,7 +198,7 @@ struct SettingsView: View {
     /// every body re-evaluation.
     private var linkedContactsSummary: String {
         var total = 0
-        for person in store.peopleTags {
+        for person in store.people.peopleTags {
             switch store.linkState(forPersonPath: person.fullPath, displayName: person.displayName) {
             case .manual, .auto: total += 1
             case .disabled, .unlinked: break
@@ -321,7 +322,7 @@ struct SettingsView: View {
 
     // MARK: - Cloud Storage
 
-    @State private var cloudStats: GalleryStore.CloudStorageStats?
+    @State private var cloudStats: CloudStorageService.Stats?
     @State private var isClearingDownloads = false
     @State private var showClearDownloadsAlert = false
     @State private var showClearSidecarsAlert = false
@@ -410,7 +411,7 @@ struct HiddenPeopleList: View {
 
     var body: some View {
         Group {
-            let hidden = store.hiddenPeopleTags
+            let hidden = store.people.hiddenPeopleTags
             if hidden.isEmpty {
                 ContentUnavailableView {
                     Label("No hidden people", systemImage: "person.fill")
@@ -465,7 +466,7 @@ private struct HiddenPersonRow: View {
             }
             Spacer()
             Button {
-                store.unhidePerson(person.fullPath)
+                store.people.unhidePerson(person.fullPath)
             } label: {
                 Text("Unhide")
                     .font(.system(size: 12.5, weight: .semibold))
@@ -490,7 +491,7 @@ struct MePersonPicker: View {
     @State private var searchText = ""
 
     private var people: [TagSuggestion] {
-        let all = store.peopleTags
+        let all = store.people.peopleTags
         guard !searchText.isEmpty else { return all }
         let needle = searchText.lowercased()
         return all.filter { $0.displayName.lowercased().contains(needle) }
@@ -500,13 +501,13 @@ struct MePersonPicker: View {
         List {
             Section {
                 Button {
-                    store.unmarkAsMe()
+                    store.people.unmarkAsMe()
                 } label: {
                     HStack {
                         Image(systemName: "person.crop.circle.badge.xmark")
                         Text("Not set")
                         Spacer()
-                        if store.mePersonPath.isEmpty {
+                        if store.people.mePersonPath.isEmpty {
                             Image(systemName: "checkmark")
                                 .foregroundStyle(Design.accentColor)
                         }
@@ -519,7 +520,7 @@ struct MePersonPicker: View {
             Section("People") {
                 ForEach(people) { person in
                     Button {
-                        store.markAsMe(person.fullPath)
+                        store.people.markAsMe(person.fullPath)
                     } label: {
                         HStack(spacing: 10) {
                             Image(systemName: "person.fill")
@@ -532,7 +533,7 @@ struct MePersonPicker: View {
                                     .foregroundStyle(Design.ink3)
                             }
                             Spacer()
-                            if store.mePersonPath == person.fullPath {
+                            if store.people.mePersonPath == person.fullPath {
                                 Image(systemName: "checkmark")
                                     .foregroundStyle(Design.accentColor)
                             }

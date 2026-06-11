@@ -332,7 +332,7 @@ struct LinkedContactsList: View {
         // Resolve every person tag through the store's index-backed
         // `linkState` accessor so this is O(people) rather than
         // O(people × contacts).
-        store.peopleTags.map { person in
+        store.people.peopleTags.map { person in
             switch store.linkState(forPersonPath: person.fullPath, displayName: person.displayName) {
             case .unlinked:
                 return Row(person: person, contact: nil, isManual: false, isExplicitlyDisabled: false)
@@ -360,7 +360,7 @@ struct LinkedContactsList: View {
 
     var body: some View {
         Group {
-            if store.peopleTags.isEmpty {
+            if store.people.peopleTags.isEmpty {
                 ContentUnavailableView {
                     Label("No people yet", systemImage: "person.fill")
                 } description: {
@@ -451,7 +451,7 @@ struct LinkedContactsList: View {
 
     @ViewBuilder
     private func personThumb(_ person: TagSuggestion) -> some View {
-        if let photo = store.featuredPhoto(for: person) {
+        if let photo = store.people.featuredPhoto(for: person) {
             ThumbnailView(url: photo.url, size: 40, cornerRadius: 20, isRemote: photo.locality.isRemotePlaceholder)
                 .frame(width: 40, height: 40)
         } else {

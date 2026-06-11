@@ -209,17 +209,17 @@ struct CollectionsView: View {
     private var collectionsBody: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                let memories = store.visibleMemories
+                let memories = store.memories.visible
                 if !memories.isEmpty {
                     sectionHeader("Memories", systemIcon: "sparkles", accent: true)
                         .contentShape(Rectangle())
                         .onLongPressGesture(minimumDuration: 0.6) {
-                            store.forceRegenerateMemories()
+                            store.memories.forceRegenerate()
                         }
                     memoriesRail(memories)
                 }
 
-                let people = store.visiblePeopleForRail
+                let people = store.people.visiblePeopleForRail
                 if !people.isEmpty {
                     peopleSectionHeader
                     peopleRail(people)
@@ -296,7 +296,7 @@ struct CollectionsView: View {
                             Label("Share slideshow video", systemImage: "square.and.arrow.up")
                         }
                         Button(role: .destructive) {
-                            store.hideMemory(memory.id)
+                            store.memories.hide(memory.id)
                         } label: {
                             Label("Hide memory", systemImage: "eye.slash")
                         }
@@ -322,20 +322,20 @@ struct CollectionsView: View {
                             NavigationLink {
                                 TagGridView(tag: person)
                             } label: {
-                                PersonCard(tag: person, featured: store.isFeatured(person.fullPath))
+                                PersonCard(tag: person, featured: store.people.isFeatured(person.fullPath))
                             }
                             .buttonStyle(.plain)
                             .contextMenu {
-                                let isFeatured = store.isFeatured(person.fullPath)
-                                let isMe = store.isMe(person.fullPath)
+                                let isFeatured = store.people.isFeatured(person.fullPath)
+                                let isMe = store.people.isMe(person.fullPath)
                                 Button {
-                                    if isMe { store.unmarkAsMe() } else { store.markAsMe(person.fullPath) }
+                                    if isMe { store.people.unmarkAsMe() } else { store.people.markAsMe(person.fullPath) }
                                 } label: {
                                     Label(isMe ? "Unmark as Me" : "Mark as Me",
                                           systemImage: isMe ? "person.crop.circle.badge.xmark" : "person.crop.circle.badge.checkmark")
                                 }
                                 Button {
-                                    store.toggleFeaturePerson(person.fullPath)
+                                    store.people.toggleFeaturePerson(person.fullPath)
                                 } label: {
                                     Label(isFeatured ? "Unfeature" : "Feature",
                                           systemImage: isFeatured ? "star.slash" : "star")
@@ -346,7 +346,7 @@ struct CollectionsView: View {
                                     Label(linkContextLabel(person), systemImage: "person.text.rectangle")
                                 }
                                 Button(role: .destructive) {
-                                    store.hidePerson(person.fullPath)
+                                    store.people.hidePerson(person.fullPath)
                                 } label: {
                                     Label("Hide", systemImage: "eye.slash")
                                 }
@@ -504,7 +504,7 @@ struct PersonCard: View {
     @Environment(GalleryStore.self) private var store
 
     private var coverPhoto: PhotoFile? {
-        store.featuredPhoto(for: tag)
+        store.people.featuredPhoto(for: tag)
     }
 
     /// True when this person resolves to a contact (manual link or auto-match
@@ -518,7 +518,7 @@ struct PersonCard: View {
             if let photo = coverPhoto {
                 PersonThumbnailView(
                     url: photo.url,
-                    region: store.faceRegion(for: photo, person: tag.displayName),
+                    region: store.people.faceRegion(for: photo, person: tag.displayName),
                     size: 128,
                     isRemote: photo.locality.isRemotePlaceholder
                 )
@@ -669,7 +669,7 @@ struct PeopleListView: View {
     @State private var linkingPerson: TagSuggestion?
 
     private var filteredPeople: [TagSuggestion] {
-        let all = store.visiblePeople
+        let all = store.people.visiblePeople
         guard !searchText.isEmpty else { return all }
         return all.filter { $0.displayName.localizedCaseInsensitiveContains(searchText) }
     }
@@ -682,22 +682,22 @@ struct PeopleListView: View {
                 }
                 .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                     Button(role: .destructive) {
-                        store.hidePerson(person.fullPath)
+                        store.people.hidePerson(person.fullPath)
                     } label: {
                         Label("Hide", systemImage: "eye.slash")
                     }
                 }
                 .contextMenu {
-                    let isFeatured = store.isFeatured(person.fullPath)
-                    let isMe = store.isMe(person.fullPath)
+                    let isFeatured = store.people.isFeatured(person.fullPath)
+                    let isMe = store.people.isMe(person.fullPath)
                     Button {
-                        if isMe { store.unmarkAsMe() } else { store.markAsMe(person.fullPath) }
+                        if isMe { store.people.unmarkAsMe() } else { store.people.markAsMe(person.fullPath) }
                     } label: {
                         Label(isMe ? "Unmark as Me" : "Mark as Me",
                               systemImage: isMe ? "person.crop.circle.badge.xmark" : "person.crop.circle.badge.checkmark")
                     }
                     Button {
-                        store.toggleFeaturePerson(person.fullPath)
+                        store.people.toggleFeaturePerson(person.fullPath)
                     } label: {
                         Label(isFeatured ? "Unfeature" : "Feature",
                               systemImage: isFeatured ? "star.slash" : "star")
@@ -708,7 +708,7 @@ struct PeopleListView: View {
                         Label(linkLabel(for: person), systemImage: "person.text.rectangle")
                     }
                     Button(role: .destructive) {
-                        store.hidePerson(person.fullPath)
+                        store.people.hidePerson(person.fullPath)
                     } label: {
                         Label("Hide", systemImage: "eye.slash")
                     }
@@ -743,7 +743,7 @@ struct PeopleListRow: View {
 
     private var rowPhotos: [PhotoFile] {
         let all = store.photos(forTag: tag)
-        guard let cover = store.featuredPhoto(for: tag) else {
+        guard let cover = store.people.featuredPhoto(for: tag) else {
             return Array(all.prefix(2))
         }
         var result = [cover]
@@ -759,7 +759,7 @@ struct PeopleListRow: View {
                 ForEach(rowPhotos) { photo in
                     PersonThumbnailView(
                         url: photo.url,
-                        region: store.faceRegion(for: photo, person: tag.displayName),
+                        region: store.people.faceRegion(for: photo, person: tag.displayName),
                         size: 52,
                         cornerRadius: 9,
                         isRemote: photo.locality.isRemotePlaceholder
@@ -783,7 +783,7 @@ struct PeopleListRow: View {
                     Text(tag.displayName)
                         .font(.system(size: 15.5, weight: .medium))
                         .foregroundStyle(Design.ink)
-                    if store.isFeatured(tag.fullPath) {
+                    if store.people.isFeatured(tag.fullPath) {
                         Image(systemName: "star.fill")
                             .font(.system(size: 10))
                             .foregroundStyle(Design.accentColor)

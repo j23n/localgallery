@@ -109,7 +109,7 @@ struct MemorySlideshowView: View {
         .onAppear {
             OrientationLock.lock(.portrait, rotateTo: .portrait)
             startTimer()
-            store.markMemorySeen(memory.id)
+            store.memories.markSeen(memory.id)
         }
         .task {
             // Off the first-frame path: the synth + engine startup can stall

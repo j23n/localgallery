@@ -73,7 +73,7 @@ final class AppRouter {
     }
 
     private func applyMemory(id: String, store: GalleryStore) {
-        if let memory = store.memories.first(where: { $0.id == id }) {
+        if let memory = store.memories.all.first(where: { $0.id == id }) {
             pendingMemoryId = nil
             collectionsPath = [.slideshow(memory)]
             return
@@ -83,7 +83,7 @@ final class AppRouter {
         // is gone — a widget tap on a pre-published scheduled memory (whose
         // id only exists once today's generation runs) must stay queued
         // until the daily regeneration has actually happened today.
-        if store.hasGeneratedMemoriesToday {
+        if store.memories.hasGeneratedToday {
             pendingMemoryId = nil
             collectionsPath = []
         } else {

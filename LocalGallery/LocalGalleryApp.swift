@@ -225,7 +225,7 @@ struct LocalGalleryApp: App {
                 // `memories` (not `.count`) so a same-size regeneration still
                 // re-evaluates — Memory equality is id-based, so this fires
                 // whenever the id set changes.
-                .onChange(of: store.memories) { _, _ in
+                .onChange(of: store.memories.all) { _, _ in
                     router.consumePendingIfReady(store: store)
                 }
         }

@@ -17,7 +17,9 @@ final class BookmarkManager {
     /// deinit observe a stable last-written value.
     private(set) nonisolated(unsafe) var activeURL: URL?
 
-    init(defaults: UserDefaults = .standard, bookmarkKey: String = "rootFolderBookmark") {
+    /// No default for `bookmarkKey` — it comes from `GalleryPaths` (via the
+    /// Store) so the key string lives in exactly one place.
+    init(defaults: UserDefaults = .standard, bookmarkKey: String) {
         self.defaults = defaults
         self.bookmarkKey = bookmarkKey
     }

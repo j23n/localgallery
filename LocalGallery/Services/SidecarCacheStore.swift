@@ -5,36 +5,45 @@ import os
 /// stable UUID. Lets search/tag features work for cloud libraries even
 /// after the source `.xmp` files are evicted by the provider.
 ///
-/// Structure mirrors `LibraryCacheStore` — single JSON file at
-/// `Documents/sidecar_cache.json`. Pass 5 plan calls out chunked-per-folder
-/// or SQLite if file size becomes a problem; we start single-file and
-/// revisit if telemetry warrants it.
+/// Single JSON file (via `JSONDiskCache`) at `Documents/sidecar_cache.json`.
+/// Chunked-per-folder or SQLite is the known follow-up if file size becomes
+/// a problem; we start single-file and revisit if telemetry warrants it.
 @MainActor
 final class SidecarCacheStore {
-    /// Bumping invalidates every existing sidecar cache.
+    /// Bumping invalidates every existing sidecar cache. Versioned
+    /// independently of `LibrarySnapshot.version` — entries are keyed by
+    /// stable photo UUID, which survives library-schema bumps.
     nonisolated static let version = 1
 
+    /// What a sidecar actually carries: the photo-tools XMP schema has no
+    /// per-photo date or GPS fields (those live in the image's EXIF), so
+    /// this is tags + country + face regions only.
     struct CachedSidecar: Codable, Hashable, Sendable {
         var version: FileProviderDetector.ContentVersion
         var hierarchicalTags: [HierarchicalTag]
         var countryCode: String?
-        var dateTaken: Date?
-        var gpsLatitude: Double?
-        var gpsLongitude: Double?
         var faceRegions: [FaceRegion]
     }
 
-    private struct Payload: Codable, Sendable {
-        let version: Int
-        let entries: [String: CachedSidecar]
-    }
-
-    private let url: URL
+    /// String-keyed on disk (JSON object keys); UUID-keyed in memory.
+    private let disk: JSONDiskCache<[String: CachedSidecar]>
     private var entries: [UUID: CachedSidecar] = [:]
 
     init(url: URL) {
-        self.url = url
-        self.entries = Self.load(from: url)
+        // 200ms debounce: a sync run calls `put` once per fetched sidecar;
+        // coalesce the burst into one write.
+        self.disk = JSONDiskCache(
+            url: url,
+            version: Self.version,
+            label: "sidecar cache",
+            debounce: .milliseconds(200)
+        )
+        if let loaded = disk.load() {
+            entries = Dictionary(uniqueKeysWithValues: loaded.compactMap { key, value in
+                UUID(uuidString: key).map { ($0, value) }
+            })
+            Log.cache.info("Loaded \(self.entries.count) sidecar entries from cache")
+        }
     }
 
     // MARK: - Public API
@@ -65,14 +74,11 @@ final class SidecarCacheStore {
     }
 
     /// Wipe everything. Used by the "Re-download all sidecars" Settings
-    /// action. Cancels any debounced save in flight — otherwise a `put`
-    /// from the previous 200 ms wakes after the delete and resurrects the
-    /// file with pre-clear entries, silently no-opping the re-download.
+    /// action. `JSONDiskCache.clear()` cancels any debounced save in flight
+    /// so a pre-clear `put` can't resurrect the file.
     func clear() {
-        saveTask?.cancel()
-        saveTask = nil
         entries.removeAll()
-        try? FileManager.default.removeItem(at: url)
+        disk.clear()
     }
 
     var count: Int { entries.count }
@@ -83,48 +89,7 @@ final class SidecarCacheStore {
 
     // MARK: - Persistence
 
-    @ObservationIgnored private var saveTask: Task<Void, Never>?
-
-    /// Coalesce frequent puts during a sync run into a single write.
     private func scheduleSave() {
-        saveTask?.cancel()
-        let snapshot = entries
-        let target = url
-        saveTask = Task.detached(priority: .utility) {
-            try? await Task.sleep(nanoseconds: 200_000_000) // 200ms debounce
-            if Task.isCancelled { return }
-            let stringKeyed = Dictionary(uniqueKeysWithValues: snapshot.map { ($0.key.uuidString, $0.value) })
-            let payload = Payload(version: SidecarCacheStore.version, entries: stringKeyed)
-            do {
-                let data = try JSONEncoder().encode(payload)
-                try data.write(to: target, options: .atomic)
-            } catch {
-                Log.cache.error("Failed to save sidecar cache: \(Log.r.error(error))")
-            }
-        }
-    }
-
-    private static func load(from url: URL) -> [UUID: CachedSidecar] {
-        guard FileManager.default.fileExists(atPath: url.path) else { return [:] }
-        do {
-            let data = try Data(contentsOf: url)
-            let payload = try JSONDecoder().decode(Payload.self, from: data)
-            guard payload.version == version else {
-                Log.cache.warning("Sidecar cache version mismatch (\(payload.version) vs \(version)), discarding")
-                try? FileManager.default.removeItem(at: url)
-                return [:]
-            }
-            var out: [UUID: CachedSidecar] = [:]
-            for (key, entry) in payload.entries {
-                if let id = UUID(uuidString: key) {
-                    out[id] = entry
-                }
-            }
-            Log.cache.info("Loaded \(out.count) sidecar entries from cache v\(payload.version)")
-            return out
-        } catch {
-            Log.cache.error("Failed to load sidecar cache: \(Log.r.error(error))")
-            return [:]
-        }
+        disk.save(Dictionary(uniqueKeysWithValues: entries.map { ($0.key.uuidString, $0.value) }))
     }
 }

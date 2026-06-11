@@ -26,7 +26,7 @@ final class CrashDiagnosticsService: NSObject, MXMetricManagerSubscriber {
     private(set) var hasPendingCrash: Bool = false
 
     override init() {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let appSupport = GalleryPaths.applicationSupport
         self.crashesDir = appSupport.appendingPathComponent("crashes", isDirectory: true)
         self.logsDir = appSupport.appendingPathComponent("logs", isDirectory: true)
         self.crashFileURL = crashesDir.appendingPathComponent("last-crash.json")

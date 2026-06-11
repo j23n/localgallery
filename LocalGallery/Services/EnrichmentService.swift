@@ -48,6 +48,12 @@ enum EnrichmentService {
             let staleTotal = staleIndices.count
             onProgress?(0, staleTotal)
 
+            // Bound the concurrent CGImageSource / sidecar reads — executor
+            // width caps CPU parallelism anyway, but on provider-backed
+            // volumes a free-for-all saturates I/O. Same gate the sidecar
+            // sync (8) and thumbnail decodes (4) use.
+            let limiter = AsyncSemaphore(limit: 8)
+
             // Enrich stale photos in parallel via TaskGroup. Pre-extract
             // `photo` outside the addTask closure so the closure captures
             // only `let` values — Swift 6's sending check rejects captures
@@ -81,7 +87,13 @@ enum EnrichmentService {
                             )
                         }
 
-                        let modDate = (try? FileManager.default.attributesOfItem(atPath: photo.url.path)[.modificationDate]) as? Date
+                        await limiter.acquire()
+                        defer { Task { await limiter.release() } }
+
+                        // One resourceValues call covers both the staleness
+                        // marker (modDate) and the filesystem-date fallback.
+                        let attrs = try? photo.url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
+                        let modDate = attrs?.contentModificationDate
 
                         if photo.isVideo {
                             // Videos: prefer AVAsset.creationDate (embedded
@@ -94,7 +106,6 @@ enum EnrichmentService {
                                 dateTaken = avDate
                                 dateFromMetadata = true
                             } else if dateTaken == nil {
-                                let attrs = try? photo.url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
                                 dateTaken = MetadataReader.earliestFilesystemDate(
                                     creation: attrs?.creationDate,
                                     modification: attrs?.contentModificationDate
@@ -121,7 +132,6 @@ enum EnrichmentService {
                             dateTaken = date
                             dateFromMetadata = true
                         } else if dateTaken == nil {
-                            let attrs = try? photo.url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
                             dateTaken = MetadataReader.earliestFilesystemDate(
                                 creation: attrs?.creationDate,
                                 modification: attrs?.contentModificationDate

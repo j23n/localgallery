@@ -208,9 +208,6 @@ final class SidecarSyncService {
                 version: candidate.currentVersion,
                 hierarchicalTags: tags,
                 countryCode: parsed.countryCode,
-                dateTaken: nil,
-                gpsLatitude: nil,
-                gpsLongitude: nil,
                 faceRegions: parsed.faceRegions
             )
         } catch {
@@ -251,32 +248,4 @@ final class SidecarSyncService {
     }
 }
 
-// MARK: - Async semaphore
-
-/// Tiny actor-backed counting semaphore for bounding TaskGroup parallelism.
-/// The pattern mirrors `ThumbnailService.DecodeLimiter` but lives here to
-/// avoid a cross-service dependency.
-private actor AsyncSemaphore {
-    private let limit: Int
-    private var active = 0
-    private var waiters: [CheckedContinuation<Void, Never>] = []
-
-    init(limit: Int) { self.limit = limit }
-
-    func acquire() async {
-        if active < limit {
-            active += 1
-            return
-        }
-        await withCheckedContinuation { waiters.append($0) }
-    }
-
-    func release() {
-        if !waiters.isEmpty {
-            waiters.removeFirst().resume()
-        } else {
-            active -= 1
-        }
-    }
-}
 

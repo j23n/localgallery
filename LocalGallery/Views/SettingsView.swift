@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct SettingsView: View {
     @Environment(GalleryStore.self) private var store
@@ -111,9 +112,7 @@ struct SettingsView: View {
                     LabeledContent("Version", value: appVersion)
                     Toggle("Crash Reporting", isOn: $crashReportingEnabled)
 
-                    Button {
-                        ShareSheet.present(items: [LogRedactor.shared.keyFileURL])
-                    } label: {
+                    ShareLink(item: LogRedactor.shared.keyFileURL) {
                         Label("Export Redaction Key", systemImage: "key.fill")
                     }
                     .tint(.primary)
@@ -168,17 +167,20 @@ struct SettingsView: View {
                     crashService.refreshPendingCrash()
                 }
             }
-            .sheet(isPresented: $showPicker) {
-                DocumentPicker { pickerURL in
-                    _ = pickerURL.startAccessingSecurityScopedResource()
-                    store.saveBookmark(for: pickerURL)
-                    pickerURL.stopAccessingSecurityScopedResource()
+            .fileImporter(isPresented: $showPicker, allowedContentTypes: [.folder]) { result in
+                guard case .success(let pickerURL) = result else { return }
+                // Bookmark creation needs an active security scope; the
+                // long-lived scope is then (re)opened on the *resolved* URL
+                // via startAccessingFolder, so this transient one is closed
+                // immediately.
+                _ = pickerURL.startAccessingSecurityScopedResource()
+                store.saveBookmark(for: pickerURL)
+                pickerURL.stopAccessingSecurityScopedResource()
 
-                    if let resolvedURL = store.resolveBookmark() {
-                        Task {
-                            store.startAccessingFolder(resolvedURL)
-                            await store.scanFolder(at: resolvedURL)
-                        }
+                if let resolvedURL = store.resolveBookmark() {
+                    Task {
+                        store.startAccessingFolder(resolvedURL)
+                        await store.scanFolder(at: resolvedURL)
                     }
                 }
             }

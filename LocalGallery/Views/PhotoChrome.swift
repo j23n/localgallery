@@ -66,6 +66,36 @@ enum PhotoChrome {
     }
 }
 
+// MARK: - Liquid Glass adapters
+
+extension View {
+    /// Background for chrome drawn over photos (pills, circular buttons):
+    /// Liquid Glass on iOS 26+, the legacy translucent white fill earlier.
+    @ViewBuilder
+    func chromeGlass(in shape: some Shape, legacyOpacity: Double) -> some View {
+        if #available(iOS 26.0, *) {
+            self.glassEffect(.regular, in: shape)
+        } else {
+            self.background(.white.opacity(legacyOpacity), in: shape)
+        }
+    }
+}
+
+/// Groups sibling glass elements into one `GlassEffectContainer` on iOS 26+
+/// so nearby glass shapes blend correctly (per the Liquid Glass HIG);
+/// passes content through unchanged on earlier systems.
+struct ChromeGlassGroup<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        if #available(iOS 26.0, *) {
+            GlassEffectContainer { content }
+        } else {
+            content
+        }
+    }
+}
+
 /// The shared two-line date/location pill drawn over the photo viewer's and
 /// the memory slideshow's top bars. Both lines are always reserved so the
 /// pill height stays constant whether or not a given photo has location data.
@@ -90,7 +120,7 @@ struct ChromePill: View {
         .frame(width: PhotoChrome.pillWidth)
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(.white.opacity(0.14), in: Capsule())
+        .chromeGlass(in: Capsule(), legacyOpacity: 0.14)
     }
 }
 
@@ -104,7 +134,7 @@ struct ViewerDismissButton: View {
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(.white)
                 .frame(width: 36, height: 36)
-                .background(.white.opacity(0.16), in: Circle())
+                .chromeGlass(in: Circle(), legacyOpacity: 0.16)
         }
     }
 }

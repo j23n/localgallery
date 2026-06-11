@@ -52,6 +52,7 @@ exposes (`store.people`, `store.memories`), and focused services under
 - **SlideshowMusic** — `AVAudioEngine`-based ambient pad synthesis for the six slideshow music themes.
 - **SlideshowVideoRenderer** — renders a memory's photo list as a crossfading MP4 (1080×1080, H.264).
 - **ThumbnailService** — in-memory + on-disk thumbnail and full-resolution caches (see invalidation matrix below).
+- **VideoExportShield** — iOS 26+ `BGContinuedProcessingTask` wrapper that keeps the slideshow MP4 export alive (with system progress UI) when the app is backgrounded mid-render; the render still runs in `CollectionsView.startRender`, the shield only tracks/expires it. No-op when the system declines or pre-26. Registered in AppDelegate; identifier listed in `BGTaskSchedulerPermittedIdentifiers`.
 - **WidgetExportScheduler** — 200ms-debounced task calling `WidgetSnapshotExporter.shared.export`.
 - **WidgetSnapshotExporter** — writes photo/folder/memory snapshots + thumbnails to the App Group container.
 
@@ -67,15 +68,15 @@ exposes (`store.people`, `store.memories`), and focused services under
 One type per file. Notable groupings:
 - **Viewer/** — `PhotoViewerView` (chrome + filmstrip), `PagingPhotoView` (UIPageViewController wrapper), `PhotoPageView` (one page incl. video/live/materialize states), `ZoomableImageView`, `SwipeToDismissGesture`.
 - **Collections/** — `PersonCard`, `PersonContextMenu` (shared Me/Feature/Link/Hide menu), `MemoryCardView`, `MemoryGridView`, `TagGridView`, `PeopleListView`.
-- **PhotoChrome.swift** — pill formatting helpers + the shared `ChromePill` and `ViewerDismissButton` used by viewer and slideshow.
+- **PhotoChrome.swift** — pill formatting helpers + the shared `ChromePill` and `ViewerDismissButton` used by viewer and slideshow, plus the Liquid Glass adapters (`chromeGlass(in:legacyOpacity:)`, `ChromeGlassGroup`): glass on iOS 26+, the legacy translucent white fills earlier.
 - **PhotoInfoPanel.swift**, **AllPhotosView**, **FolderBrowserView**, **CollectionsView**, **PhotoGridScreen** (grid + search + selection; still the largest view), **SettingsView**, **MemorySlideshowView**, **PeopleContactLinking**, **LogsView**, **EXIFFormatters** (incl. `photoCountLabel`).
 
 ### Components (`LocalGallery/Components/`)
-`ThumbnailView` (task keyed on URL **and** cell size), `PersonThumbnailView`, `FolderGridView`, `GridLayoutConfig`, `PhotoShareKit`, `RemoteBadge`, `ScanProgressBanner` (owns the shared `ScanProgress.countText`), `SettingsToolbarButton`, `LibraryEmptyState`, `DocumentPicker` / `ShareSheet` / `AVPlayerLayerView`.
+`ThumbnailView` (task keyed on URL **and** cell size), `PersonThumbnailView`, `FolderGridView`, `GridLayoutConfig`, `PhotoShareKit`, `RemoteBadge`, `ScanProgressBanner` (owns the shared `ScanProgress.countText`), `SettingsToolbarButton`, `LibraryEmptyState`, `ShareSheet` / `AVPlayerLayerView`. Folder picking goes through SwiftUI `.fileImporter` (Settings); logs/redaction-key exports through `ShareLink` — `ShareSheet.present` remains only for the multi-file crash-report share.
 
 ### Other
 - **LocalGalleryApp.swift** — app entry, AppDelegate (BG-task registration + orientation lock), root WindowGroup, `ContentView`.
-- **Design.swift** — design tokens (`enum Design`; light-only palette) and `View.softTopScrollEdge()`.
+- **Design.swift** — design tokens (`enum Design`; light-only palette) and the gated-modifier helpers `View.softTopScrollEdge()` / `View.minimizableTabBar()`.
 - **Logging.swift** — `TeeLogger` wrapper that mirrors every `os.Logger` call into `LogStore` for the in-app LogsView. Everything is logged `privacy: .public`, so redaction relies on call sites using `Log.r.*`. Per-category `minLevel` gates both sinks (a gated `.debug` is invisible even in Console.app).
 - **Shared/** — `SharedContainer`, `WidgetSnapshot`, `WidgetDeepLink`, `WidgetRotation`, `SeededRNG`; compiled into both the host app and the widget extension.
 
@@ -131,6 +132,7 @@ catch-up regenerates the same ids on the matching day.
 - Stable photo/folder IDs derived from the file URL via SHA-256 (prefix-16 bytes, RFC 4122 variant + version-5 marker; namespace-less; matches localmusic) — grid doesn't flicker on rescan.
 - The BG-task handler in `AppDelegate.handleBackgroundRefresh` calls into `MemoryRefreshService` (held on the AppDelegate); the WindowGroup attaches the live Store via a `.task` modifier. Expiration handlers cancel the work and the cancellation actually propagates.
 - Tests: `LocalGalleryTests/Unit` + `Support` (fixtures, `TempDir`, `TestUserDefaults`, `TestGalleryStore`). The memory engine/coordinator suites pass an explicit UTC calendar or noon-UTC fixtures for timezone robustness.
+- iOS 26 APIs are adopted behind `if #available(iOS 26.0, *)` while the target stays 18: Liquid Glass chrome (PhotoChrome adapters), `tabBarMinimizeBehavior`, `scrollEdgeEffectStyle`, and the `BGContinuedProcessingTask` export shield. The UIKit nav/tab appearance overrides in `configureAppearance` are deliberately **not** gated — re-theming the system bars for glass is a separate design decision.
 
 ## Known follow-ups (deliberately not done yet)
 

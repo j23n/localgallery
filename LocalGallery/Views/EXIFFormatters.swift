@@ -65,3 +65,9 @@ enum EXIFFormatters {
         return formatter.string(fromByteCount: bytes)
     }
 }
+
+/// "1 photo" / "N photos" — the pluralized count used across cards, rows,
+/// and the selection bar.
+func photoCountLabel(_ count: Int) -> String {
+    "\(count) \(count == 1 ? "photo" : "photos")"
+}

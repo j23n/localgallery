@@ -42,21 +42,6 @@ struct AllPhotosView: View {
     }
 
     private var emptyState: some View {
-        VStack(spacing: 20) {
-            Image(systemName: "photo.stack")
-                .font(.system(size: 64, weight: .thin))
-                .foregroundStyle(Design.accentColor.opacity(0.7))
-            VStack(spacing: 8) {
-                Text("No Photos")
-                    .font(.title2)
-                    .fontWeight(.semibold)
-                    .foregroundStyle(Design.ink)
-                Text("Choose a folder in Settings to get started.")
-                    .font(.subheadline)
-                    .foregroundStyle(Design.ink2)
-                    .multilineTextAlignment(.center)
-            }
-        }
-        .padding(32)
+        LibraryEmptyState(icon: "photo.stack", title: "No Photos")
     }
 }

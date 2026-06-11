@@ -40,7 +40,7 @@ struct FolderBrowserView: View {
                 ScanProgressBanner()
             }
             ToolbarItemGroup(placement: .topBarTrailing) {
-                if displayFolder != nil && !(displayFolder?.subfolders.isEmpty ?? true) {
+                if displayFolder?.subfolders.isEmpty == false {
                     Menu {
                         Picker("Sort Folders", selection: $store.folderSortOrder) {
                             ForEach(FolderSortOrder.allCases, id: \.self) { order in
@@ -60,21 +60,8 @@ struct FolderBrowserView: View {
     }
 
     private var emptyState: some View {
-        VStack(spacing: 20) {
-            Image(systemName: "folder")
-                .font(.system(size: 64, weight: .thin))
-                .foregroundStyle(Design.accentColor.opacity(0.7))
-            VStack(spacing: 8) {
-                Text("No Folder Selected")
-                    .font(.title2)
-                    .fontWeight(.semibold)
-                Text("Set a folder in Settings to get started.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-            }
-        }
-        .padding(32)
+        LibraryEmptyState(icon: "folder", title: "No Folder Selected",
+                          message: "Set a folder in Settings to get started.")
     }
 
     @ViewBuilder

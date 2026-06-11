@@ -393,6 +393,15 @@ final class GalleryStore {
         memories.forceRegenerate()
     }
 
+    /// Backing store for the `personContactLinks` didSet. PersonLink is an
+    /// enum with associated values, so it round-trips through JSON rather
+    /// than a flat UserDefaults dict; the loader in `init` decodes each
+    /// entry tolerantly via `FailableDecodable`.
+    private func persistPersonContactLinks() {
+        guard let data = try? JSONEncoder().encode(personContactLinks) else { return }
+        defaults.set(data, forKey: "personContactLinks")
+    }
+
     /// Resolved link state for a person tag — what the UI should display.
     /// Forwards to `ContactLinker` which owns the indexes; the Store
     /// passes in the observed `personContactLinks` dictionary.

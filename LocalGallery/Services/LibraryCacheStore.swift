@@ -41,7 +41,7 @@ enum LibraryCacheStore {
                 let data = try JSONEncoder().encode(payload)
                 try data.write(to: url, options: .atomic)
             } catch {
-                Log.cache.error("Failed to save cache: \(error.localizedDescription)")
+                Log.cache.error("Failed to save cache: \(Log.r.error(error))")
             }
         }
     }
@@ -67,7 +67,7 @@ enum LibraryCacheStore {
             Log.cache.info("Loaded \(payload.allPhotos.count) photos from cache v\(payload.version)")
             return (payload.rootFolder, payload.allPhotos)
         } catch {
-            Log.cache.error("Failed to load cache: \(error.localizedDescription)")
+            Log.cache.error("Failed to load cache: \(Log.r.error(error))")
             return nil
         }
     }

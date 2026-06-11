@@ -34,7 +34,7 @@ enum MemoriesCacheStore {
                 let data = try JSONEncoder().encode(payload)
                 try data.write(to: url, options: .atomic)
             } catch {
-                Log.cache.error("Failed to save memories cache: \(error.localizedDescription)")
+                Log.cache.error("Failed to save memories cache: \(Log.r.error(error))")
             }
         }
     }
@@ -54,7 +54,7 @@ enum MemoriesCacheStore {
             Log.cache.info("Loaded \(payload.memories.count) memories from cache v\(payload.version)")
             return payload.memories
         } catch {
-            Log.cache.warning("Failed to load memories cache: \(error.localizedDescription)")
+            Log.cache.warning("Failed to load memories cache: \(Log.r.error(error))")
             try? FileManager.default.removeItem(at: url)
             return nil
         }

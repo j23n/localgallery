@@ -78,14 +78,16 @@ final class AppRouter {
             collectionsPath = [.slideshow(memory)]
             return
         }
-        // Memories haven't been generated yet OR this id no longer exists.
-        // Queue the id only when memories are still empty (cold launch); if
-        // they're populated and the id isn't there, the memory is gone.
-        if store.memories.isEmpty {
-            pendingMemoryId = id
-        } else {
+        // The id isn't resolvable yet. On a cold launch `memories` holds
+        // *yesterday's* cached entries, so non-empty is no proof the memory
+        // is gone — a widget tap on a pre-published scheduled memory (whose
+        // id only exists once today's generation runs) must stay queued
+        // until the daily regeneration has actually happened today.
+        if store.hasGeneratedMemoriesToday {
             pendingMemoryId = nil
             collectionsPath = []
+        } else {
+            pendingMemoryId = id
         }
     }
 

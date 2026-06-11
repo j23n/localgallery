@@ -137,5 +137,13 @@ extension Log {
         static func contact(_ s: String) -> String { LogRedactor.shared.token(s, kind: .contact) }
         static func filename(_ s: String) -> String { LogRedactor.shared.token(s, kind: .filename) }
         static func other(_ s: String) -> String { LogRedactor.shared.token(s, kind: .other) }
+        /// Errors: `localizedDescription` routinely embeds file names/paths
+        /// (e.g. CocoaError "The file 'IMG_4032.jpg' couldn't be opened"), so
+        /// the description is tokenized whole; the domain/code prefix carries
+        /// no identifying data and stays readable for diagnosis.
+        static func error(_ e: any Swift.Error) -> String {
+            let ns = e as NSError
+            return "\(ns.domain)#\(ns.code) \(LogRedactor.shared.token(ns.localizedDescription, kind: .other))"
+        }
     }
 }

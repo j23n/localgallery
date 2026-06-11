@@ -60,7 +60,7 @@ enum ContactsService {
             do {
                 return try await store.requestAccess(for: .contacts)
             } catch {
-                Log.contacts.error("Contacts access request failed: \(error.localizedDescription)")
+                Log.contacts.error("Contacts access request failed: \(Log.r.error(error))")
                 return false
             }
         default:
@@ -94,7 +94,7 @@ enum ContactsService {
                     ))
                 }
             } catch {
-                Log.contacts.error("Failed to enumerate contacts: \(error.localizedDescription)")
+                Log.contacts.error("Failed to enumerate contacts: \(Log.r.error(error))")
             }
             let withBirthday = collected.filter { $0.hasUsableBirthday }.count
             Log.contacts.info("Loaded \(collected.count) contacts (\(withBirthday) with birthdays)")

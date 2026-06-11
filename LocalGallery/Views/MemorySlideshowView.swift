@@ -62,8 +62,13 @@ struct MemorySlideshowView: View {
                     Color.black
 
                     if !photos.isEmpty {
+                        // `photos` is recomputed from the store on every body
+                        // evaluation; a rescan/sidecar sync can shrink it while
+                        // the slideshow is open, so the @State indices must be
+                        // bounds-protected at the read site (onChange fires
+                        // only after the body that observes the shrink).
                         let prev = photos[underlayIndex % photos.count]
-                        let cur  = photos[index]
+                        let cur  = photos[min(index, photos.count - 1)]
 
                         // Underneath = prev (held centered) so we always have
                         // something showing during the cross-fade. The current

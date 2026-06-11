@@ -1,9 +1,10 @@
 import Foundation
 
-/// Once-a-day memory generation. Currently houses the pure helpers shared by
-/// trip / birthday / on-this-day detection. The orchestrator entry point
-/// (`generate(...)`) lands in a follow-up commit; for now the Store keeps it
-/// inline and calls into these helpers.
+/// Once-a-day memory generation: the `generate(...)` orchestrator plus the
+/// pure per-type generators (trips, birthdays, on-this-day, folder events,
+/// density) and scoring/selection. Pure over its inputs — the Store owns the
+/// once-per-day gate, observed-state assignment, cache write, and widget
+/// export.
 enum MemoryEngine {
     static func haversineKm(lat1: Double, lon1: Double, lat2: Double, lon2: Double) -> Double {
         let R = 6371.0
@@ -118,8 +119,13 @@ enum MemoryEngine {
         let years = Set(deduped.map { calendar.component(.year, from: $0.1) })
         let ids = deduped.map(\.0.id)
         Log.memory.info("OnThisDay (\(Log.r.other(Self.iso8601Day.string(from: day)))): \(ids.count) photos across \(years.count) years (deduped from \(raw.count))")
+        // The id is date-qualified: a constant "onThisDay" id would let one
+        // viewing apply the 6-month seen-penalty to *every* future day's
+        // on-this-day memory even though the content differs daily. The
+        // widget's pre-published scheduled memories regenerate the same id
+        // when their day arrives, so deep links still resolve.
         return Memory(
-            id: "onThisDay", type: .onThisDay,
+            id: "onThisDay-\(Self.iso8601Day.string(from: day))", type: .onThisDay,
             title: "On this day",
             subtitle: nil,
             photoIDs: ids,
@@ -152,8 +158,9 @@ enum MemoryEngine {
             guard deduped.count >= minPhotos,
                   let first = deduped.first?.1, let last = deduped.last?.1 else { continue }
             let ids = deduped.map(\.0.id)
+            // Date-qualified for the same reason as the onThisDay id above.
             out.append(Memory(
-                id: "yearsAgo-\(milestone)", type: .yearsAgo,
+                id: "yearsAgo-\(milestone)-\(Self.iso8601Day.string(from: day))", type: .yearsAgo,
                 title: "On this day in \(targetYear)",
                 subtitle: nil,
                 photoIDs: ids,
@@ -228,7 +235,11 @@ enum MemoryEngine {
         seenMemoryIDs: [String: Date] = [:],
         surfacedClusters: [String: Date] = [:]
     ) async -> [Memory] {
-        await Task.detached(priority: .utility) {
+        // The heavy pipeline runs on a detached utility task, but the
+        // caller's cancellation (the BG-task expiration handler) is forwarded
+        // explicitly — `Task.detached` alone would swallow it and the
+        // `Task.isCancelled` checks between stages would never trip.
+        let work = Task.detached(priority: .utility) { () -> [Memory] in
             let calendar = Calendar.current
             let today = now
             let todayComponents = calendar.dateComponents([.month, .day], from: today)
@@ -265,6 +276,8 @@ enum MemoryEngine {
             Log.memory.info("YearsAgo: produced \(yearsAgo.count) memories")
 
             // === 3. (Person-over-time memories removed — only birthdays surface people now)
+
+            if Task.isCancelled { return [] }
 
             // === 4. Folder-based Event Memories ===
             var folderEventCount = 0
@@ -329,6 +342,8 @@ enum MemoryEngine {
             }
             Log.memory.info("Density: produced \(densityCount) memories (threshold=\(densityThreshold) photos/day)")
 
+            if Task.isCancelled { return [] }
+
             // === 6. Trip Detection ===
             let tripCountBefore = candidates.count
             generateTripMemories(from: photosWithDates, calendar: calendar, today: today, mePersonPath: mePersonPath, hiddenPeople: hiddenPeople, into: &candidates)
@@ -357,33 +372,9 @@ enum MemoryEngine {
                 Log.memory.info("Birthdays: skipped (toggle off)")
             }
 
-            // Cap per-memory photo count to keep slideshow/grid responsive.
-            // Sample evenly across the range to preserve temporal spread.
-            let maxPhotosPerMemory = 75
-            candidates = candidates.map { mem in
-                guard mem.photoIDs.count > maxPhotosPerMemory else { return mem }
-                let step = Double(mem.photoIDs.count) / Double(maxPhotosPerMemory)
-                let sampled = (0..<maxPhotosPerMemory).map { mem.photoIDs[Int(Double($0) * step)] }
-                return Memory(
-                    id: mem.id, type: mem.type, title: mem.title, subtitle: mem.subtitle,
-                    photoIDs: sampled, coverPhotoID: mem.coverPhotoID,
-                    dateRange: mem.dateRange, score: mem.score,
-                    yearsAgo: mem.yearsAgo, personName: mem.personName
-                )
-            }
+            if Task.isCancelled { return [] }
 
-            // Standardize every memory's subtitle to "<first date> – <last date> · N photos".
-            // Done after the photo-count sampling above so the count reflects what the
-            // user will actually see in the grid/slideshow.
-            candidates = candidates.map { mem in
-                let unified = subtitleWithCount(dateRange: mem.dateRange, count: mem.photoIDs.count)
-                return Memory(
-                    id: mem.id, type: mem.type, title: mem.title, subtitle: unified,
-                    photoIDs: mem.photoIDs, coverPhotoID: mem.coverPhotoID,
-                    dateRange: mem.dateRange, score: mem.score,
-                    yearsAgo: mem.yearsAgo, personName: mem.personName
-                )
-            }
+            candidates = finalize(candidates)
 
             // Sort by score, then greedily select top 10 with cluster
             // uniqueness — at most one member of each cluster surfaces on a
@@ -450,7 +441,45 @@ enum MemoryEngine {
 
             Log.memory.info("Selected \(selected.count) memories from \(candidates.count) candidates")
             return selected
-        }.value
+        }
+        return await withTaskCancellationHandler {
+            await work.value
+        } onCancel: {
+            work.cancel()
+        }
+    }
+
+    /// Post-processing every surfaced memory goes through, regardless of
+    /// which pipeline produced it: cap the photo count (slideshow/grid
+    /// responsiveness; sampled evenly so temporal spread survives) and
+    /// standardize the subtitle to "<first date> – <last date> · N photos".
+    /// `computeScheduledMemories` (the widget's pre-published days) calls
+    /// this too so scheduled items match same-day generated ones.
+    static func finalize(_ memories: [Memory]) -> [Memory] {
+        let maxPhotosPerMemory = 75
+        return memories.map { mem in
+            var photoIDs = mem.photoIDs
+            var coverID = mem.coverPhotoID
+            if photoIDs.count > maxPhotosPerMemory {
+                let step = Double(photoIDs.count) / Double(maxPhotosPerMemory)
+                photoIDs = (0..<maxPhotosPerMemory).map { mem.photoIDs[Int(Double($0) * step)] }
+                // Sampling can drop the cover; re-point it at the sampled
+                // middle (same neighbourhood the generators pick from) so
+                // the card image is always part of the memory's photo set.
+                if !photoIDs.contains(coverID) {
+                    coverID = photoIDs[photoIDs.count / 2]
+                }
+            }
+            // Subtitle uses the capped count — it should reflect what the
+            // user actually sees in the grid/slideshow.
+            return Memory(
+                id: mem.id, type: mem.type, title: mem.title,
+                subtitle: subtitleWithCount(dateRange: mem.dateRange, count: photoIDs.count),
+                photoIDs: photoIDs, coverPhotoID: coverID,
+                dateRange: mem.dateRange, score: mem.score,
+                yearsAgo: mem.yearsAgo, personName: mem.personName
+            )
+        }
     }
 
     // MARK: Diagnostics
@@ -573,8 +602,9 @@ enum MemoryEngine {
                   let bDay = contact.birthday?.day,
                   bMonth == todayMonth, bDay == todayDay else { continue }
 
-            // Sort by date when available; undated photos go to the end so the
-            // cover (most recent) prefers a real timestamp.
+            // Sort dated photos ascending; undated sort to the *front*
+            // (`distantPast`), so `ids.last` — the cover — is the most
+            // recent dated photo whenever one exists.
             let sortedRaw = bundle.photos.sorted { a, b in
                 (a.dateTaken ?? .distantPast) < (b.dateTaken ?? .distantPast)
             }
@@ -582,8 +612,11 @@ enum MemoryEngine {
             let ids = sorted.map(\.id)
             guard let coverID = ids.last else { continue }
 
+            // Range over dated photos only — a single undated photo must not
+            // collapse the range (and the subtitle with it) to nil.
+            let datedTimes = sorted.compactMap(\.dateTaken)
             let dateRange: ClosedRange<Date>?
-            if let first = sorted.first?.dateTaken, let last = sorted.last?.dateTaken {
+            if let first = datedTimes.first, let last = datedTimes.last {
                 dateRange = first...last
             } else {
                 dateRange = nil

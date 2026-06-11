@@ -91,7 +91,7 @@ final class CrashDiagnosticsService: NSObject, MXMetricManagerSubscriber {
                 try data.write(to: self.crashFileURL, options: .atomic)
                 self.hasPendingCrash = true
             } catch {
-                Log.bg.warning("Failed to write crash report: \(error.localizedDescription)")
+                Log.bg.warning("Failed to write crash report: \(Log.r.error(error))")
             }
         }
     }

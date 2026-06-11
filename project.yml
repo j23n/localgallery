@@ -47,7 +47,8 @@ targets:
         NSContactsUsageDescription: "LocalGallery uses your contacts to surface birthday memories for the people in your photos. Names are matched only against your photo tags — nothing leaves the device."
         UIBackgroundModes:
           - fetch
-        # Required so `UIDocumentPickerViewController` enables third-party
+        # Required so the system folder picker (SwiftUI `.fileImporter`,
+        # which presents `UIDocumentPickerViewController`) enables third-party
         # file providers (Google Drive, Proton Drive, Cryptomator, Dropbox).
         # Without this key the system assumes the app wants documents copied
         # into its sandbox; providers that vend folders only via streaming
@@ -56,6 +57,9 @@ targets:
         BGTaskSchedulerPermittedIdentifiers:
           - com.j23n.localgallery.app.dailyMemories
           - com.j23n.localgallery.app.sidecarRefresh
+          # iOS 26+ continued-processing task that keeps the slideshow video
+          # export alive when the app is backgrounded (VideoExportShield).
+          - com.j23n.localgallery.app.videoExport
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.j23n.localgallery.app

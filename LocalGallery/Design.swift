@@ -38,4 +38,16 @@ extension View {
             self
         }
     }
+
+    /// Tab bar shrinks to a floating accessory while the user scrolls down
+    /// and re-expands on scroll-up (iOS 26+ — no-op on older OSes). More
+    /// photo per screen on the three grid tabs.
+    @ViewBuilder
+    func minimizableTabBar() -> some View {
+        if #available(iOS 26.0, *) {
+            self.tabBarMinimizeBehavior(.onScrollDown)
+        } else {
+            self
+        }
+    }
 }

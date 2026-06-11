@@ -69,6 +69,7 @@ enum SlideshowVideoRenderer {
         var images: [CGImage] = []
         images.reserveCapacity(photos.count)
         for (i, photo) in photos.enumerated() {
+            try Task.checkCancellation()
             let ui = await loadImage(photo.url, canvas)
             guard let cg = ui?.cgImage ?? ui?.normalizedCGImage() else {
                 continue
@@ -88,6 +89,11 @@ enum SlideshowVideoRenderer {
         let totalSegments = images.count
 
         for (idx, cg) in images.enumerated() {
+            // Caller cancellation (in-app Cancel, or the continued-processing
+            // shield expiring) must stop the encode promptly — the wait loops
+            // below only observe it when the writer applies backpressure.
+            try Task.checkCancellation()
+
             // Hold the current frame.
             for _ in 0..<holdFrames {
                 while !input.isReadyForMoreMediaData { try await Task.sleep(nanoseconds: 5_000_000) }

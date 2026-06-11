@@ -12,6 +12,10 @@ struct WidgetBackgroundImage: View {
         if let image {
             Image(uiImage: image)
                 .resizable()
+                // Opt the photo out of the Home Screen tint treatment —
+                // without this, accented/tinted Home Screens render it as a
+                // washed-out monochrome.
+                .widgetAccentedRenderingMode(.fullColor)
                 .aspectRatio(contentMode: .fill)
                 .overlay(alignment: .bottom) {
                     LinearGradient(

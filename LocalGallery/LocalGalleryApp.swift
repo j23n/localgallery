@@ -11,8 +11,9 @@ import BackgroundTasks
 @MainActor
 final class AppDelegate: NSObject, UIApplicationDelegate {
     /// `BGTaskSchedulerPermittedIdentifiers` whitelists these exact strings
-    /// in the Info.plist; both must stay in sync. `nonisolated` so the
-    /// scheduling helpers can read it.
+    /// in the Info.plist; they must stay in sync (the video-export identifier
+    /// lives on `VideoExportShield`). `nonisolated` so the scheduling helpers
+    /// can read it.
     nonisolated static let backgroundRefreshIdentifier = "com.j23n.localgallery.app.dailyMemories"
     nonisolated static let sidecarRefreshIdentifier = "com.j23n.localgallery.app.sidecarRefresh"
 
@@ -41,6 +42,19 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             using: nil
         ) { task in
             Self.handleSidecarRefresh(task: task as! BGAppRefreshTask, service: sidecarService)
+        }
+
+        // Continued-processing shield for the slideshow video export — keeps
+        // the encode running (with system progress UI) when the user
+        // backgrounds the app mid-render. The identifier lives on the shield;
+        // it must also stay listed in BGTaskSchedulerPermittedIdentifiers.
+        if #available(iOS 26.0, *) {
+            BGTaskScheduler.shared.register(
+                forTaskWithIdentifier: VideoExportShield.taskIdentifier,
+                using: nil
+            ) { task in
+                VideoExportShield.shared.adopt(task as! BGContinuedProcessingTask)
+            }
         }
 
         NotificationCenter.default.addObserver(
@@ -325,6 +339,7 @@ struct ContentView: View {
             }
             .tag(AppRouter.Tab.photos)
         }
+        .minimizableTabBar()
         .task {
             await store.restoreFolder()
         }

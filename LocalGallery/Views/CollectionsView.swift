@@ -165,16 +165,28 @@ struct CollectionsView: View {
         renderProgress = 0
         renderedVideoURL = nil
 
+        // Ask the system to keep the encode alive (with live progress UI) if
+        // the user backgrounds the app mid-render. Declined or pre-iOS-26 →
+        // the render runs in-app only, as before. Expiration (or cancel from
+        // the system UI) mirrors the in-app Cancel button.
+        if #available(iOS 26.0, *) {
+            VideoExportShield.shared.begin(title: "Exporting “\(memory.title)”") {
+                renderTask?.cancel()
+                renderTask = nil
+                renderingMemory = nil
+            }
+        }
+
         renderTask = Task.detached(priority: .userInitiated) {
             // Pre-flight: pull non-local photos down before the renderer
             // tries to read their bytes — without this it would silently
             // fail on placeholders.
             let remote = photos.filter { $0.locality != .local }
             for p in remote {
-                if Task.isCancelled { return }
+                if Task.isCancelled { await endExportShield(success: false); return }
                 _ = try? await mgr.ensureMaterialized(p)
             }
-            if Task.isCancelled { return }
+            if Task.isCancelled { await endExportShield(success: false); return }
 
             let loader: (URL, CGSize) async -> UIImage? = { url, _ in
                 await mgr.loadFullImage(for: url)
@@ -184,15 +196,22 @@ struct CollectionsView: View {
                     photos: photos,
                     title: memory.title,
                     loadImage: loader,
-                    progress: { @MainActor p in renderProgress = p }
+                    progress: { @MainActor p in
+                        renderProgress = p
+                        if #available(iOS 26.0, *) {
+                            VideoExportShield.shared.report(progress: p)
+                        }
+                    }
                 )
                 await MainActor.run {
+                    endExportShield(success: true)
                     guard renderingMemory?.id == memory.id else { return }
                     renderingMemory = nil
                     renderedVideoURL = url
                 }
             } catch {
                 await MainActor.run {
+                    endExportShield(success: false)
                     // Same guard as the success path: a cancelled render's
                     // throw must not pop the error alert over whatever the
                     // user moved on to.
@@ -201,6 +220,15 @@ struct CollectionsView: View {
                     renderError = String(describing: error)
                 }
             }
+        }
+    }
+
+    /// Every exit path of the render task funnels through here so the
+    /// system-side continued-processing task can't be left dangling.
+    @MainActor
+    private func endExportShield(success: Bool) {
+        if #available(iOS 26.0, *) {
+            VideoExportShield.shared.end(success: success)
         }
     }
 

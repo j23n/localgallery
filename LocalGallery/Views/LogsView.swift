@@ -1,5 +1,7 @@
+import CoreTransferable
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 /// In-app log viewer. Reads from `LogStore.shared`, which the `TeeLogger`
 /// wrapper in `Logging.swift` populates from every `Log.<category>.<level>`
@@ -86,9 +88,10 @@ struct LogsView: View {
                 UIPasteboard.general.string = logStore.asText
                 showCopyAlert = true
             } label: { Label("Copy", systemImage: "doc.on.doc") }
-            Button {
-                presentShareSheet()
-            } label: { Label("Share", systemImage: "square.and.arrow.up") }
+            ShareLink(
+                item: LogExportFile(text: logStore.asText),
+                preview: SharePreview("LocalGallery Logs")
+            ) { Label("Share", systemImage: "square.and.arrow.up") }
             Divider()
             Button(role: .destructive) {
                 logStore.clear()
@@ -175,13 +178,22 @@ struct LogsView: View {
         }
     }
 
-    private func presentShareSheet() {
-        let text = logStore.asText
-        let stamp = Date().formatted(.iso8601.year().month().day().dateSeparator(.dash))
-        let fileName = "localgallery-logs-\(stamp).txt"
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
-        guard (try? text.write(to: url, atomically: true, encoding: .utf8)) != nil else { return }
-        ShareSheet.present(items: [url])
+}
+
+/// Shares the log buffer as a `.txt` file via `ShareLink`. The snapshot of
+/// the text is taken when the menu renders; the file itself is only written
+/// when the user actually commits to a share destination.
+private struct LogExportFile: Transferable {
+    let text: String
+
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(exportedContentType: .plainText) { file in
+            let stamp = Date().formatted(.iso8601.year().month().day().dateSeparator(.dash))
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("localgallery-logs-\(stamp).txt")
+            try file.text.write(to: url, atomically: true, encoding: .utf8)
+            return SentTransferredFile(url)
+        }
     }
 }
 

@@ -218,19 +218,21 @@ struct PhotoViewerView: View {
     // MARK: Chrome
 
     private var topBar: some View {
-        ZStack {
-            // Centred pill — anchored to screen mid regardless of the X
-            // button. Fixed width + reserved second line so the pill stays
-            // the same size whether or not a given photo has location data.
-            if let photo = currentPhoto, let lines = PhotoChrome.pillLines(for: photo) {
-                ChromePill(date: lines.date, location: lines.location)
-                    .opacity(isInfoOpen ? 0 : 1)
-                    .animation(.easeInOut(duration: 0.2), value: isInfoOpen)
-            }
+        ChromeGlassGroup {
+            ZStack {
+                // Centred pill — anchored to screen mid regardless of the X
+                // button. Fixed width + reserved second line so the pill stays
+                // the same size whether or not a given photo has location data.
+                if let photo = currentPhoto, let lines = PhotoChrome.pillLines(for: photo) {
+                    ChromePill(date: lines.date, location: lines.location)
+                        .opacity(isInfoOpen ? 0 : 1)
+                        .animation(.easeInOut(duration: 0.2), value: isInfoOpen)
+                }
 
-            HStack {
-                ViewerDismissButton { dismiss() }
-                Spacer()
+                HStack {
+                    ViewerDismissButton { dismiss() }
+                    Spacer()
+                }
             }
         }
         .padding(.horizontal)
@@ -238,10 +240,12 @@ struct PhotoViewerView: View {
     }
 
     private var bottomActionBar: some View {
-        HStack(spacing: 12) {
-            shareButton
-            Spacer()
-            infoButton
+        ChromeGlassGroup {
+            HStack(spacing: 12) {
+                shareButton
+                Spacer()
+                infoButton
+            }
         }
         .padding(.horizontal, 24)
         .padding(.bottom, 4)
@@ -260,7 +264,7 @@ struct PhotoViewerView: View {
                 .foregroundStyle(.white)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 9)
-                .background(.white.opacity(0.18), in: Capsule())
+                .chromeGlass(in: Capsule(), legacyOpacity: 0.18)
         }
     }
 
@@ -268,15 +272,18 @@ struct PhotoViewerView: View {
         Button {
             withAnimation(Self.infoOpenSpring) { isInfoOpen.toggle() }
         } label: {
-            Label("Info", systemImage: isInfoOpen ? "info.circle.fill" : "info.circle")
+            let label = Label("Info", systemImage: isInfoOpen ? "info.circle.fill" : "info.circle")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(isInfoOpen ? .black : .white)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 9)
-                .background(
-                    isInfoOpen ? Color.white.opacity(0.92) : Color.white.opacity(0.18),
-                    in: Capsule()
-                )
+            // Open state keeps the near-opaque white fill on every OS — it's
+            // a selected-state indicator, not translucent chrome.
+            if isInfoOpen {
+                label.background(Color.white.opacity(0.92), in: Capsule())
+            } else {
+                label.chromeGlass(in: Capsule(), legacyOpacity: 0.18)
+            }
         }
     }
 
@@ -289,6 +296,10 @@ struct PhotoViewerView: View {
     /// milliseconds to viewer presentation.
     private static let filmstripWindow = 50
 
+    /// Programmatic centring of the filmstrip on the current photo —
+    /// `ScrollPosition` replaces the previous `ScrollViewReader` wrapper.
+    @State private var filmstripPosition = ScrollPosition()
+
     private var filmstripPhotos: ArraySlice<PhotoFile> {
         guard !photos.isEmpty else { return photos.prefix(0) }
         let curIdx = currentIndex ?? 0
@@ -298,40 +309,42 @@ struct PhotoViewerView: View {
     }
 
     private var filmstrip: some View {
-        ScrollViewReader { proxy in
-            ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 4) {
-                    ForEach(filmstripPhotos) { photo in
-                        Button {
-                            withAnimation(.easeOut(duration: 0.2)) {
-                                currentPhotoID = photo.id
-                            }
-                        } label: {
-                            ThumbnailView(url: photo.url, size: 56, cornerRadius: 6, isRemote: photo.locality.isRemotePlaceholder)
-                                .frame(width: 56, height: 56)
-                                .scaleEffect(photo.id == currentPhotoID ? 1.08 : 1.0)
-                                .overlay {
-                                    if photo.id == currentPhotoID {
-                                        RoundedRectangle(cornerRadius: 6)
-                                            .stroke(.white, lineWidth: 2)
-                                    }
-                                }
-                                .animation(.easeOut(duration: 0.2), value: currentPhotoID)
+        ScrollView(.horizontal, showsIndicators: false) {
+            LazyHStack(spacing: 4) {
+                ForEach(filmstripPhotos) { photo in
+                    Button {
+                        withAnimation(.easeOut(duration: 0.2)) {
+                            currentPhotoID = photo.id
                         }
-                        .buttonStyle(.plain)
-                        .id(photo.id)
+                    } label: {
+                        ThumbnailView(url: photo.url, size: 56, cornerRadius: 6, isRemote: photo.locality.isRemotePlaceholder)
+                            .frame(width: 56, height: 56)
+                            .scaleEffect(photo.id == currentPhotoID ? 1.08 : 1.0)
+                            .overlay {
+                                if photo.id == currentPhotoID {
+                                    RoundedRectangle(cornerRadius: 6)
+                                        .stroke(.white, lineWidth: 2)
+                                }
+                            }
+                            .animation(.easeOut(duration: 0.2), value: currentPhotoID)
                     }
+                    .buttonStyle(.plain)
+                    .id(photo.id)
                 }
-                .padding(.horizontal, 16)
             }
-            .frame(height: 70)
-            .onAppear {
-                proxy.scrollTo(currentPhotoID, anchor: .center)
-            }
-            .onChange(of: currentPhotoID) { _, id in
-                withAnimation(.easeOut(duration: 0.25)) {
-                    proxy.scrollTo(id, anchor: .center)
-                }
+            // Associates each thumb's id with the scroll view so the
+            // `ScrollPosition` id-based scrolls below can resolve them.
+            .scrollTargetLayout()
+            .padding(.horizontal, 16)
+        }
+        .frame(height: 70)
+        .scrollPosition($filmstripPosition, anchor: .center)
+        .onAppear {
+            filmstripPosition.scrollTo(id: currentPhotoID, anchor: .center)
+        }
+        .onChange(of: currentPhotoID) { _, id in
+            withAnimation(.easeOut(duration: 0.25)) {
+                filmstripPosition.scrollTo(id: id, anchor: .center)
             }
         }
     }

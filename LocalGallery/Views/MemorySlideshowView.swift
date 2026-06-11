@@ -150,6 +150,23 @@ struct MemorySlideshowView: View {
     // MARK: - Chrome
 
     private var topBar: some View {
+        ChromeGlassGroup {
+            topBarContent
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .padding(.bottom, 12)
+        .background(
+            // Hit-testing intentionally enabled so taps that miss the small
+            // ellipsis / x hit targets are absorbed by the chrome instead of
+            // falling through to the goNext / goPrev tap zones beneath.
+            LinearGradient(colors: [Color.black.opacity(0.55), .clear],
+                           startPoint: .top, endPoint: .bottom)
+                .ignoresSafeArea(edges: .top)
+        )
+    }
+
+    private var topBarContent: some View {
         ZStack {
             // Centred pill — anchored to screen mid regardless of corner buttons.
             if let lines = currentPhoto.flatMap(PhotoChrome.pillLines(for:)) {
@@ -200,21 +217,10 @@ struct MemorySlideshowView: View {
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(.white)
                         .frame(width: 36, height: 36)
-                        .background(Color.white.opacity(0.16), in: Circle())
+                        .chromeGlass(in: Circle(), legacyOpacity: 0.16)
                 }
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 8)
-        .padding(.bottom, 12)
-        .background(
-            // Hit-testing intentionally enabled so taps that miss the small
-            // ellipsis / x hit targets are absorbed by the chrome instead of
-            // falling through to the goNext / goPrev tap zones beneath.
-            LinearGradient(colors: [Color.black.opacity(0.55), .clear],
-                           startPoint: .top, endPoint: .bottom)
-                .ignoresSafeArea(edges: .top)
-        )
     }
 
     private var bottomChrome: some View {

@@ -44,45 +44,32 @@ struct ThumbnailView: View {
                     .frame(width: size, height: size)
                     .transition(.opacity)
             }
-
+        }
+        .overlay(alignment: .topTrailing) {
             if isRemote {
-                VStack {
-                    HStack {
-                        Spacer()
-                        RemoteBadge(size: max(10, size * 0.09))
-                            .padding(4)
-                    }
-                    Spacer()
-                }
+                RemoteBadge(size: max(10, size * 0.09))
+                    .padding(4)
             }
-
+        }
+        .overlay(alignment: .bottomTrailing) {
             if isVideo {
-                VStack {
-                    Spacer()
-                    HStack {
-                        Spacer()
-                        Image(systemName: "play.fill")
-                            .font(.system(size: max(10, size * 0.1)))
-                            .foregroundStyle(.white)
-                            .padding(4)
-                            .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 4))
-                            .padding(4)
-                    }
-                }
-            } else if isLivePhoto {
-                VStack {
-                    HStack {
-                        Text("LIVE")
-                            .font(.system(size: max(8, size * 0.08), weight: .bold, design: .rounded))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 2)
-                            .background(.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 3))
-                            .padding(4)
-                        Spacer()
-                    }
-                    Spacer()
-                }
+                Image(systemName: "play.fill")
+                    .font(.system(size: max(10, size * 0.1)))
+                    .foregroundStyle(.white)
+                    .padding(4)
+                    .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 4))
+                    .padding(4)
+            }
+        }
+        .overlay(alignment: .topLeading) {
+            if isLivePhoto && !isVideo {
+                Text("LIVE")
+                    .font(.system(size: max(8, size * 0.08), weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 2)
+                    .background(.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 3))
+                    .padding(4)
             }
         }
         .animation(.easeIn(duration: 0.2), value: thumbnail != nil)

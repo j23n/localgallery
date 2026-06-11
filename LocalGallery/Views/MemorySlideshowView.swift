@@ -124,29 +124,6 @@ struct MemorySlideshowView: View {
         }
     }
 
-    @ViewBuilder
-    private func pillView(date: String?, location: String?) -> some View {
-        VStack(spacing: 1) {
-            // Reserve both lines so the pill height stays constant whether or
-            // not a given photo has location data.
-            Text(date ?? " ")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.white)
-                .lineLimit(1)
-                .truncationMode(.tail)
-            Text(location ?? " ")
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(.white.opacity(0.78))
-                .lineLimit(1)
-                .truncationMode(.tail)
-        }
-        .multilineTextAlignment(.center)
-        .frame(width: PhotoChrome.pillWidth)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(Color.white.opacity(0.14), in: Capsule())
-    }
-
     // MARK: - Tap + hold zone
 
     @ViewBuilder
@@ -176,19 +153,11 @@ struct MemorySlideshowView: View {
         ZStack {
             // Centred pill — anchored to screen mid regardless of corner buttons.
             if let lines = currentPhoto.flatMap(PhotoChrome.pillLines(for:)) {
-                pillView(date: lines.date, location: lines.location)
+                ChromePill(date: lines.date, location: lines.location)
             }
 
             HStack {
-                Button {
-                    dismiss()
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .frame(width: 36, height: 36)
-                        .background(Color.white.opacity(0.16), in: Circle())
-                }
+                ViewerDismissButton { dismiss() }
 
                 Spacer()
 

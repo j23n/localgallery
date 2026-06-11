@@ -32,24 +32,42 @@ struct ScanProgressBanner: View {
     private func detail(for progress: ScanProgress) -> String {
         switch progress.phase {
         case .scanning:
-            return "Scanning… \(progress.processed.formatted()) found"
+            return "Scanning… \(progress.countText)"
         case .enriching:
-            guard let total = progress.total, total > 0 else {
-                return "Reading metadata… \(progress.processed.formatted())"
+            if progress.total == nil {
+                return "Reading metadata… \(progress.countText)"
             }
-            let elapsed = Date().timeIntervalSince(progress.startedAt)
-            if progress.processed > 0, elapsed > 1 {
-                let throughput = Double(progress.processed) / elapsed
-                let remaining = max(0, total - progress.processed)
+            return progress.countText
+        }
+    }
+}
+
+extension ScanProgress {
+    /// Shared count/ETA text: "X found" while scanning, "X / Y · ~M:SS"
+    /// while enriching (ETA from observed throughput since `startedAt`).
+    /// Used by the toolbar banner and the Settings progress row — callers
+    /// add their own phase prefix.
+    var countText: String {
+        switch phase {
+        case .scanning:
+            return "\(processed.formatted()) found"
+        case .enriching:
+            guard let total, total > 0 else {
+                return processed.formatted()
+            }
+            let elapsed = Date().timeIntervalSince(startedAt)
+            if processed > 0, elapsed > 1 {
+                let throughput = Double(processed) / elapsed
+                let remaining = max(0, total - processed)
                 let secs = Int((Double(remaining) / max(throughput, 0.001)).rounded())
                 if secs > 0 {
                     let m = secs / 60
                     let s = secs % 60
                     let eta = m > 0 ? String(format: "~%d:%02d", m, s) : "~\(s)s"
-                    return "\(progress.processed.formatted()) / \(total.formatted()) · \(eta)"
+                    return "\(processed.formatted()) / \(total.formatted()) · \(eta)"
                 }
             }
-            return "\(progress.processed.formatted()) / \(total.formatted())"
+            return "\(processed.formatted()) / \(total.formatted())"
         }
     }
 }

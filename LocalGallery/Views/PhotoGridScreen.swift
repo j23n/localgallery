@@ -315,8 +315,9 @@ struct PhotoGridScreen: View {
                     withAnimation { proxy.scrollTo("__top__", anchor: .top) }
                 }
                 .simultaneousGesture(
-                    MagnificationGesture()
-                        .onChanged { scale in
+                    MagnifyGesture()
+                        .onChanged { value in
+                            let scale = value.magnification
                             if !isPinching {
                                 isPinching = true
                                 pinchBaseTier = sizeTier
@@ -349,6 +350,10 @@ struct PhotoGridScreen: View {
             sectionTracker.reset()
             liveDateRange = ""
             await recomputeFilter()
+        }
+        .onDisappear {
+            dateRangeUpdateTask?.cancel()
+            dateRangeUpdateTask = nil
         }
         .fullScreenCover(item: $viewerPhoto) { _ in
             PhotoViewerView(photos: filtered, currentPhotoID: $viewerCurrentPhotoID)
@@ -650,7 +655,7 @@ struct PhotoGridScreen: View {
 
             Text(selected.isEmpty
                  ? "Select items"
-                 : "\(selected.count) \(selected.count == 1 ? "photo" : "photos") selected")
+                 : "\(photoCountLabel(selected.count)) selected")
                 .font(.system(size: 13))
                 .foregroundStyle(Design.ink2)
 

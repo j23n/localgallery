@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import SwiftUI
 
 /// Helpers for rendering the date+location pill that appears in both the
 /// photo viewer's top bar and the memory slideshow's top bar. Pure functions
@@ -62,5 +63,48 @@ enum PhotoChrome {
             return localized
         }
         return nil
+    }
+}
+
+/// The shared two-line date/location pill drawn over the photo viewer's and
+/// the memory slideshow's top bars. Both lines are always reserved so the
+/// pill height stays constant whether or not a given photo has location data.
+struct ChromePill: View {
+    let date: String?
+    let location: String?
+
+    var body: some View {
+        VStack(spacing: 1) {
+            Text(date ?? " ")
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Text(location ?? " ")
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundStyle(.white.opacity(0.78))
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .multilineTextAlignment(.center)
+        .frame(width: PhotoChrome.pillWidth)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(.white.opacity(0.14), in: Capsule())
+    }
+}
+
+/// Circular translucent "X" shared by the photo viewer and memory slideshow.
+struct ViewerDismissButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "xmark")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 36, height: 36)
+                .background(.white.opacity(0.16), in: Circle())
+        }
     }
 }

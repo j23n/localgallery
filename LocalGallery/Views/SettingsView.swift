@@ -7,7 +7,7 @@ struct SettingsView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var showPicker = false
     @AppStorage("crashReportingEnabled") private var crashReportingEnabled = false
-    private var crashService = CrashDiagnosticsService.shared
+    private let crashService = CrashDiagnosticsService.shared
 
     private static let githubURL = URL(string: "https://github.com/j23n/localgallery")!
 
@@ -245,27 +245,8 @@ struct SettingsView: View {
     }
 
     private func scanProgressDetail(_ progress: ScanProgress) -> String {
-        switch progress.phase {
-        case .scanning:
-            return "\(progress.processed.formatted()) found"
-        case .enriching:
-            if let total = progress.total, total > 0 {
-                let elapsed = Date().timeIntervalSince(progress.startedAt)
-                if progress.processed > 0, elapsed > 1 {
-                    let throughput = Double(progress.processed) / elapsed
-                    let remaining = max(0, total - progress.processed)
-                    let secs = Int((Double(remaining) / max(throughput, 0.001)).rounded())
-                    if secs > 0 {
-                        let m = secs / 60
-                        let s = secs % 60
-                        let eta = m > 0 ? String(format: "~%d:%02d", m, s) : "~\(s)s"
-                        return "\(progress.processed.formatted()) / \(total.formatted()) · \(eta)"
-                    }
-                }
-                return "\(progress.processed.formatted()) / \(total.formatted())"
-            }
-            return "\(progress.processed.formatted())"
-        }
+        // Shared count/ETA text — see `ScanProgress.countText`.
+        progress.countText
     }
 
     // MARK: - Crash banner
@@ -333,7 +314,7 @@ struct SettingsView: View {
         Section("Cloud Storage") {
             if let stats = cloudStats {
                 LabeledContent("Downloaded") {
-                    Text("\(stats.materializedCount) (\(formatBytes(stats.materializedBytes)))")
+                    Text("\(stats.materializedCount) (\(EXIFFormatters.fileSize(stats.materializedBytes)))")
                         .foregroundStyle(.secondary)
                 }
                 LabeledContent("Placeholders") {
@@ -397,11 +378,6 @@ struct SettingsView: View {
         }
     }
 
-    private func formatBytes(_ bytes: Int64) -> String {
-        let formatter = ByteCountFormatter()
-        formatter.countStyle = .file
-        return formatter.string(fromByteCount: bytes)
-    }
 }
 
 // MARK: - Hidden People sub-screen
@@ -460,7 +436,7 @@ private struct HiddenPersonRow: View {
                 Text(person.displayName)
                     .font(.system(size: 15, weight: .medium))
                     .foregroundStyle(Design.ink)
-                Text("\(person.count) \(person.count == 1 ? "photo" : "photos")")
+                Text(photoCountLabel(person.count))
                     .font(.system(size: 12))
                     .foregroundStyle(Design.ink3)
             }
@@ -528,7 +504,7 @@ struct MePersonPicker: View {
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(person.displayName)
                                     .foregroundStyle(Design.ink)
-                                Text("\(person.count) \(person.count == 1 ? "photo" : "photos")")
+                                Text(photoCountLabel(person.count))
                                     .font(.system(size: 12))
                                     .foregroundStyle(Design.ink3)
                             }

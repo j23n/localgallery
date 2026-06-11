@@ -10,7 +10,7 @@ struct LogsView: View {
     @State private var searchText = ""
     @State private var isFollowing = true
     @State private var showCopyAlert = false
-    @State private var logStore = LogStore.shared
+    private let logStore = LogStore.shared
     @State private var scrollPosition = ScrollPosition(edge: .bottom)
 
     private static let timeFormatter: DateFormatter = {

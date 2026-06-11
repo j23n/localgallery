@@ -13,7 +13,7 @@ import SwiftUI
 struct SettingsToolbarButton: View {
     @Binding var isPresented: Bool
     @AppStorage("crashReportingEnabled") private var crashReportingEnabled = false
-    var crashService = CrashDiagnosticsService.shared
+    private let crashService = CrashDiagnosticsService.shared
 
     var body: some View {
         Button { isPresented = true } label: {

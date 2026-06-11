@@ -8,35 +8,11 @@ import os
 
 // MARK: - Decode concurrency limiter
 
-/// Async counting semaphore — gates concurrent ImageIO / AVAsset thumbnail
-/// decodes so fast scrolling doesn't exhaust the IOSurface pool (the
-/// `CMPhotoJFIFUtilities -17102` / `IOSurface creation failed` errors).
-private actor DecodeLimiter {
-    private let limit: Int
-    private var active = 0
-    private var waiters: [CheckedContinuation<Void, Never>] = []
-
-    init(limit: Int) { self.limit = limit }
-
-    func acquire() async {
-        if active < limit {
-            active += 1
-            return
-        }
-        await withCheckedContinuation { waiters.append($0) }
-    }
-
-    func release() {
-        if !waiters.isEmpty {
-            waiters.removeFirst().resume()
-        } else {
-            active -= 1
-        }
-    }
-}
-
-/// File-level instance — `Sendable` because actors are always `Sendable`.
-private let decodeLimiter = DecodeLimiter(limit: 4)
+/// Gates concurrent ImageIO / AVAsset thumbnail decodes so fast scrolling
+/// doesn't exhaust the IOSurface pool (the `CMPhotoJFIFUtilities -17102` /
+/// `IOSurface creation failed` errors). File-level instance — `Sendable`
+/// because actors are always `Sendable`.
+private let decodeLimiter = AsyncSemaphore(limit: 4)
 
 /// Owns the in-memory and on-disk thumbnail caches plus the full-resolution
 /// image cache used by the viewer/slideshow. Generation runs on detached
@@ -56,12 +32,10 @@ final class ThumbnailService {
     /// retries before the provider gets asked again.
     private static let sentinelTTL: TimeInterval = 24 * 60 * 60
 
-    static var defaultDiskCacheDir: URL {
-        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("thumbnails", isDirectory: true)
-    }
-
-    init(thumbnailDir: URL = ThumbnailService.defaultDiskCacheDir) {
+    /// No default — the directory comes from `GalleryPaths` (via the Store)
+    /// so a missed injection can't silently write to production paths in
+    /// tests.
+    init(thumbnailDir: URL) {
         self.thumbnailDiskCacheDir = thumbnailDir
         try? FileManager.default.createDirectory(at: thumbnailDir, withIntermediateDirectories: true)
         thumbnailCache.totalCostLimit = 100 * 1024 * 1024

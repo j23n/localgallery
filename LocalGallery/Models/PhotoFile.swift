@@ -26,8 +26,6 @@ enum PhotoLocality: Codable, Hashable, Sendable {
 enum SidecarStatus: Codable, Hashable, Sendable {
     case absent
     case cached(FileProviderDetector.ContentVersion)
-    case pendingFetch
-    case fetchFailed(reason: String)
 }
 
 struct PhotoFile: Identifiable, Hashable, Codable, Sendable {

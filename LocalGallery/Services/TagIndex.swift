@@ -67,8 +67,7 @@ final class TagIndex {
     /// actor; inputs and outputs are all Sendable value types.
     nonisolated static func aggregateTagsAndPeople(
         photosForTag: [String: [PhotoFile]],
-        canonicalPath: [String: String],
-        now: Date = Date()
+        canonicalPath: [String: String]
     ) -> (tags: [TagSuggestion], people: [TagSuggestion]) {
         // Build a TagSuggestion for every key in photosForTag — including the
         // virtual Places/* prefixes that no photo carries exactly.

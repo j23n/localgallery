@@ -72,13 +72,14 @@ enum PhotoExporter {
     /// Returns a URL suitable to hand to a `UIActivityViewController`.
     /// `.original` and any video return `photo.url`. Other tiers render via
     /// `CGImageSource` thumbnail at `maxEdge`, encoded JPEG, written atomic.
+    ///
+    /// Nonisolated async, so the render already runs on the global executor,
+    /// off the caller's actor — no `Task.detached` needed.
     static func export(_ photo: PhotoFile, quality: PhotoQuality) async throws -> URL {
         if quality == .original || photo.isVideo {
             return photo.url
         }
-        return try await Task.detached(priority: .userInitiated) {
-            try renderJPEG(from: photo, quality: quality)
-        }.value
+        return try renderJPEG(from: photo, quality: quality)
     }
 
     private static func renderJPEG(from photo: PhotoFile, quality: PhotoQuality) throws -> URL {
@@ -98,8 +99,11 @@ enum PhotoExporter {
         }
 
         let stem = photo.url.deletingPathExtension().lastPathComponent
+        // Stable-ID prefix: two photos named IMG_1234 in different folders
+        // (or a re-share while a share sheet still references the previous
+        // file) must not overwrite each other's exports.
         let outURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("\(stem)-\(quality.rawValue).jpg")
+            .appendingPathComponent("\(photo.id.uuidString.prefix(8))-\(stem)-\(quality.rawValue).jpg")
         // Pre-clean so a stale earlier export isn't picked up by mistake.
         try? FileManager.default.removeItem(at: outURL)
 

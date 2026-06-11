@@ -195,6 +195,11 @@ final class GalleryStore {
     /// tags/country codes/face regions even when the source `.xmp` files
     /// have been evicted by the provider.
     @ObservationIgnored private let sidecarCache: SidecarCacheStore
+    /// Persisted scan result (folder tree + flat photos), reloaded on launch
+    /// so the grid renders before the first rescan finishes.
+    @ObservationIgnored private let libraryCache: JSONDiskCache<LibrarySnapshot>
+    /// Persisted `[Memory]` from the last generation.
+    @ObservationIgnored private let memoriesCache: JSONDiskCache<[Memory]>
     /// Diffs the scanner's sidecar manifest against `sidecarCache` and
     /// fetches the deltas through `NSFileCoordinator`. Observed by the
     /// top-of-grid sync banner.
@@ -203,7 +208,6 @@ final class GalleryStore {
     // MARK: Injected seams (test-overridable; production uses `.production` /
     // `.standard` defaults so existing call sites are unchanged).
 
-    @ObservationIgnored private let paths: GalleryPaths
     @ObservationIgnored let defaults: UserDefaults
     @ObservationIgnored let clock: any Clock
     @ObservationIgnored private let contactsService: any ContactsServicing
@@ -223,12 +227,21 @@ final class GalleryStore {
         clock: any Clock = SystemClock(),
         contactsService: any ContactsServicing = LiveContactsService()
     ) {
-        self.paths = paths
         self.defaults = defaults
         self.clock = clock
         self.contactsService = contactsService
         self.bookmarks = BookmarkManager(defaults: defaults, bookmarkKey: paths.bookmarkKey)
         self.thumbnailService = ThumbnailService(thumbnailDir: paths.thumbnailDir)
+        self.libraryCache = JSONDiskCache(
+            url: paths.libraryCacheURL,
+            version: LibrarySnapshot.version,
+            label: "library cache"
+        )
+        self.memoriesCache = JSONDiskCache(
+            url: paths.memoriesCacheURL,
+            version: MemoriesCacheSchema.version,
+            label: "memories cache"
+        )
         let sidecarCache = SidecarCacheStore(url: paths.sidecarCacheURL)
         self.sidecarCache = sidecarCache
         self.sidecarSync = SidecarSyncService(cache: sidecarCache)
@@ -397,20 +410,21 @@ final class GalleryStore {
         bookmarks.resolve()
     }
 
-    // MARK: - Disk Cache (forwarded to LibraryCacheStore / MemoriesCacheStore)
+    // MARK: - Disk Cache
 
     private func saveCache() {
         guard let root = rootFolder else { return }
-        LibraryCacheStore.save(rootFolder: root, allPhotos: allPhotos, to: paths.libraryCacheURL)
+        libraryCache.save(LibrarySnapshot(rootFolder: root, allPhotos: allPhotos))
     }
 
     private func saveMemoriesCache() {
-        MemoriesCacheStore.save(memories, to: paths.memoriesCacheURL)
+        memoriesCache.save(memories)
     }
 
     private func loadMemoriesCache() {
-        if let cached = MemoriesCacheStore.load(from: paths.memoriesCacheURL) {
+        if let cached = memoriesCache.load() {
             self.memories = cached
+            Log.cache.info("Loaded \(cached.count) memories from cache")
         }
     }
 
@@ -508,10 +522,16 @@ final class GalleryStore {
 
     @discardableResult
     internal func loadCache() -> Bool {
-        guard let cached = LibraryCacheStore.load(
-            from: paths.libraryCacheURL,
-            memoriesURL: paths.memoriesCacheURL
-        ) else { return false }
+        guard let cached = libraryCache.load() else {
+            // Library cache evicted (version bump, corrupt file) or absent:
+            // the memories cache references photo IDs from that schema, so
+            // it goes too. In-memory `memories` (already loaded above) keep
+            // rendering — `visibleMemories` filters unresolvable IDs — until
+            // the rescan regenerates them.
+            memoriesCache.clear()
+            return false
+        }
+        Log.cache.info("Loaded \(cached.allPhotos.count) photos from cache v\(LibrarySnapshot.version)")
         // No persist — we just read this off disk, no need to write it back.
         apply(.scanResult(photos: cached.allPhotos, root: cached.rootFolder, persistCache: false))
         return true
@@ -943,15 +963,6 @@ final class GalleryStore {
             if photos[i].faceRegions.isEmpty {
                 photos[i].faceRegions = cached.faceRegions
             }
-            if photos[i].gpsLatitude == nil, let lat = cached.gpsLatitude {
-                photos[i].gpsLatitude = lat
-            }
-            if photos[i].gpsLongitude == nil, let lon = cached.gpsLongitude {
-                photos[i].gpsLongitude = lon
-            }
-            if photos[i].dateTaken == nil, let date = cached.dateTaken {
-                photos[i].dateTaken = date
-            }
             photos[i].sidecarStatus = .cached(cached.version)
         }
         return photos
@@ -1008,12 +1019,10 @@ final class GalleryStore {
         let generation = tagBuildGeneration
         let tagPhotosSnapshot = tagService.photosForTag
         let canonicalPathSnapshot = tagService.canonicalPath
-        let nowSnapshot = clock.now()
         Task.detached(priority: .utility) {
             let (tags, people) = TagIndex.aggregateTagsAndPeople(
                 photosForTag: tagPhotosSnapshot,
-                canonicalPath: canonicalPathSnapshot,
-                now: nowSnapshot
+                canonicalPath: canonicalPathSnapshot
             )
 
             await MainActor.run { [weak self] in
@@ -1085,7 +1094,7 @@ final class GalleryStore {
         memoryGenerationEpoch += 1
         memoriesGeneratedDay = nil
         memories = []
-        MemoriesCacheStore.clear(at: paths.memoriesCacheURL)
+        memoriesCache.clear()
         Log.memory.info("Force-regenerating memories")
         generateMemoriesIfNeeded(seed: "\(clock.now().timeIntervalSinceReferenceDate)")
     }

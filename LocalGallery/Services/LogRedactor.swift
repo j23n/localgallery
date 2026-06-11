@@ -44,8 +44,7 @@ final class LogRedactor: @unchecked Sendable {
         if let fileURL {
             self.fileURL = fileURL
         } else {
-            let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            self.fileURL = appSupport.appendingPathComponent("log-redaction-key.json")
+            self.fileURL = GalleryPaths.applicationSupport.appendingPathComponent("log-redaction-key.json")
         }
         loadFromDisk()
     }

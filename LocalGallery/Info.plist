@@ -6,6 +6,7 @@
 	<array>
 		<string>com.j23n.localgallery.app.dailyMemories</string>
 		<string>com.j23n.localgallery.app.sidecarRefresh</string>
+		<string>com.j23n.localgallery.app.videoExport</string>
 	</array>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>

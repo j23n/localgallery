@@ -28,6 +28,15 @@ JSON written by the Swift version (no forced rescan on upgrade).
 
 ### 1. Conformance fixtures *before* any porting
 
+**Done.** The fixtures live in `core/fixtures/scan-conformance/` — one copy,
+read by `LocalGalleryTests` (folder reference in `project.yml`) and by
+`core/gallery-model/tests/scan_conformance_fixtures.rs`. Start at that
+directory's `README.md`: it documents the regeneration recipe, the
+`LibrarySnapshot` encoding contract, and the ~29 pinned behavioural oddities
+(MWG region ordering, EXIF parse strictness, the light-scan blind spot, the
+`URL.path` vs `standardizedFileURL.path` normalization split) that the port
+must reproduce rather than fix. What follows is the original spec.
+
 - **Metadata**: a Swift debug harness runs the current `MetadataReader`
   over the synthetic test library (extended with adversarial fixtures:
   non-Gregorian-locale dates, missing EXIF, XMP-only, sidecar-vs-embedded

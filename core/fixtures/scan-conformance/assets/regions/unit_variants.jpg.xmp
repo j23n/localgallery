@@ -1,0 +1,40 @@
+<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="localgallery-conformance-fixture">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about=""
+    xmlns:digiKam="http://www.digikam.org/ns/1.0/"
+    xmlns:photo-tools="https://github.com/j23n/photo-tools/ns/1.0/"
+    xmlns:phototools="https://github.com/j23n/photo-tools/ns/1.0/"
+    xmlns:Iptc4xmpCore="http://iptc.org/std/Iptc4xmpCore/1.0/xmlns/"
+    xmlns:lr="http://ns.adobe.com/lightroom/1.0/"
+    xmlns:dc="http://purl.org/dc/elements/1.1/"
+    xmlns:exif="http://ns.adobe.com/exif/1.0/"
+    xmlns:mwg-rs="http://www.metadataworkinggroup.com/schemas/regions/"
+    xmlns:stArea="http://ns.adobe.com/xmp/sType/Area#"
+    xmlns:stDim="http://ns.adobe.com/xap/1.0/sType/Dimensions#">
+   <mwg-rs:Regions rdf:parseType="Resource">
+    <mwg-rs:AppliedToDimensions stDim:w="8" stDim:h="8" stDim:unit="pixel"/>
+    <mwg-rs:RegionList>
+     <rdf:Seq>
+      <rdf:li rdf:parseType="Resource">
+       <mwg-rs:Name>PixelUnit</mwg-rs:Name>
+       <mwg-rs:Type>Face</mwg-rs:Type>
+       <mwg-rs:Area stArea:x="10" stArea:y="12" stArea:w="4" stArea:h="4" stArea:unit="pixel"/>
+      </rdf:li>
+      <rdf:li rdf:parseType="Resource">
+       <mwg-rs:Name>NoUnit</mwg-rs:Name>
+       <mwg-rs:Type>Face</mwg-rs:Type>
+       <mwg-rs:Area stArea:x="0.7" stArea:y="0.7" stArea:w="0.05" stArea:h="0.05"/>
+      </rdf:li>
+      <rdf:li rdf:parseType="Resource">
+       <mwg-rs:Name>MixedCase</mwg-rs:Name>
+       <mwg-rs:Type>Face</mwg-rs:Type>
+       <mwg-rs:Area stArea:x="0.8" stArea:y="0.8" stArea:w="0.05" stArea:h="0.05" stArea:unit="Normalized"/>
+      </rdf:li>
+     </rdf:Seq>
+    </mwg-rs:RegionList>
+   </mwg-rs:Regions>
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>

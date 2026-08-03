@@ -1,0 +1,74 @@
+{
+  "schema": 1,
+  "root": "ScannerFixtureLibrary",
+  "_comment": [
+    "INPUT (not an expectation): the fixture library ScannerConformanceTests",
+    "materialises under a TempDir, and the mutations it applies between scan",
+    "passes. Committed so the Rust port can build the byte-identical tree.",
+    "",
+    "Files are filler bytes: FolderScanner never opens a file, it only stats",
+    "and classifies by extension, so `size` + `fill` + `mtime` are the whole",
+    "contract. Every mtime is set explicitly and is far in the past, which",
+    "makes `dateTaken` deterministic: the scanner falls back to",
+    "min(creationDate, modificationDate) and creationDate is always 'now'.",
+    "",
+    "`initial` is applied in order; parent directories are created on demand.",
+    "`dir` entries exist only for directories no file would create.",
+    "",
+    "Paths are compared and stored as the filesystem reports them. The",
+    "Unicode/ entry is written with a \\u0301 escape on purpose: it is the",
+    "DECOMPOSED (NFD) spelling of café.jpg, and the escape survives editors",
+    "and git filters that would silently precompose a literal. See",
+    "stable_uuid_vectors.json for why NFC and NFD derive different ids."
+  ],
+
+  "initial": [
+    { "dir": "Empty" },
+
+    { "file": "a.jpg", "size": 1000, "fill": "a", "mtime": "2021-03-01T10:00:00Z" },
+    { "file": "B.JPG", "size": 1001, "fill": "b", "mtime": "2021-03-01T10:00:01Z" },
+    { "file": "B.JPG.xmp", "size": 200, "fill": "x", "mtime": "2021-03-01T10:00:02Z" },
+
+    { "file": "Nested/nested1.jpg", "size": 1002, "fill": "n", "mtime": "2021-03-02T10:00:00Z" },
+    { "file": "Nested/Deep/deep1.jpg", "size": 1003, "fill": "d", "mtime": "2021-03-03T10:00:00Z" },
+    { "file": "Nested/Deep/deep1.jpg.xmp", "size": 201, "fill": "x", "mtime": "2021-03-03T10:00:01Z" },
+    { "file": "Nested/Deep/deep2.png", "size": 1004, "fill": "p", "mtime": "2021-03-03T10:00:02Z" },
+
+    { "file": "Locked/locked1.jpg", "size": 1005, "fill": "l", "mtime": "2021-03-04T10:00:00Z" },
+    { "file": "Locked/locked1.jpg.xmp", "size": 202, "fill": "x", "mtime": "2021-03-04T10:00:01Z" },
+    { "file": "Locked/locked2.jpg", "size": 1006, "fill": "m", "mtime": "2021-03-04T10:00:02Z" },
+
+    { "file": "Media/IMG_0001.jpg", "size": 1007, "fill": "i", "mtime": "2021-03-05T10:00:00Z" },
+    { "file": "Media/IMG_0001.mov", "size": 1008, "fill": "v", "mtime": "2021-03-05T10:00:01Z" },
+    { "file": "Media/IMG_0002.heic", "size": 1009, "fill": "h", "mtime": "2021-03-05T10:00:02Z" },
+    { "file": "Media/IMG_0002.heic.mov", "size": 1010, "fill": "w", "mtime": "2021-03-05T10:00:03Z" },
+    { "file": "Media/Clip.MOV", "size": 1011, "fill": "c", "mtime": "2021-03-05T10:00:04Z" },
+    { "file": "Media/Clip.MOV.xmp", "size": 203, "fill": "x", "mtime": "2021-03-05T10:00:05Z" },
+
+    { "file": "Unicode/cafe\u0301.jpg", "size": 1012, "fill": "u", "mtime": "2021-03-06T10:00:00Z" },
+    { "file": "Unicode/résumé.jpg", "size": 1013, "fill": "r", "mtime": "2021-03-06T10:00:01Z" },
+    { "file": "Unicode/emoji 🌵 cactus.jpg", "size": 1014, "fill": "e", "mtime": "2021-03-06T10:00:02Z" },
+    { "file": "Unicode/spaces and (parens).jpg", "size": 1015, "fill": "s", "mtime": "2021-03-06T10:00:03Z" },
+
+    { "file": "Junk/readme.txt", "size": 100, "fill": "t", "mtime": "2021-03-07T10:00:00Z" },
+    { "file": "Junk/.hidden.jpg", "size": 101, "fill": "z", "mtime": "2021-03-07T10:00:01Z" },
+    { "file": "Junk/orphan.xmp", "size": 102, "fill": "x", "mtime": "2021-03-07T10:00:02Z" },
+    { "file": "Junk/zero.jpg", "size": 0, "fill": "q", "mtime": "2021-03-07T10:00:03Z" },
+    { "file": "Junk/noext", "size": 103, "fill": "y", "mtime": "2021-03-07T10:00:04Z" },
+    { "file": "Junk/data.xyz", "size": 104, "fill": "k", "mtime": "2021-03-07T10:00:05Z" }
+  ],
+
+  "mutations": [
+    { "op": "create", "path": "Media/IMG_0003.jpg", "size": 1100, "fill": "A", "mtime": "2021-04-01T10:00:00Z" },
+    { "op": "create", "path": "Media/IMG_0003.jpg.xmp", "size": 210, "fill": "x", "mtime": "2021-04-01T10:00:01Z" },
+    { "op": "create", "path": "Added/added1.jpg", "size": 1101, "fill": "B", "mtime": "2021-04-01T10:00:02Z" },
+
+    { "op": "delete", "path": "Nested/nested1.jpg" },
+    { "op": "delete", "path": "Nested/Deep/deep1.jpg.xmp" },
+
+    { "op": "rewrite", "path": "a.jpg", "size": 2000, "fill": "C", "mtime": "2021-04-02T10:00:00Z" },
+    { "op": "rewrite", "path": "Unicode/emoji 🌵 cactus.jpg", "size": 1014, "fill": "E", "mtime": "2021-03-06T10:00:02Z" },
+
+    { "op": "lockDirectory", "path": "Locked" }
+  ]
+}

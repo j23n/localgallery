@@ -1,0 +1,1176 @@
+{
+  "files" : [
+    {
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : false,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "JPEG bytes with a .txt extension. `UTType(filenameExtension: \"txt\")` conforms to neither .image nor .movie, so FolderScanner never sees this file.",
+        "MetadataReader would happily read it — this entry pins the reader, not the scanner."
+      ],
+      "path" : "containers/actually_jpeg.txt",
+      "scannerKind" : "skipped"
+    },
+    {
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : false,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "PNG bytes with a .jpg extension: ImageIO sniffs content, so the read succeeds anyway. Only the SCANNER cares about the extension."
+      ],
+      "path" : "containers/actually_png.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : false,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "PNG with no metadata: everything nil/empty."
+      ],
+      "path" : "containers/plain.png",
+      "scannerKind" : "image"
+    },
+    {
+      "countryCode" : "JP",
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : false,
+      "hierarchicalTags" : [
+        {
+          "displayName" : "Kyoto",
+          "fullPath" : "Places/Japan/Kyoto",
+          "namespace" : "Places"
+        }
+      ],
+      "notes" : [
+        "XMP in a PNG iTXt chunk is read exactly like XMP in a JPEG APP1."
+      ],
+      "path" : "containers/png_with_xmp.png",
+      "scannerKind" : "image"
+    },
+    {
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : false,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "Header-only JPEG: ImageIO opens the source but there are no usable properties."
+      ],
+      "path" : "containers/truncated.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : true,
+      "hierarchicalTags" : [
+        {
+          "displayName" : "Void",
+          "fullPath" : "Scenes/Void",
+          "namespace" : "Scenes"
+        }
+      ],
+      "notes" : [
+        "A zero-byte file yields no CGImageSource properties — but the sidecar is still read, so tags survive.",
+        "The sidecar read is unconditional; it does not depend on the image opening."
+      ],
+      "path" : "containers/zero_byte.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "dateTaken" : {
+        "basis" : "localWallClock",
+        "value" : "2019-03-02T14:33:07.000"
+      },
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : false,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "Falls through to DateTimeDigitized when DateTimeOriginal is absent."
+      ],
+      "path" : "exif/digitized_only.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "dateTaken" : {
+        "basis" : "localWallClock",
+        "value" : "2021-07-04T08:09:10.000"
+      },
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : false,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "Date order is DateTimeOriginal → DateTimeDigitized → TIFF DateTime.",
+        "SubSecTimeOriginal (250) and OffsetTimeOriginal (+02:00) are DROPPED: the format string is exactly \"yyyy:MM:dd HH:mm:ss\" and neither field is consulted. Subsecond is always .000.",
+        "Orientation is not read by MetadataReader at all."
+      ],
+      "path" : "exif/full.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "dateTaken" : {
+        "basis" : "localWallClock",
+        "value" : "2021-07-05T00:00:00.000"
+      },
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : false,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "LANDMINE: hour 24 is ACCEPTED and rolls into the next day — 2021:07:04 24:00:00 becomes 2021-07-05T00:00:00.",
+        "So the parser is strict about out-of-range months/days but lenient about hour 24. A naive strict `%H` (0..=23) parse in Rust would return nil instead."
+      ],
+      "path" : "exif/hour_24.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "dateTaken" : {
+        "basis" : "localWallClock",
+        "value" : "2021-07-04T08:09:10.000"
+      },
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : false,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "Month 13 / day 45 is rejected by the non-lenient parser, so DateTimeDigitized wins."
+      ],
+      "path" : "exif/impossible_date.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : false,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "No EXIF, no XMP, no sidecar: every field nil/empty."
+      ],
+      "path" : "exif/none.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "dateTaken" : {
+        "basis" : "localWallClock",
+        "value" : "2018-11-30T21:45:00.000"
+      },
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : false,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "Falls through to TIFF:DateTime (exiftool ModifyDate) when both EXIF dates are absent."
+      ],
+      "path" : "exif/tiff_datetime_only.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "dateTaken" : {
+        "basis" : "localWallClock",
+        "value" : "2020-05-05T05:05:05.000"
+      },
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : false,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "The \"0000:00:00 00:00:00\" camera sentinel is REJECTED by the non-lenient formatter (month 00 is out of range), so the walk falls through to DateTimeDigitized.",
+        "A chrono parser that accepts month 0 / day 0 would diverge here."
+      ],
+      "path" : "exif/zero_date.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : false,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "Both coordinates are required; a lone latitude yields nil/nil."
+      ],
+      "path" : "gps/lat_only.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "faceRegions" : [
+
+      ],
+      "gpsLatitude" : 41.9028,
+      "gpsLongitude" : 12.4964,
+      "hasSidecar" : false,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "Missing refs mean no negation — the values stay positive (northern/eastern)."
+      ],
+      "path" : "gps/no_refs.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "faceRegions" : [
+
+      ],
+      "gpsLatitude" : 41.9028,
+      "gpsLongitude" : 12.4964,
+      "hasSidecar" : false,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "GPSAltitude / GPSAltitudeRef are read by nobody — MetadataReader has no altitude field."
+      ],
+      "path" : "gps/north_east.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "faceRegions" : [
+
+      ],
+      "gpsLatitude" : -33.8688,
+      "gpsLongitude" : -151.2093,
+      "hasSidecar" : false,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "Ref \"S\"/\"W\" negate the (always positive) ImageIO magnitudes.",
+        "GPSAltitudeRef=1 (below sea level) is ignored along with the altitude."
+      ],
+      "path" : "gps/south_west.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "faceRegions" : [
+
+      ],
+      "gpsLatitude" : 0,
+      "gpsLongitude" : 0.0001,
+      "hasSidecar" : false,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "LANDMINE, CONFIRMED: the ref comparison is case-SENSITIVE (`latRef == \"S\"` / `lonRef == \"W\"`). The raw lowercase refs \"s\"/\"w\" written here do NOT negate, so this southern/western point is reported as northern/eastern.",
+        "exiftool normalises refs to uppercase on a normal write; these were planted with `#=` to bypass PrintConv, which is why the case matters at all.",
+        "Latitude 0 comes out as +0. When the ref IS uppercase the same expression yields -0.0, which serialises as `-0` in JSON — see gps/south_west.jpg's sign handling and keep Rust's float formatting in mind."
+      ],
+      "path" : "gps/zero_and_lowercase_ref.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "dateTaken" : {
+        "basis" : "localWallClock",
+        "value" : "2020-01-02T03:04:07.000"
+      },
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : false,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "Uppercase extension. The scanner lowercases before UTType lookup; the sidecar manifest keys on the lowercased basename."
+      ],
+      "path" : "names/UPPER.JPG",
+      "scannerKind" : "image"
+    },
+    {
+      "dateTaken" : {
+        "basis" : "localWallClock",
+        "value" : "2020-01-02T03:04:08.000"
+      },
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : true,
+      "hierarchicalTags" : [
+        {
+          "displayName" : "Kite",
+          "fullPath" : "Objects/Kite",
+          "namespace" : "Objects"
+        }
+      ],
+      "notes" : [
+        "Multiple dots. The sidecar is `dotted.name.v2.jpg.xmp` (full basename + .xmp), NOT `dotted.name.v2.xmp`.",
+        "`filename` in PhotoFile drops only the LAST extension, so it becomes \"dotted.name.v2\"."
+      ],
+      "path" : "names/dotted.name.v2.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "dateTaken" : {
+        "basis" : "localWallClock",
+        "value" : "2020-01-02T03:04:06.000"
+      },
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : false,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "Non-BMP characters in the filename (single scalar, so NFC/NFD is not a factor here — see stable_uuid_vectors.json for that)."
+      ],
+      "path" : "names/emoji 🌵 cactus.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "dateTaken" : {
+        "basis" : "localWallClock",
+        "value" : "2020-01-02T03:04:05.000"
+      },
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : false,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "Spaces and parentheses in the name; sidecar lookup is `url.appendingPathExtension(\"xmp\")`, i.e. it operates on path components, not on a re-parsed string."
+      ],
+      "path" : "names/spaces and (parens).jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "faceRegions" : [
+        {
+          "centerX" : 0.25,
+          "centerY" : 0.3,
+          "height" : 0.12,
+          "name" : "Alice",
+          "width" : 0.1
+        },
+        {
+          "centerX" : 0.6,
+          "centerY" : 0.32,
+          "height" : 0.13,
+          "name" : "Bob",
+          "width" : 0.11
+        },
+        {
+          "centerX" : 0.8,
+          "centerY" : 0.34,
+          "height" : 0.14,
+          "name" : "Carol",
+          "width" : 0.09
+        }
+      ],
+      "hasSidecar" : true,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "digiKam order (Name then Area) — the look-behind finds the correct name for every region."
+      ],
+      "path" : "regions/digikam_order.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "faceRegions" : [
+        {
+          "centerX" : 0.5,
+          "centerY" : 0.55,
+          "height" : 0.11,
+          "name" : "Frank",
+          "width" : 0.1
+        }
+      ],
+      "hasSidecar" : true,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "Coordinates as child elements: the parser concatenates the open tag with everything up to `</mwg-rs:Area>` before running the field lookup."
+      ],
+      "path" : "regions/element_form_area.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "faceRegions" : [
+        {
+          "centerX" : 0.25,
+          "centerY" : 0.3,
+          "height" : 0.12,
+          "name" : null,
+          "width" : 0.1
+        },
+        {
+          "centerX" : 0.6,
+          "centerY" : 0.32,
+          "height" : 0.13,
+          "name" : "Alice",
+          "width" : 0.11
+        },
+        {
+          "centerX" : 0.8,
+          "centerY" : 0.34,
+          "height" : 0.14,
+          "name" : "Bob",
+          "width" : 0.09
+        }
+      ],
+      "hasSidecar" : true,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "KNOWN BUG, PINNED AS-IS: exiftool serialises struct fields alphabetically, so Area precedes Name.",
+        "`parseMWGRegions` locates each `<mwg-rs:Area>` and then searches BACKWARDS for the nearest mwg-rs:Name, which in this ordering is the PREVIOUS region's name.",
+        "Result is an off-by-one: region 0 gets no name at all, region i gets region i-1's name, and the last name is lost.",
+        "The Rust port must reproduce this. Fixing it is a separate, deliberate change with its own LibrarySnapshot version bump."
+      ],
+      "path" : "regions/exiftool_order.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "faceRegions" : [
+        {
+          "centerX" : 0.1,
+          "centerY" : 0.1,
+          "height" : 0.1,
+          "name" : "Judy",
+          "width" : 0.1
+        }
+      ],
+      "hasSidecar" : true,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "KNOWN BUG, PINNED AS-IS: an unterminated `<mwg-rs:Area` followed by a well-formed one finds the LATER `</mwg-rs:Area>`.",
+        "The attribute blob then spans both regions, the coordinates come from the malformed (first) Area, and the second region is swallowed — one region out, not two."
+      ],
+      "path" : "regions/malformed_first.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "faceRegions" : [
+        {
+          "centerX" : 0.2,
+          "centerY" : 0.2,
+          "height" : 0.1,
+          "name" : "Hank",
+          "width" : 0.1
+        }
+      ],
+      "hasSidecar" : true,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "An unterminated `<mwg-rs:Area` with nothing after it is skipped; earlier regions survive."
+      ],
+      "path" : "regions/malformed_last.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "faceRegions" : [
+        {
+          "centerX" : 0.4,
+          "centerY" : 0.41,
+          "height" : 0.21,
+          "name" : "Erin",
+          "width" : 0.2
+        }
+      ],
+      "hasSidecar" : true,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "Attribute form `mwg-rs:Name=\"…\"` is tried before element form `<mwg-rs:Name>`."
+      ],
+      "path" : "regions/name_as_attribute.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "faceRegions" : [
+        {
+          "centerX" : 0.3,
+          "centerY" : 0.3,
+          "height" : 0.05,
+          "name" : null,
+          "width" : 0.05
+        }
+      ],
+      "hasSidecar" : true,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "The name look-behind window is 2000 characters. A name further back than that is not found and the region ends up unnamed."
+      ],
+      "path" : "regions/name_beyond_lookback.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "faceRegions" : [
+        {
+          "centerX" : 0.3,
+          "centerY" : 0.3,
+          "height" : 0.1,
+          "name" : "Good",
+          "width" : 0.1
+        }
+      ],
+      "hasSidecar" : true,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "A coordinate that fails Double() drops that region only."
+      ],
+      "path" : "regions/non_numeric_coords.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "faceRegions" : [
+        {
+          "centerX" : 0.7,
+          "centerY" : 0.7,
+          "height" : 0.05,
+          "name" : "NoUnit",
+          "width" : 0.05
+        },
+        {
+          "centerX" : 0.8,
+          "centerY" : 0.8,
+          "height" : 0.05,
+          "name" : "MixedCase",
+          "width" : 0.05
+        }
+      ],
+      "hasSidecar" : true,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "stArea:unit=\"pixel\" is rejected; a missing unit is accepted; the comparison is `unit?.lowercased() == \"normalized\"`, so \"Normalized\" is accepted too.",
+        "Rejected regions are skipped silently, they do not abort the walk."
+      ],
+      "path" : "regions/unit_variants.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "faceRegions" : [
+        {
+          "centerX" : 0.05,
+          "centerY" : 0.05,
+          "height" : 0.02,
+          "name" : null,
+          "width" : 0.02
+        }
+      ],
+      "hasSidecar" : true,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "A region with no mwg-rs:Name anywhere in the look-behind window is emitted with name = nil."
+      ],
+      "path" : "regions/unnamed.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "countryCode" : "SE",
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : true,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "Both \"photo-tools:CountryCode\" and \"phototools:CountryCode\" are probed, in that order."
+      ],
+      "path" : "sidecar/alt_prefix_country.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "countryCode" : "IT",
+      "faceRegions" : [
+        {
+          "centerX" : 0.51,
+          "centerY" : 0.52,
+          "height" : 0.54,
+          "name" : "SidecarFace",
+          "width" : 0.53
+        }
+      ],
+      "hasSidecar" : true,
+      "hierarchicalTags" : [
+        {
+          "displayName" : "Alice",
+          "fullPath" : "People/Alice",
+          "namespace" : "People"
+        },
+        {
+          "displayName" : "Car",
+          "fullPath" : "Objects/Car",
+          "namespace" : "Objects"
+        },
+        {
+          "displayName" : "Beach",
+          "fullPath" : "Scenes/Beach",
+          "namespace" : "Scenes"
+        }
+      ],
+      "notes" : [
+        "The precedence table, all in one file:",
+        "tags = UNION, embedded first; the case-insensitive dedup is first-wins, so the EMBEDDED spelling of a conflicting path survives (\"People/Alice\", not the sidecar's \"people/alice\").",
+        "countryCode = EMBEDDED wins (IT, not FR).",
+        "faceRegions = SIDECAR wins outright when non-empty — the embedded region is discarded, not merged."
+      ],
+      "path" : "sidecar/conflict.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "countryCode" : "NO",
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : true,
+      "hierarchicalTags" : [
+        {
+          "displayName" : "Boat",
+          "fullPath" : "Objects/Boat",
+          "namespace" : "Objects"
+        }
+      ],
+      "notes" : [
+        "Sidecar fills the country only when the embedded packet has none."
+      ],
+      "path" : "sidecar/country_gap.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : true,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "LANDMINE: the sidecar parser reads exactly three things — digiKam:TagsList, photo-tools:CountryCode, MWG regions.",
+        "exif:DateTimeOriginal and exif:GPS* in a sidecar are ignored entirely; dateTaken and GPS stay nil."
+      ],
+      "path" : "sidecar/date_and_gps_ignored.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : true,
+      "hierarchicalTags" : [
+        {
+          "displayName" : "Alice",
+          "fullPath" : "People/Alice",
+          "namespace" : "People"
+        },
+        {
+          "displayName" : "Child",
+          "fullPath" : "People/Alice/Child",
+          "namespace" : "People"
+        }
+      ],
+      "notes" : [
+        "Dedup key is `raw.lowercased()`, first occurrence wins — \"people/alice\" and \"PEOPLE/ALICE\" collapse into the first \"People/Alice\".",
+        "\"People/Alice/Child\" is a different path and survives."
+      ],
+      "path" : "sidecar/duplicate_case.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : true,
+      "hierarchicalTags" : [
+        {
+          "displayName" : "Spain",
+          "fullPath" : "Places/Spain",
+          "namespace" : "Places"
+        }
+      ],
+      "notes" : [
+        "Empty and whitespace-only rdf:li entries are dropped; surviving values are whitespace-trimmed."
+      ],
+      "path" : "sidecar/empty_tag_entries.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : true,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "A non-XML sidecar parses to nothing; there is no error surface, the photo just looks untagged."
+      ],
+      "path" : "sidecar/garbage.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : true,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "The \"mwg-rs present but no Areas parsed\" branch logs a warning and returns an empty region list."
+      ],
+      "path" : "sidecar/mwg_marker_no_areas.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "faceRegions" : [
+        {
+          "centerX" : 0.21,
+          "centerY" : 0.22,
+          "height" : 0.24,
+          "name" : null,
+          "width" : 0.23
+        }
+      ],
+      "hasSidecar" : true,
+      "hierarchicalTags" : [
+        {
+          "displayName" : "Forest",
+          "fullPath" : "Scenes/Forest",
+          "namespace" : "Scenes"
+        }
+      ],
+      "notes" : [
+        "A sidecar with no regions leaves the embedded regions in place (the swap is guarded on non-empty).",
+        "The surviving embedded region is unnamed — see xmp/regions_digikam_order.jpg for why."
+      ],
+      "path" : "sidecar/no_regions.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "countryCode" : "PT",
+      "faceRegions" : [
+        {
+          "centerX" : 0.4,
+          "centerY" : 0.4,
+          "height" : 0.2,
+          "name" : "Dana",
+          "width" : 0.2
+        }
+      ],
+      "hasSidecar" : true,
+      "hierarchicalTags" : [
+        {
+          "displayName" : "Dana",
+          "fullPath" : "People/Dana",
+          "namespace" : "People"
+        },
+        {
+          "displayName" : "Beach",
+          "fullPath" : "Scenes/Beach",
+          "namespace" : "Scenes"
+        }
+      ],
+      "notes" : [
+        "No embedded metadata: the sidecar supplies tags, country and regions."
+      ],
+      "path" : "sidecar/only.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : true,
+      "hierarchicalTags" : [
+        {
+          "displayName" : "Lamp",
+          "fullPath" : "Objects/Lamp",
+          "namespace" : "Objects"
+        }
+      ],
+      "notes" : [
+        "rdf:Bag works exactly like rdf:Seq: the parser only scans for `<rdf:li>` between the TagsList open and close tags."
+      ],
+      "path" : "sidecar/tagslist_bag.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : true,
+      "hierarchicalTags" : [
+        {
+          "displayName" : "Norway",
+          "fullPath" : "Places/Norway",
+          "namespace" : "Places"
+        }
+      ],
+      "notes" : [
+        "The open-tag probe is `<digiKam:TagsList>` first, then `<digiKam:TagsList ` (with the trailing space) for attribute-carrying forms."
+      ],
+      "path" : "sidecar/tagslist_with_attributes.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : true,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "No `</digiKam:TagsList>` means the whole block is skipped — a truncated sidecar silently yields zero tags rather than a partial list."
+      ],
+      "path" : "sidecar/truncated_tagslist.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : true,
+      "hierarchicalTags" : [
+        {
+          "displayName" : "Iceland",
+          "fullPath" : "Places/Iceland",
+          "namespace" : "Places"
+        }
+      ],
+      "notes" : [
+        "UTF-16 (BOM-prefixed) sidecars decode through the String(data:encoding:.utf16) fallback."
+      ],
+      "path" : "sidecar/utf16.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : false,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "LANDMINE: an ISO-branded MP4 carrying the same `moov/udta/©day` reads as nil. AVFoundation only honours udta/©day for QuickTime-branded files.",
+        "A Rust atom parser that reads udta/©day unconditionally would be MORE permissive than the Swift baseline — that is a behaviour change, not a bug fix."
+      ],
+      "path" : "video/isom_udta.mp4",
+      "scannerKind" : "video"
+    },
+    {
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : false,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "A QuickTime-branded container with an .mp4 extension still resolves — AVFoundation dispatches on content, the scanner on extension."
+      ],
+      "path" : "video/qt_branded.mp4",
+      "scannerKind" : "video",
+      "videoDate" : {
+        "basis" : "utc",
+        "value" : "2016-12-24T17:00:00.000Z"
+      }
+    },
+    {
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : false,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "LANDMINE: a zone-less ©day is read as UTC by AVFoundation, NOT as device-local — unlike EXIF dates, which are device-local.",
+        "So the two date paths in this app disagree about what a zone-less timestamp means."
+      ],
+      "path" : "video/qt_naive.mov",
+      "scannerKind" : "video",
+      "videoDate" : {
+        "basis" : "utc",
+        "value" : "2019-09-09T09:09:09.000Z"
+      }
+    },
+    {
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : false,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "No udta at all: AVAsset.creationDate is nil and the pipeline falls back to filesystem dates (see EarliestFilesystemDateTests)."
+      ],
+      "path" : "video/qt_no_date.mov",
+      "scannerKind" : "video"
+    },
+    {
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : false,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "Non-UTC offset is applied: 2018-06-15T14:33:07+0530 == 09:03:07Z."
+      ],
+      "path" : "video/qt_offset.mov",
+      "scannerKind" : "video",
+      "videoDate" : {
+        "basis" : "utc",
+        "value" : "2018-06-15T09:03:07.000Z"
+      }
+    },
+    {
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : false,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "QuickTime `moov/udta/©day` with an explicit +0000 offset."
+      ],
+      "path" : "video/qt_utc.mov",
+      "scannerKind" : "video",
+      "videoDate" : {
+        "basis" : "utc",
+        "value" : "2015-01-02T03:04:05.000Z"
+      }
+    },
+    {
+      "countryCode" : "IT",
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : false,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "CountryCode is uppercased on read (\"it\" → \"IT\")."
+      ],
+      "path" : "xmp/country_code.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "countryCode" : "IT",
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : false,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "LANDMINE: CountryCode is matched by LEAF NAME only, so IPTC's Iptc4xmpCore:CountryCode competes with photo-tools:CountryCode.",
+        "First tag enumerated wins (`countryCode == nil` guard). The order comes from ImageIO's XMP walk, not from the packet's byte order."
+      ],
+      "path" : "xmp/country_code_namespace_conflict.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "countryCode" : "DE",
+      "dateTaken" : {
+        "basis" : "localWallClock",
+        "value" : "2022-02-22T22:22:22.000"
+      },
+      "faceRegions" : [
+        {
+          "centerX" : 0.1,
+          "centerY" : 0.2,
+          "height" : 0.4,
+          "name" : null,
+          "width" : 0.3
+        }
+      ],
+      "hasSidecar" : false,
+      "hierarchicalTags" : [
+        {
+          "displayName" : "Alice",
+          "fullPath" : "People/Alice",
+          "namespace" : "People"
+        },
+        {
+          "displayName" : "Bob",
+          "fullPath" : "People/Bob",
+          "namespace" : "People"
+        }
+      ],
+      "notes" : [
+        "Tags + country + regions + EXIF date in one file, no sidecar.",
+        "The single embedded region comes back with name = nil for the reason above, even though the packet names it \"Alice\"."
+      ],
+      "path" : "xmp/full_embedded.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "faceRegions" : [
+        {
+          "centerX" : 0.25,
+          "centerY" : 0.3,
+          "height" : 0.12,
+          "name" : null,
+          "width" : 0.1
+        },
+        {
+          "centerX" : 0.6,
+          "centerY" : 0.32,
+          "height" : 0.13,
+          "name" : "Alice",
+          "width" : 0.11
+        }
+      ],
+      "hasSidecar" : false,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "Embedded regions are recovered by re-serialising the packet with CGImageMetadataCreateXMPData and running the same string parser as the sidecar path.",
+        "LANDMINE, CONFIRMED: ImageIO re-serialises struct fields ALPHABETICALLY, so Area always lands before Name — no matter how the packet was written.",
+        "That means EVERY embedded MWG region in this app hits the backwards-Name off-by-one described on regions/exiftool_order.jpg. This file was written in digiKam order (Name first) and still comes back mis-named.",
+        "Consequence for the port: embedded regions are currently shifted by one and the first is unnamed. The sidecar path is the only one that gets names right."
+      ],
+      "path" : "xmp/regions_digikam_order.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "faceRegions" : [
+        {
+          "centerX" : 0.25,
+          "centerY" : 0.3,
+          "height" : 0.12,
+          "name" : null,
+          "width" : 0.1
+        },
+        {
+          "centerX" : 0.6,
+          "centerY" : 0.32,
+          "height" : 0.13,
+          "name" : "Alice",
+          "width" : 0.11
+        }
+      ],
+      "hasSidecar" : false,
+      "hierarchicalTags" : [
+
+      ],
+      "notes" : [
+        "Same regions as regions_digikam_order but written Area-before-Name. The output is IDENTICAL — proof that the input packet's element order is erased by ImageIO's re-serialisation."
+      ],
+      "path" : "xmp/regions_exiftool_order.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : false,
+      "hierarchicalTags" : [
+        {
+          "displayName" : "Alice",
+          "fullPath" : "People/Alice",
+          "namespace" : "People"
+        }
+      ],
+      "notes" : [
+        "LANDMINE: only digiKam:TagsList is read. lr:hierarchicalSubject and dc:subject are invisible to the app even when they disagree.",
+        "The tag match is on the LEAF NAME \"TagsList\", so any namespace declaring a TagsList would also be picked up."
+      ],
+      "path" : "xmp/tag_sources_disagree.jpg",
+      "scannerKind" : "image"
+    },
+    {
+      "faceRegions" : [
+
+      ],
+      "hasSidecar" : false,
+      "hierarchicalTags" : [
+        {
+          "displayName" : "Alice",
+          "fullPath" : "People/Alice",
+          "namespace" : "People"
+        },
+        {
+          "displayName" : "Rome",
+          "fullPath" : "Places/Italy/Lazio/Rome",
+          "namespace" : "Places"
+        },
+        {
+          "displayName" : "Bicycle",
+          "fullPath" : "Objects/Bicycle",
+          "namespace" : "Objects"
+        }
+      ],
+      "notes" : [
+        "Embedded digiKam:TagsList is read through CGImageMetadataCopyTags; rdf:Seq members arrive as nested CGImageMetadataTags, not strings."
+      ],
+      "path" : "xmp/tagslist.jpg",
+      "scannerKind" : "image"
+    }
+  ],
+  "schema" : 1
+}

@@ -1,4 +1,4 @@
-//! Model-pack v1: the on-disk format, its loader, and its hash verification.
+//! Model-pack v2: the on-disk format, its loader, and its hash verification.
 //!
 //! A pack is a directory. Swift downloads it (networking stays out of Rust,
 //! overview §"Model packs") into
@@ -78,6 +78,45 @@
 //!    and hand-editing; used by some tests.
 //!
 //! Mixing the two is rejected rather than silently resolved.
+//!
+//! # `faces` (schema 2, optional)
+//!
+//! Phase 2 added two more models to the same pack. They are **optional**: a
+//! pack that ships only the tagging encoder is still a valid schema-2 pack, and
+//! [`crate::face::FaceEngine`] simply refuses to open against it. That is the
+//! whole reason the block is a separate `Option` rather than three more
+//! required fields — an app on a tagging-only pack must keep tagging, not
+//! start failing to load its models.
+//!
+//! ```json
+//! "faces": {
+//!   "detector": {
+//!     "file": "face_detector.onnx", "sha256": "…",
+//!     "input_name": "input.1", "input_size": 640,
+//!     "score_outputs": ["443", "468", "493"],
+//!     "bbox_outputs":  ["446", "471", "496"],
+//!     "kps_outputs":   ["449", "474", "499"],
+//!     "strides": [8, 16, 32], "anchors_per_cell": 2,
+//!     "mean": [0.5, 0.5, 0.5], "std": [0.50196, 0.50196, 0.50196],
+//!     "resize_filter": "bilinear",
+//!     "score_threshold": 0.5, "nms_iou": 0.4,
+//!     "max_faces": 32, "min_face_pixels": 24.0
+//!   },
+//!   "embedder": {
+//!     "file": "face_embedder.onnx", "sha256": "…",
+//!     "input_name": "input.1", "output_name": "516",
+//!     "input_size": 112, "embedding_dim": 512,
+//!     "mean": [0.5, 0.5, 0.5], "std": [0.5, 0.5, 0.5]
+//!   },
+//!   "clustering": { "join": 0.42, "auto": 0.55, "merge": 0.60,
+//!                   "edge": 0.45, "min_quality": 0.25,
+//!                   "cw_iterations": 20, "cw_seed": 20260803 }
+//! }
+//! ```
+//!
+//! The detector's ONNX file is loaded **lazily** ([`ModelPack::load_face_models`])
+//! rather than at [`ModelPack::load`]: reading and SHA-256-ing 16 MB of face
+//! weights is pure waste for the many callers that only ever tag.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -88,8 +127,13 @@ use sha2::{Digest, Sha256};
 use crate::error::{MlError, MlResult};
 use crate::preprocess::{PreprocessConfig, ResizeFilter};
 
-/// The manifest schema version this crate understands.
-pub const MANIFEST_SCHEMA: u32 = 1;
+/// The newest manifest schema version this crate writes and understands.
+pub const MANIFEST_SCHEMA: u32 = 2;
+/// The oldest manifest schema version this crate still loads.
+///
+/// v1 packs (tagging only) stay loadable forever: they describe a complete,
+/// correct tagging pipeline, and the only thing v2 adds is optional.
+pub const MIN_MANIFEST_SCHEMA: u32 = 1;
 /// The labels schema version this crate understands.
 pub const LABELS_SCHEMA: u32 = 1;
 /// The file every pack directory must contain.
@@ -137,10 +181,156 @@ pub struct RootConfig {
     pub max_tags: usize,
 }
 
+/// The face detector half of the manifest.
+///
+/// Shaped around SCRFD's output convention — a per-stride triple of
+/// (score, bbox-distance, landmark-offset) tensors over an anchor grid — because
+/// that is what both candidate detectors (SCRFD, YuNet) emit. Everything the
+/// decode needs is declared rather than hard-coded, so swapping in a detector
+/// with different strides or a different anchor count is a pack rebuild and not
+/// a code change.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FaceDetectorSpec {
+    /// ONNX file name, relative to the pack directory.
+    pub file: String,
+    /// Lowercase hex SHA-256 of the ONNX file.
+    pub sha256: String,
+    /// Name of the graph's single image input.
+    pub input_name: String,
+    /// Square letterbox edge the detector is fed, in pixels.
+    pub input_size: u32,
+    /// Per-stride confidence outputs, in `strides` order.
+    pub score_outputs: Vec<String>,
+    /// Per-stride box-distance outputs, in `strides` order.
+    pub bbox_outputs: Vec<String>,
+    /// Per-stride landmark-offset outputs, in `strides` order.
+    pub kps_outputs: Vec<String>,
+    /// Feature-map strides, coarsest last.
+    pub strides: Vec<u32>,
+    /// Anchors per grid cell.
+    pub anchors_per_cell: usize,
+    /// Per-channel mean, `[0, 1]` space.
+    pub mean: [f32; 3],
+    /// Per-channel standard deviation.
+    pub std: [f32; 3],
+    /// Resize kernel used to build the letterbox.
+    #[serde(default)]
+    pub resize_filter: ResizeFilter,
+    /// Minimum confidence for a candidate to survive.
+    pub score_threshold: f32,
+    /// IoU above which NMS discards the weaker of two boxes.
+    pub nms_iou: f32,
+    /// Hard cap on faces kept per photo, best-scoring first.
+    pub max_faces: usize,
+    /// Boxes whose shorter side is below this many *original-image* pixels are
+    /// dropped: below roughly this size the aligned crop is pure upsampling and
+    /// the embedding is noise that would pollute clustering.
+    pub min_face_pixels: f32,
+}
+
+/// The face embedder half of the manifest.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FaceEmbedderSpec {
+    /// ONNX file name, relative to the pack directory.
+    pub file: String,
+    /// Lowercase hex SHA-256 of the ONNX file.
+    pub sha256: String,
+    /// Name of the graph's single image input.
+    pub input_name: String,
+    /// Name of the graph's embedding output.
+    pub output_name: String,
+    /// Square input edge; the alignment template is scaled to it.
+    pub input_size: u32,
+    /// Length of the embedding.
+    pub embedding_dim: usize,
+    /// Per-channel mean, `[0, 1]` space.
+    pub mean: [f32; 3],
+    /// Per-channel standard deviation.
+    pub std: [f32; 3],
+}
+
+/// Cosine thresholds and the fixed knobs of the clustering pass.
+///
+/// All four thresholds are cosine similarities between L2-normalized ArcFace-
+/// style embeddings, and they are **not** transferable to another embedder.
+/// The defaults are sized against the published ArcFace operating point
+/// (verification on LFW-grade pairs sits near 0.28 cosine) with two deliberate
+/// margins on top:
+///
+/// * clustering asks ~N²/2 questions where verification asks one, so the
+///   per-pair false-accept rate has to be orders of magnitude lower — hence
+///   [`ClusteringConfig::join`] well above the verification point;
+/// * [`ClusteringConfig::auto`] gates a *write to disk* (a `People/<Name>`
+///   keyword in somebody's sidecar), so it is stricter again. A missed
+///   auto-match costs one review action; a wrong one edits a file.
+///
+/// Measured on this pack's embedder over the reference photo set, distinct
+/// identities score ≤ 0.09 and the same identity across the whole imaging-
+/// pipeline perturbation range (rescale to 35%, JPEG q30, ±40% brightness)
+/// stays ≥ 0.70. The thresholds sit in that gap with room on both sides.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ClusteringConfig {
+    /// A face joins the nearest **unlabeled** cluster at or above this.
+    pub join: f32,
+    /// A face joins a **named** cluster — and so becomes auto-tagged — only at
+    /// or above this, which is higher than [`ClusteringConfig::join`].
+    pub auto: f32,
+    /// Two cluster centroids at or above this produce a merge *proposal*.
+    /// Never applied automatically.
+    pub merge: f32,
+    /// Edge threshold of the chinese-whispers graph in the full pass.
+    pub edge: f32,
+    /// Faces below this quality still cluster, but are excluded from
+    /// auto-tagging and from cover-crop selection.
+    pub min_quality: f32,
+    /// Label-propagation rounds in the full pass. Convergence is typically
+    /// under five; the cap is a bound, not a target.
+    pub cw_iterations: u32,
+    /// Seed for the fixed node permutation. Pinned in the manifest so two
+    /// devices shuffle identically — the entire determinism claim of the full
+    /// pass rests on this plus the sorted node order.
+    pub cw_seed: u64,
+}
+
+impl Default for ClusteringConfig {
+    fn default() -> Self {
+        ClusteringConfig {
+            join: 0.42,
+            auto: 0.55,
+            merge: 0.60,
+            edge: 0.45,
+            min_quality: 0.25,
+            cw_iterations: 20,
+            cw_seed: 20_260_803,
+        }
+    }
+}
+
+/// The optional face half of a schema-2 manifest.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FaceSpec {
+    /// Detector geometry and gating.
+    pub detector: FaceDetectorSpec,
+    /// Embedder geometry.
+    pub embedder: FaceEmbedderSpec,
+    /// Clustering thresholds; omitted means [`ClusteringConfig::default`].
+    #[serde(default)]
+    pub clustering: ClusteringConfig,
+}
+
+/// The verified bytes of the two face models.
+#[derive(Debug, Clone)]
+pub struct FaceModelBytes {
+    /// Detector ONNX.
+    pub detector: Vec<u8>,
+    /// Embedder ONNX.
+    pub embedder: Vec<u8>,
+}
+
 /// `manifest.json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
-    /// Format version; must equal [`MANIFEST_SCHEMA`].
+    /// Format version; between [`MIN_MANIFEST_SCHEMA`] and [`MANIFEST_SCHEMA`].
     pub schema: u32,
     /// Opaque pack identity, written into every sidecar sentinel and into
     /// `ml_work.model_pack`. Changing it marks existing rows stale.
@@ -157,6 +347,9 @@ pub struct Manifest {
     pub hysteresis_epsilon: f32,
     /// Per-root thresholds and caps. Every label's root must appear here.
     pub roots: BTreeMap<String, RootConfig>,
+    /// The face models, when this pack ships them. Schema 2 and up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub faces: Option<FaceSpec>,
 }
 
 /// One entry of `labels.json`.
@@ -231,10 +424,10 @@ impl ModelPack {
                 detail: format!("{MANIFEST_FILE}: {e}"),
             })?;
 
-        if manifest.schema != MANIFEST_SCHEMA {
+        if !(MIN_MANIFEST_SCHEMA..=MANIFEST_SCHEMA).contains(&manifest.schema) {
             return Err(MlError::PackInvalid {
                 detail: format!(
-                    "manifest schema {} is not {MANIFEST_SCHEMA}",
+                    "manifest schema {} is not in {MIN_MANIFEST_SCHEMA}..={MANIFEST_SCHEMA}",
                     manifest.schema
                 ),
             });
@@ -275,6 +468,47 @@ impl ModelPack {
     /// The identity written into sidecars and `ml_work.model_pack`.
     pub fn version(&self) -> &str {
         &self.manifest.pack_version
+    }
+
+    /// The face half of the manifest, if this pack has one.
+    pub fn faces(&self) -> Option<&FaceSpec> {
+        self.manifest.faces.as_ref()
+    }
+
+    /// Read and verify the two face ONNX files.
+    ///
+    /// Deliberately not done at [`ModelPack::load`]: a pack's face weights are
+    /// 16 MB that a tagging-only caller would read, hash and throw away.
+    pub fn load_face_models(&self) -> MlResult<FaceModelBytes> {
+        let faces = self.faces().ok_or_else(|| MlError::PackInvalid {
+            detail: "pack has no face models".into(),
+        })?;
+        Ok(FaceModelBytes {
+            detector: read_verified(&self.dir, &faces.detector.file, &faces.detector.sha256)?,
+            embedder: read_verified(&self.dir, &faces.embedder.file, &faces.embedder.sha256)?,
+        })
+    }
+
+    /// The identity stamped into `face_work.model_pack`.
+    ///
+    /// Derived from the *face model hashes*, not from `pack_version`: adding
+    /// face models to an existing pack must not re-tag the library, and a
+    /// labels-only tagging rebuild must not re-detect every face. Two packs
+    /// that ship the same two face models share face results, which is exactly
+    /// the property `pack_version` cannot express.
+    ///
+    /// [`crate::face::ALIGN_VERSION`] and
+    /// [`crate::preprocess::PREPROCESS_VERSION`] join it because both move
+    /// pixels the content hash cannot see.
+    pub fn face_pack_key(&self) -> Option<String> {
+        let faces = self.faces()?;
+        Some(format!(
+            "{}+{}#p{}a{}",
+            short_hash(&faces.detector.sha256),
+            short_hash(&faces.embedder.sha256),
+            crate::preprocess::PREPROCESS_VERSION,
+            crate::face::ALIGN_VERSION,
+        ))
     }
 
     /// The key embeddings are cached under.
@@ -351,7 +585,126 @@ fn validate_manifest(m: &Manifest) -> MlResult<()> {
             ));
         }
     }
+    if let Some(faces) = &m.faces {
+        if m.schema < 2 {
+            return Err(invalid(format!(
+                "manifest schema {} declares faces, which arrived in schema 2",
+                m.schema
+            )));
+        }
+        validate_faces(faces)?;
+    }
     Ok(())
+}
+
+fn validate_faces(f: &FaceSpec) -> MlResult<()> {
+    let invalid = |detail: String| MlError::PackInvalid { detail };
+    let d = &f.detector;
+    if d.strides.is_empty() {
+        return Err(invalid("faces.detector.strides is empty".into()));
+    }
+    if d.strides.contains(&0) {
+        return Err(invalid(format!(
+            "faces.detector.strides {:?} contains 0",
+            d.strides
+        )));
+    }
+    // The three output lists index the same per-stride pyramid level. A short
+    // list is a manifest that would silently decode the wrong tensor.
+    for (name, list) in [
+        ("score_outputs", &d.score_outputs),
+        ("bbox_outputs", &d.bbox_outputs),
+        ("kps_outputs", &d.kps_outputs),
+    ] {
+        if list.len() != d.strides.len() {
+            return Err(invalid(format!(
+                "faces.detector.{name} has {} entries, strides has {}",
+                list.len(),
+                d.strides.len()
+            )));
+        }
+    }
+    if d.anchors_per_cell == 0 {
+        return Err(invalid("faces.detector.anchors_per_cell is 0".into()));
+    }
+    if d.input_size == 0 {
+        return Err(invalid("faces.detector.input_size is 0".into()));
+    }
+    let coarsest = d.strides.iter().copied().max().unwrap_or(1);
+    if !d.input_size.is_multiple_of(coarsest) {
+        return Err(invalid(format!(
+            "faces.detector.input_size {} is not a multiple of the coarsest stride",
+            d.input_size
+        )));
+    }
+    if d.max_faces == 0 {
+        return Err(invalid("faces.detector.max_faces is 0".into()));
+    }
+    if !(0.0..=1.0).contains(&d.score_threshold) || !(0.0..=1.0).contains(&d.nms_iou) {
+        return Err(invalid(format!(
+            "faces.detector score_threshold {} / nms_iou {} outside [0, 1]",
+            d.score_threshold, d.nms_iou
+        )));
+    }
+    check_norm("faces.detector", &d.mean, &d.std)?;
+
+    let e = &f.embedder;
+    if e.input_size == 0 {
+        return Err(invalid("faces.embedder.input_size is 0".into()));
+    }
+    if e.embedding_dim == 0 {
+        return Err(invalid("faces.embedder.embedding_dim is 0".into()));
+    }
+    check_norm("faces.embedder", &e.mean, &e.std)?;
+
+    let c = &f.clustering;
+    for (name, v) in [
+        ("join", c.join),
+        ("auto", c.auto),
+        ("merge", c.merge),
+        ("edge", c.edge),
+        ("min_quality", c.min_quality),
+    ] {
+        if !v.is_finite() || !(-1.0..=1.0).contains(&v) {
+            return Err(invalid(format!(
+                "faces.clustering.{name} = {v} is not a usable cosine threshold"
+            )));
+        }
+    }
+    // The one *relationship* between thresholds that carries meaning: joining a
+    // named cluster writes to a file, so it must never be easier than joining
+    // an anonymous one.
+    if c.auto < c.join {
+        return Err(invalid(format!(
+            "faces.clustering.auto {} is below join {} — auto-tagging would be \
+             looser than clustering",
+            c.auto, c.join
+        )));
+    }
+    if c.cw_iterations == 0 {
+        return Err(invalid("faces.clustering.cw_iterations is 0".into()));
+    }
+    Ok(())
+}
+
+fn check_norm(what: &str, mean: &[f32; 3], std: &[f32; 3]) -> MlResult<()> {
+    if std.iter().any(|s| *s == 0.0 || !s.is_finite()) {
+        return Err(MlError::PackInvalid {
+            detail: format!("{what}.std {std:?} is not usable"),
+        });
+    }
+    if mean.iter().any(|v| !v.is_finite()) {
+        return Err(MlError::PackInvalid {
+            detail: format!("{what}.mean {mean:?} is not usable"),
+        });
+    }
+    Ok(())
+}
+
+/// First 12 hex characters — enough to name a model in a cache key without
+/// putting a 64-character hash in every row.
+fn short_hash(hex: &str) -> &str {
+    &hex[..hex.len().min(12)]
 }
 
 fn resolve_labels(
@@ -554,6 +907,41 @@ mod tests {
             label_embeddings: None,
             hysteresis_epsilon: 0.02,
             roots,
+            faces: None,
+        }
+    }
+
+    fn face_spec() -> FaceSpec {
+        FaceSpec {
+            detector: FaceDetectorSpec {
+                file: "det.onnx".into(),
+                sha256: "aa".into(),
+                input_name: "input.1".into(),
+                input_size: 640,
+                score_outputs: vec!["s8".into(), "s16".into(), "s32".into()],
+                bbox_outputs: vec!["b8".into(), "b16".into(), "b32".into()],
+                kps_outputs: vec!["k8".into(), "k16".into(), "k32".into()],
+                strides: vec![8, 16, 32],
+                anchors_per_cell: 2,
+                mean: [0.5; 3],
+                std: [0.501_960_8; 3],
+                resize_filter: ResizeFilter::Bilinear,
+                score_threshold: 0.5,
+                nms_iou: 0.4,
+                max_faces: 32,
+                min_face_pixels: 24.0,
+            },
+            embedder: FaceEmbedderSpec {
+                file: "emb.onnx".into(),
+                sha256: "bb".into(),
+                input_name: "input.1".into(),
+                output_name: "516".into(),
+                input_size: 112,
+                embedding_dim: 512,
+                mean: [0.5; 3],
+                std: [0.5; 3],
+            },
+            clustering: ClusteringConfig::default(),
         }
     }
 
@@ -696,6 +1084,189 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let err = read_verified(dir.path(), "../etc/passwd", "00").unwrap_err();
         assert!(matches!(err, MlError::PackInvalid { .. }), "{err:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Model pack v2: the optional face block
+    // -----------------------------------------------------------------------
+
+    fn manifest_with_faces(faces: FaceSpec) -> Manifest {
+        Manifest {
+            schema: 2,
+            faces: Some(faces),
+            ..manifest_with(objects_root())
+        }
+    }
+
+    /// The whole reason `faces` is an `Option`: a pack that ships no face
+    /// models is a complete, valid pack.
+    #[test]
+    fn a_tagging_only_pack_is_valid_at_both_schemas() {
+        assert!(validate_manifest(&manifest_with(objects_root())).is_ok());
+        let v2 = Manifest {
+            schema: 2,
+            ..manifest_with(objects_root())
+        };
+        assert!(validate_manifest(&v2).is_ok());
+        assert!(v2.faces.is_none());
+    }
+
+    #[test]
+    fn a_v1_manifest_may_not_smuggle_in_face_models() {
+        let m = Manifest {
+            schema: 1,
+            faces: Some(face_spec()),
+            ..manifest_with(objects_root())
+        };
+        assert!(validate_manifest(&m).is_err());
+    }
+
+    #[test]
+    fn a_well_formed_face_block_validates() {
+        assert!(validate_manifest(&manifest_with_faces(face_spec())).is_ok());
+    }
+
+    /// The three output lists are parallel arrays indexed by pyramid level. A
+    /// short one would decode the wrong tensor and produce plausible garbage.
+    #[test]
+    fn a_short_output_list_is_rejected() {
+        for mutate in [
+            |f: &mut FaceSpec| f.detector.score_outputs.pop(),
+            |f: &mut FaceSpec| f.detector.bbox_outputs.pop(),
+            |f: &mut FaceSpec| f.detector.kps_outputs.pop(),
+        ] {
+            let mut spec = face_spec();
+            mutate(&mut spec);
+            assert!(
+                validate_manifest(&manifest_with_faces(spec)).is_err(),
+                "a truncated output list was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn an_input_size_the_strides_do_not_divide_is_rejected() {
+        let mut spec = face_spec();
+        spec.detector.input_size = 100;
+        assert!(validate_manifest(&manifest_with_faces(spec)).is_err());
+    }
+
+    #[test]
+    fn nonsense_detector_geometry_is_rejected() {
+        for mutate in [
+            |f: &mut FaceSpec| f.detector.strides.clear(),
+            |f: &mut FaceSpec| f.detector.strides = vec![0, 16, 32],
+            |f: &mut FaceSpec| f.detector.anchors_per_cell = 0,
+            |f: &mut FaceSpec| f.detector.input_size = 0,
+            |f: &mut FaceSpec| f.detector.max_faces = 0,
+            |f: &mut FaceSpec| f.detector.score_threshold = 1.5,
+            |f: &mut FaceSpec| f.detector.nms_iou = -0.1,
+            |f: &mut FaceSpec| f.detector.std = [1.0, 0.0, 1.0],
+            |f: &mut FaceSpec| f.embedder.input_size = 0,
+            |f: &mut FaceSpec| f.embedder.embedding_dim = 0,
+            |f: &mut FaceSpec| f.embedder.std = [0.0; 3],
+        ] {
+            let mut spec = face_spec();
+            mutate(&mut spec);
+            assert!(validate_manifest(&manifest_with_faces(spec)).is_err());
+        }
+    }
+
+    /// Auto-tagging writes to somebody's sidecar. It must never be an easier
+    /// bar to clear than plain clustering.
+    #[test]
+    fn an_auto_threshold_below_the_join_threshold_is_rejected() {
+        let mut spec = face_spec();
+        spec.clustering.auto = spec.clustering.join - 0.01;
+        let err = validate_manifest(&manifest_with_faces(spec)).unwrap_err();
+        assert!(matches!(err, MlError::PackInvalid { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn a_threshold_outside_cosine_range_is_rejected() {
+        let mut spec = face_spec();
+        spec.clustering.merge = 1.5;
+        assert!(validate_manifest(&manifest_with_faces(spec)).is_err());
+        let mut spec = face_spec();
+        spec.clustering.cw_iterations = 0;
+        assert!(validate_manifest(&manifest_with_faces(spec)).is_err());
+    }
+
+    /// Omitting `clustering` must give the documented defaults rather than
+    /// zeroes, which would cluster the entire library into one person.
+    #[test]
+    fn an_omitted_clustering_block_falls_back_to_the_defaults() {
+        let json = serde_json::json!({
+            "detector": serde_json::to_value(face_spec().detector).unwrap(),
+            "embedder": serde_json::to_value(face_spec().embedder).unwrap(),
+        });
+        let spec: FaceSpec = serde_json::from_value(json).unwrap();
+        assert_eq!(spec.clustering, ClusteringConfig::default());
+        assert!(spec.clustering.auto > spec.clustering.join);
+    }
+
+    /// A schema-2 manifest with no `faces` key must round-trip *without* one,
+    /// so adding face support does not rewrite every existing pack file.
+    #[test]
+    fn the_faces_key_is_omitted_when_absent() {
+        let bytes = serde_json::to_vec(&manifest_with(objects_root())).unwrap();
+        assert!(!String::from_utf8(bytes.clone()).unwrap().contains("faces"));
+        let back: Manifest = serde_json::from_slice(&bytes).unwrap();
+        assert!(back.faces.is_none());
+    }
+
+    #[test]
+    fn the_face_pack_key_tracks_the_models_not_the_pack_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = ModelPack {
+            dir: dir.path().to_path_buf(),
+            manifest: manifest_with_faces(face_spec()),
+            model_bytes: Vec::new(),
+            labels: Vec::new(),
+        };
+        let key = base.face_pack_key().unwrap();
+
+        // A labels-only tagging rebuild changes `pack_version` and must not
+        // invalidate a single face row.
+        let mut renamed = base.clone();
+        renamed.manifest.pack_version = "something-else".into();
+        assert_eq!(renamed.face_pack_key().unwrap(), key);
+
+        // A different detector must.
+        let mut swapped = base.clone();
+        swapped.manifest.faces.as_mut().unwrap().detector.sha256 = "ffffffffffffff".into();
+        assert_ne!(swapped.face_pack_key().unwrap(), key);
+
+        // And a tagging-only pack has no key at all.
+        let mut plain = base.clone();
+        plain.manifest.faces = None;
+        assert!(plain.face_pack_key().is_none());
+        assert!(plain.load_face_models().is_err());
+    }
+
+    #[test]
+    fn face_model_bytes_are_hash_verified_like_everything_else() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("det.onnx"), b"detector").unwrap();
+        std::fs::write(dir.path().join("emb.onnx"), b"embedder").unwrap();
+        let mut spec = face_spec();
+        spec.detector.sha256 = sha256_hex(b"detector");
+        spec.embedder.sha256 = sha256_hex(b"embedder");
+        let pack = ModelPack {
+            dir: dir.path().to_path_buf(),
+            manifest: manifest_with_faces(spec),
+            model_bytes: Vec::new(),
+            labels: Vec::new(),
+        };
+        let bytes = pack.load_face_models().unwrap();
+        assert_eq!(bytes.detector, b"detector");
+        assert_eq!(bytes.embedder, b"embedder");
+
+        std::fs::write(dir.path().join("emb.onnx"), b"tampered").unwrap();
+        assert!(matches!(
+            pack.load_face_models().unwrap_err(),
+            MlError::PackHashMismatch { .. }
+        ));
     }
 
     #[test]

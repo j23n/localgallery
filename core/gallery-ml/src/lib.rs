@@ -26,23 +26,29 @@
 //!
 //! # Module map
 //!
-//! * [`cache`] — `gallery-cache.sqlite`: work queue and embedding cache.
+//! * [`cache`] — `gallery-cache.sqlite`: work queues, embeddings, faces,
+//!   clusters.
 //! * [`preprocess`] — the pinned decode → orient → resize → tensor path.
-//! * [`encoder`] — the [`encoder::ImageEncoder`] seam and the `ort` backend.
-//! * [`pack`] — model-pack v1: manifest, labels, SHA-256 verification.
+//! * [`encoder`] — the [`encoder::ImageEncoder`] /
+//!   [`encoder::MultiOutputModel`] seams and the `ort` backend.
+//! * [`pack`] — model-pack v2: manifest, labels, optional face models,
+//!   SHA-256 verification.
 //! * [`tagger`] — cosine scoring, per-root caps, hysteresis.
-//! * [`engine`] — the orchestrator and its thread pool.
+//! * [`engine`] — the tagging orchestrator and its thread pool.
+//! * [`face`] — detection, alignment, embedding, quality and clustering, plus
+//!   [`face::FaceEngine`].
 //! * [`hash`] — streamed content hashing.
 //!
 //! # What this crate is not
 //!
 //! * Not an FFI surface. No UniFFI attributes anywhere; `gallery-ffi` wraps
-//!   [`TaggingEngine`].
+//!   [`TaggingEngine`] and [`face::FaceEngine`].
 //! * Not a video pipeline. photo-tools samples frames with ffmpeg; there is no
 //!   ffmpeg on iOS, and there is no determinism story for a platform decoder.
 //! * Not a HEIC decoder — see [`preprocess`] for the gap and why it is open.
-//! * Not a face pipeline. `People/*` belongs to Phase 2, and both this crate
-//!   and `gallery-meta` refuse to write it.
+//! * Not a sidecar writer for people. [`face`] stops at the cache DB; turning a
+//!   named cluster into `People/*` keywords and MWG-RS regions is
+//!   `gallery-meta`'s half of Phase 2.
 //!
 //! ```no_run
 //! use std::sync::atomic::AtomicBool;
@@ -68,15 +74,22 @@ pub mod cache;
 pub mod encoder;
 pub mod engine;
 pub mod error;
+pub mod face;
 pub mod hash;
 pub mod pack;
 pub mod preprocess;
 pub mod tagger;
 
-pub use cache::{CacheDb, Stats, WorkItem, WorkState};
-pub use encoder::ImageEncoder;
+pub use cache::{
+    CacheDb, ClusterRow, ClusterState, FaceLibraryStats, Stats, StoredFace, WorkItem, WorkState,
+};
+pub use encoder::{ImageEncoder, ModelOutput, MultiOutputModel};
 pub use engine::{NoProgress, RunOptions, RunSummary, TaggingEngine, TaggingProgress, MAX_WORKERS};
 pub use error::{ErrorCode, MlError, MlResult};
-pub use pack::{Manifest, ModelPack, RootConfig};
+pub use face::{
+    Detection, FaceEngine, FaceProgress, FaceRunOptions, FaceRunSummary, NoFaceProgress,
+    ReclusterSummary, ALIGN_VERSION,
+};
+pub use pack::{ClusteringConfig, FaceSpec, Manifest, ModelPack, RootConfig};
 pub use preprocess::{PreprocessConfig, ResizeFilter, Tensor, PREPROCESS_VERSION};
 pub use tagger::{ScoredTag, ZeroShotTagger};

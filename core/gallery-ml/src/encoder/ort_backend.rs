@@ -38,12 +38,59 @@ use ort::value::Tensor as OrtTensor;
 use crate::error::{MlError, MlResult};
 use crate::preprocess::Tensor;
 
-use super::ImageEncoder;
+use super::{ImageEncoder, ModelOutput, MultiOutputModel};
+
+/// `slots` independent sessions over one set of weights.
+///
+/// Shared by [`OrtEncoder`] and [`OrtModel`]: the pooling story (why sessions
+/// are not behind one mutex, why they are built eagerly, why a poisoned lock is
+/// recovered) is identical for both, and it is the part with the reasoning in
+/// it.
+struct SessionPool {
+    slots: Vec<Mutex<Session>>,
+    next: AtomicUsize,
+}
+
+impl SessionPool {
+    fn new(model_bytes: &[u8], slots: usize) -> MlResult<SessionPool> {
+        let slots = slots.max(1);
+        let mut sessions = Vec::with_capacity(slots);
+        for _ in 0..slots {
+            sessions.push(Mutex::new(build_session(model_bytes)?));
+        }
+        Ok(SessionPool {
+            slots: sessions,
+            next: AtomicUsize::new(0),
+        })
+    }
+
+    fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// Take the first free session; if every one is busy, block on a rotating
+    /// slot so callers spread out instead of all queueing behind slot 0.
+    ///
+    /// A poisoned mutex is recovered rather than propagated: the panic that
+    /// poisoned it happened inside ORT, on a different photo, and the session
+    /// itself is still a valid handle.
+    fn acquire(&self) -> std::sync::MutexGuard<'_, Session> {
+        for slot in &self.slots {
+            if let Ok(guard) = slot.try_lock() {
+                return guard;
+            }
+        }
+        let i = self.next.fetch_add(1, Ordering::Relaxed) % self.slots.len();
+        match self.slots[i].lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+}
 
 /// ONNX Runtime image encoder.
 pub struct OrtEncoder {
-    slots: Vec<Mutex<Session>>,
-    next: AtomicUsize,
+    pool: SessionPool,
     input_name: String,
     output_name: String,
     input_size: u32,
@@ -53,7 +100,7 @@ pub struct OrtEncoder {
 impl std::fmt::Debug for OrtEncoder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OrtEncoder")
-            .field("slots", &self.slots.len())
+            .field("slots", &self.pool.len())
             .field("input_size", &self.input_size)
             .field("embedding_dim", &self.embedding_dim)
             .finish()
@@ -75,20 +122,83 @@ impl OrtEncoder {
         embedding_dim: usize,
         slots: usize,
     ) -> MlResult<OrtEncoder> {
-        let slots = slots.max(1);
-        let mut sessions = Vec::with_capacity(slots);
-        for _ in 0..slots {
-            sessions.push(Mutex::new(build_session(model_bytes)?));
-        }
         Ok(OrtEncoder {
-            slots: sessions,
-            next: AtomicUsize::new(0),
+            pool: SessionPool::new(model_bytes, slots)?,
             input_name: input_name.to_string(),
             output_name: output_name.to_string(),
             input_size,
             embedding_dim,
         })
     }
+}
+
+/// ONNX Runtime model with an arbitrary set of named outputs.
+pub struct OrtModel {
+    pool: SessionPool,
+}
+
+impl std::fmt::Debug for OrtModel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OrtModel")
+            .field("slots", &self.pool.len())
+            .finish()
+    }
+}
+
+impl OrtModel {
+    /// Build `slots` sessions from `model_bytes`.
+    pub fn new(model_bytes: &[u8], slots: usize) -> MlResult<OrtModel> {
+        Ok(OrtModel {
+            pool: SessionPool::new(model_bytes, slots)?,
+        })
+    }
+}
+
+impl MultiOutputModel for OrtModel {
+    fn run(
+        &self,
+        input_name: &str,
+        tensor: &Tensor,
+        outputs: &[String],
+    ) -> MlResult<Vec<ModelOutput>> {
+        let input = build_input(tensor)?;
+        let names: Vec<&str> = outputs.iter().map(String::as_str).collect();
+        let mut session = self.pool.acquire();
+        let run = session
+            .run(ort::inputs![input_name => input])
+            .map_err(|e| MlError::Inference {
+                detail: e.to_string(),
+            })?;
+
+        let mut result = Vec::with_capacity(names.len());
+        for name in names {
+            let value = run.get(name).ok_or_else(|| MlError::Inference {
+                detail: format!("model has no output named {name:?}"),
+            })?;
+            let (shape, data) =
+                value
+                    .try_extract_tensor::<f32>()
+                    .map_err(|e| MlError::Inference {
+                        detail: format!("output {name:?} is not f32: {e}"),
+                    })?;
+            result.push(ModelOutput {
+                shape: shape.iter().map(|d| (*d).max(0) as usize).collect(),
+                data: data.to_vec(),
+            });
+        }
+        Ok(result)
+    }
+
+    fn backend_name(&self) -> &'static str {
+        "ort"
+    }
+}
+
+fn build_input(tensor: &Tensor) -> MlResult<OrtTensor<f32>> {
+    let shape: Vec<i64> = tensor.shape.iter().map(|d| *d as i64).collect();
+    OrtTensor::from_array((shape, tensor.data.clone())).map_err(|e| MlError::Inference {
+        detail: format!("building input tensor: {e}"),
+    })
 }
 
 /// `ort::Error<R>` is generic over the builder it consumed, so a single
@@ -118,14 +228,9 @@ fn build_session(model_bytes: &[u8]) -> MlResult<Session> {
 
 impl ImageEncoder for OrtEncoder {
     fn embed(&self, tensor: &Tensor) -> MlResult<Vec<f32>> {
-        let shape: Vec<i64> = tensor.shape.iter().map(|d| *d as i64).collect();
-        let input = OrtTensor::from_array((shape, tensor.data.clone())).map_err(|e| {
-            MlError::Inference {
-                detail: format!("building input tensor: {e}"),
-            }
-        })?;
+        let input = build_input(tensor)?;
 
-        let mut session = self.acquire();
+        let mut session = self.pool.acquire();
         let outputs = session
             .run(ort::inputs![self.input_name.as_str() => input])
             .map_err(|e| MlError::Inference {
@@ -165,26 +270,5 @@ impl ImageEncoder for OrtEncoder {
 
     fn backend_name(&self) -> &'static str {
         "ort"
-    }
-}
-
-impl OrtEncoder {
-    /// Take the first free session; if every one is busy, block on a rotating
-    /// slot so callers spread out instead of all queueing behind slot 0.
-    ///
-    /// A poisoned mutex is recovered rather than propagated: the panic that
-    /// poisoned it happened inside ORT, on a different photo, and the session
-    /// itself is still a valid handle.
-    fn acquire(&self) -> std::sync::MutexGuard<'_, Session> {
-        for slot in &self.slots {
-            if let Ok(guard) = slot.try_lock() {
-                return guard;
-            }
-        }
-        let i = self.next.fetch_add(1, Ordering::Relaxed) % self.slots.len();
-        match self.slots[i].lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
     }
 }

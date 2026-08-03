@@ -1,0 +1,35 @@
+{
+  "dim": 64,
+  "labels": [
+    {
+      "path": "Objects/Animal/Cat",
+      "prompt": "a photo of cat",
+      "threshold": -0.07
+    },
+    {
+      "path": "Objects/Animal/Dog",
+      "prompt": "a photo of dog",
+      "threshold": 0.06
+    },
+    {
+      "path": "Objects/Vehicle/Car",
+      "prompt": "a photo of car",
+      "threshold": 0.22
+    },
+    {
+      "path": "Scenes/Nature/Beach",
+      "prompt": "a photo of beach"
+    },
+    {
+      "path": "Scenes/Nature/Forest",
+      "prompt": "a photo of forest",
+      "threshold": 0.01
+    },
+    {
+      "path": "Scenes/Urban/Street",
+      "prompt": "a photo of street",
+      "threshold": 0.175
+    }
+  ],
+  "schema": 1
+}

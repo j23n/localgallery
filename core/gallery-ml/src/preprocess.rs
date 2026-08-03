@@ -39,7 +39,7 @@
 //! drift between architectures is absorbed by the tagger's hysteresis margin
 //! (see [`crate::tagger`]), which is sized far larger than a rounding step.
 
-use fast_image_resize::images::Image as FirImage;
+use fast_image_resize::images::{Image as FirImage, ImageRef};
 use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
 use image::metadata::Orientation;
 use image::{DynamicImage, ImageFormat, RgbImage};
@@ -217,6 +217,18 @@ impl Tensor {
 ///
 /// `path` is only used to label errors.
 pub fn preprocess(path: &str, bytes: &[u8], cfg: &PreprocessConfig) -> MlResult<Tensor> {
+    tensor_from_rgb(path, decode_oriented(path, bytes)?, cfg)
+}
+
+/// Steps 1–3 of the pipeline: sniff, decode, apply EXIF orientation.
+///
+/// Split out from [`preprocess`] because the face pipeline needs the *oriented
+/// full-resolution pixels* twice — once letterboxed for the detector, then
+/// again at original scale to cut the aligned crops out of — and decoding a
+/// 12 MP JPEG twice per photo is the most expensive thing this crate could do
+/// by accident. Every caller sees the same bytes, so the determinism story is
+/// unchanged: this *is* the pinned path, just named.
+pub fn decode_oriented(path: &str, bytes: &[u8]) -> MlResult<RgbImage> {
     let kind = sniff(bytes).ok_or_else(|| MlError::Preprocess {
         path: path.to_string(),
         code: ErrorCode::UnsupportedFormat,
@@ -244,8 +256,7 @@ pub fn preprocess(path: &str, bytes: &[u8], cfg: &PreprocessConfig) -> MlResult<
         });
     }
 
-    let oriented = apply_orientation(decoded, read_exif_orientation(bytes));
-    tensor_from_rgb(path, oriented.into_rgb8(), cfg)
+    Ok(apply_orientation(decoded, read_exif_orientation(bytes)).into_rgb8())
 }
 
 /// The EXIF `Orientation` value (1–8), or `None` when absent/unreadable.
@@ -321,24 +332,154 @@ pub fn tensor_from_rgb(path: &str, rgb: RgbImage, cfg: &PreprocessConfig) -> MlR
     let (ox, oy) = center_crop_origin(rw, rh, n);
 
     let n_usize = n as usize;
-    let plane = n_usize * n_usize;
-    let mut data = vec![0.0f32; 3 * plane];
-    let row_stride = rw as usize * 3;
-    for y in 0..n_usize {
-        let src_row = (oy as usize + y) * row_stride + ox as usize * 3;
-        for x in 0..n_usize {
-            let i = src_row + x * 3;
-            let o = y * n_usize + x;
-            for c in 0..3 {
-                let v = f32::from(resized[i + c]) / 255.0;
-                data[c * plane + o] = (v - cfg.mean[c]) / cfg.std[c];
-            }
-        }
-    }
+    let data = planar_normalize(
+        &resized,
+        rw as usize * 3,
+        ox as usize,
+        oy as usize,
+        n_usize,
+        &cfg.mean,
+        &cfg.std,
+    );
 
     Ok(Tensor {
         data,
         shape: [1, 3, n_usize, n_usize],
+    })
+}
+
+/// Cut an `n × n` window out of an interleaved RGB buffer and write it as a
+/// normalized CHW `f32` plane stack.
+///
+/// The one place `(value / 255 - mean) / std` is spelled out. Every tensor this
+/// crate builds — tagging crop, detector letterbox, aligned face — goes through
+/// here, so "the goldens moved" can only ever mean one arithmetic change.
+fn planar_normalize(
+    src: &[u8],
+    row_stride: usize,
+    ox: usize,
+    oy: usize,
+    n: usize,
+    mean: &[f32; 3],
+    std: &[f32; 3],
+) -> Vec<f32> {
+    let plane = n * n;
+    let mut data = vec![0.0f32; 3 * plane];
+    for y in 0..n {
+        let src_row = (oy + y) * row_stride + ox * 3;
+        for x in 0..n {
+            let i = src_row + x * 3;
+            let o = y * n + x;
+            for c in 0..3 {
+                let v = f32::from(src[i + c]) / 255.0;
+                data[c * plane + o] = (v - mean[c]) / std[c];
+            }
+        }
+    }
+    data
+}
+
+/// A square detector input plus the geometry to undo it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Letterboxed {
+    /// `1 × 3 × size × size`, normalized.
+    pub tensor: Tensor,
+    /// Factor the source was multiplied by. Divide a detection's coordinates by
+    /// this to get back to original-image pixels.
+    pub scale: f64,
+    /// Occupied region of the canvas, in canvas pixels. Everything outside is
+    /// the zero pad.
+    pub content: (u32, u32),
+}
+
+/// Resize `rgb` to fit inside `size × size` preserving aspect ratio, pad the
+/// remainder with black, and normalize.
+///
+/// **Top-left aligned**, not centered, matching insightface's `SCRFD.detect` —
+/// the detector's anchor grid is what it is, and a pack built against one
+/// padding convention is not interchangeable with the other. The pad value is
+/// 0 *before* normalization (i.e. black pixels), so the padded region carries
+/// whatever `(0 - mean) / std` is, exactly as it would in the reference
+/// pipeline.
+///
+/// Only one `scale` is used for both axes even though the rounded destination
+/// size makes the realized x- and y- scales differ by a fraction of a pixel.
+/// That is the reference implementation's behaviour too, and the residual is
+/// under half a pixel in the 640-pixel frame — an order of magnitude below the
+/// landmark precision anything downstream relies on.
+pub fn letterbox(
+    path: &str,
+    rgb: &RgbImage,
+    size: u32,
+    mean: &[f32; 3],
+    std: &[f32; 3],
+    filter: ResizeFilter,
+) -> MlResult<Letterboxed> {
+    let bad = |detail: String| MlError::Preprocess {
+        path: path.to_string(),
+        code: ErrorCode::BadImage,
+        detail,
+    };
+    if size == 0 {
+        return Err(MlError::PackInvalid {
+            detail: "detector input_size is 0".into(),
+        });
+    }
+    let (w, h) = (rgb.width(), rgb.height());
+    if w == 0 || h == 0 {
+        return Err(bad(format!("{w}×{h} is not a usable size")));
+    }
+
+    let scale = (f64::from(size) / f64::from(w)).min(f64::from(size) / f64::from(h));
+    let nw = ((f64::from(w) * scale).round() as u32).clamp(1, size);
+    let nh = ((f64::from(h) * scale).round() as u32).clamp(1, size);
+
+    let src = ImageRef::new(w, h, rgb.as_raw(), PixelType::U8x3).map_err(|e| bad(e.to_string()))?;
+    let mut dst = FirImage::new(nw, nh, PixelType::U8x3);
+    let options = ResizeOptions::new()
+        .resize_alg(ResizeAlg::Convolution(filter.to_fir()))
+        .use_alpha(false);
+    Resizer::new()
+        .resize(&src, &mut dst, &options)
+        .map_err(|e| bad(e.to_string()))?;
+
+    let n = size as usize;
+    let mut canvas = vec![0u8; n * n * 3];
+    let resized = dst.into_vec();
+    for y in 0..nh as usize {
+        let from = y * nw as usize * 3;
+        let to = y * n * 3;
+        canvas[to..to + nw as usize * 3].copy_from_slice(&resized[from..from + nw as usize * 3]);
+    }
+
+    Ok(Letterboxed {
+        tensor: Tensor {
+            data: planar_normalize(&canvas, n * 3, 0, 0, n, mean, std),
+            shape: [1, 3, n, n],
+        },
+        scale,
+        content: (nw, nh),
+    })
+}
+
+/// Normalize an already-square RGB buffer into a model input tensor.
+///
+/// Used by the face aligner, which produces its `112 × 112` pixels by warping
+/// rather than by resizing and cropping.
+pub fn tensor_from_square(rgb: &RgbImage, mean: &[f32; 3], std: &[f32; 3]) -> MlResult<Tensor> {
+    let n = rgb.width() as usize;
+    if rgb.width() != rgb.height() || n == 0 {
+        return Err(MlError::PackInvalid {
+            detail: format!(
+                "{}×{} is not a square tensor source",
+                rgb.width(),
+                rgb.height()
+            ),
+        });
+    }
+    Ok(Tensor {
+        data: planar_normalize(rgb.as_raw(), n * 3, 0, 0, n, mean, std),
+        shape: [1, 3, n, n],
     })
 }
 

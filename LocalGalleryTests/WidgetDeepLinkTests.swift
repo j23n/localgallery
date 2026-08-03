@@ -5,7 +5,7 @@ final class WidgetDeepLinkTests: XCTestCase {
 
     // MARK: - memory
 
-    func testMemoryRoundTrip() {
+    func testMemoryRoundTrip() throws {
         let link = WidgetDeepLink.memory(id: "yearsAgo-5")
         let url = try XCTUnwrap(link.url)
         XCTAssertEqual(WidgetDeepLink.parse(url), link)
@@ -22,7 +22,7 @@ final class WidgetDeepLinkTests: XCTestCase {
 
     // MARK: - folder
 
-    func testFolderRoundTrip() {
+    func testFolderRoundTrip() throws {
         let link = WidgetDeepLink.folder(id: "ABCD-1234")
         let url = try XCTUnwrap(link.url)
         XCTAssertEqual(WidgetDeepLink.parse(url), link)
@@ -34,19 +34,19 @@ final class WidgetDeepLinkTests: XCTestCase {
 
     // MARK: - tags
 
-    func testTagsSinglePathRoundTrip() {
+    func testTagsSinglePathRoundTrip() throws {
         let link = WidgetDeepLink.tags(paths: ["People/Alice"])
         let url = try XCTUnwrap(link.url)
         XCTAssertEqual(WidgetDeepLink.parse(url), link)
     }
 
-    func testTagsMultiplePathsRoundTrip() {
+    func testTagsMultiplePathsRoundTrip() throws {
         let link = WidgetDeepLink.tags(paths: ["People/Alice", "Places/Italy/Rome"])
         let url = try XCTUnwrap(link.url)
         XCTAssertEqual(WidgetDeepLink.parse(url), link)
     }
 
-    func testTagsCommaInPathSurvives() {
+    func testTagsCommaInPathSurvives() throws {
         // The original encoding joined on `,` and split on `,`, which silently
         // corrupted any tag containing a literal comma. Using repeated
         // `paths=` query items round-trips intact.

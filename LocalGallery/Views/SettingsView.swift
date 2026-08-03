@@ -96,6 +96,8 @@ struct SettingsView: View {
                     }
                 }
 
+                taggingSection
+
                 Section("Stats") {
                     LabeledContent("Photos", value: "\(store.allPhotos.count)")
                     LabeledContent("People", value: "\(tagCount(namespace: "people"))")
@@ -301,6 +303,117 @@ struct SettingsView: View {
 
         guard !items.isEmpty else { return }
         ShareSheet.present(items: items)
+    }
+
+    // MARK: - On-device tagging
+
+    @State private var showModelPackPicker = false
+
+    /// Tagging status, model-pack import, and the "Tag Library Now" run
+    /// controls. The section is always present — with no pack installed it
+    /// explains what's missing rather than hiding the feature.
+    @ViewBuilder
+    private var taggingSection: some View {
+        let tagging = store.tagging
+        Section {
+            LabeledContent {
+                Text(modelPackSummary)
+                    .foregroundStyle(.secondary)
+            } label: {
+                Label("Model Pack", systemImage: "shippingbox")
+            }
+
+            Button {
+                showModelPackPicker = true
+            } label: {
+                Label("Import Model Pack…", systemImage: "square.and.arrow.down")
+            }
+            .tint(.primary)
+            .disabled(tagging.isRunning)
+
+            if tagging.isRunning {
+                taggingProgressRow
+                Button(role: .destructive) {
+                    tagging.cancel()
+                } label: {
+                    Label("Cancel Tagging", systemImage: "stop.circle")
+                }
+            } else {
+                Button {
+                    Task { await store.tagging.startTagging() }
+                } label: {
+                    Label("Tag Library Now", systemImage: "sparkles.rectangle.stack")
+                }
+                .disabled(!tagging.isAvailable || store.isScanning || store.allPhotos.isEmpty)
+            }
+
+            if let summary = tagging.lastSummary {
+                LabeledContent("Last Run") {
+                    Text(Self.summaryLine(summary))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if let error = tagging.lastError, error != .cancelled {
+                Text(error.message)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+            }
+        } header: {
+            Text("On-device Tagging")
+        } footer: {
+            Text("Tags photos with the photo-tools Objects and Scenes taxonomy and writes the result into each photo's `.xmp` sidecar — the image files are never modified. Everything runs on this device. A model pack has to be imported first; tagging a photo twice writes nothing.")
+        }
+        .fileImporter(isPresented: $showModelPackPicker, allowedContentTypes: [.folder]) { result in
+            guard case .success(let url) = result else { return }
+            Task { await store.tagging.importModelPack(from: url) }
+        }
+        .task {
+            await store.tagging.refreshAvailability()
+        }
+    }
+
+    private var modelPackSummary: String {
+        let tagging = store.tagging
+        if let pack = tagging.pack {
+            return "\(pack.version) · \(pack.labelCount) labels"
+        }
+        return tagging.hasCheckedForPack ? "None installed" : "Checking…"
+    }
+
+    @ViewBuilder
+    private var taggingProgressRow: some View {
+        let progress = store.tagging.progress
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Tagging…")
+                    .font(.caption.weight(.semibold))
+                Spacer(minLength: 0)
+                if let progress {
+                    Text("\(progress.done) / \(progress.total)")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if let progress, progress.total > 0 {
+                ProgressView(value: Double(progress.done), total: Double(progress.total))
+                    .progressViewStyle(.linear)
+            } else {
+                ProgressView().progressViewStyle(.linear)
+            }
+        }
+    }
+
+    private static func summaryLine(_ summary: TaggingService.Summary) -> String {
+        if summary.processed == 0 && summary.sidecarsWritten == 0 {
+            return summary.cancelled ? "Cancelled" : "Nothing to do"
+        }
+        var parts = ["\(summary.tagged) tagged", "\(summary.sidecarsWritten) written"]
+        if summary.failed > 0 { parts.append("\(summary.failed) failed") }
+        if summary.cancelled { parts.append("cancelled") }
+        return parts.joined(separator: ", ")
     }
 
     // MARK: - Cloud Storage

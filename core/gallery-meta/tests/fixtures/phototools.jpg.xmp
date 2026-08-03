@@ -1,0 +1,114 @@
+<?xpacket begin='﻿' id='W5M0MpCehiHzreSzNTczkc9d'?>
+<x:xmpmeta xmlns:x='adobe:ns:meta/' x:xmptk='Image::ExifTool 13.55'>
+<rdf:RDF xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'>
+
+ <rdf:Description rdf:about=''
+  xmlns:Iptc4xmpCore='http://iptc.org/std/Iptc4xmpCore/1.0/xmlns/'>
+  <Iptc4xmpCore:CountryCode>IT</Iptc4xmpCore:CountryCode>
+  <Iptc4xmpCore:Location>Municipio Roma I</Iptc4xmpCore:Location>
+ </rdf:Description>
+
+ <rdf:Description rdf:about=''
+  xmlns:Iptc4xmpExt='http://iptc.org/std/Iptc4xmpExt/2008-02-29/'
+  xmlns:xmp='http://ns.adobe.com/xap/1.0/'>
+  <Iptc4xmpExt:ImageRegion>
+   <rdf:Bag>
+    <rdf:li rdf:parseType='Resource'>
+     <Iptc4xmpExt:Name>
+      <rdf:Alt>
+       <rdf:li xml:lang='x-default'>Way Out</rdf:li>
+      </rdf:Alt>
+     </Iptc4xmpExt:Name>
+     <Iptc4xmpExt:RegionBoundary rdf:parseType='Resource'>
+      <Iptc4xmpExt:rbH>0.05</Iptc4xmpExt:rbH>
+      <Iptc4xmpExt:rbShape>rectangle</Iptc4xmpExt:rbShape>
+      <Iptc4xmpExt:rbUnit>relative</Iptc4xmpExt:rbUnit>
+      <Iptc4xmpExt:rbW>0.3</Iptc4xmpExt:rbW>
+      <Iptc4xmpExt:rbX>0.1</Iptc4xmpExt:rbX>
+      <Iptc4xmpExt:rbY>0.2</Iptc4xmpExt:rbY>
+     </Iptc4xmpExt:RegionBoundary>
+     <Iptc4xmpExt:rRole>
+      <rdf:Bag>
+       <rdf:li rdf:parseType='Resource'>
+        <Iptc4xmpExt:Name>
+         <rdf:Alt>
+          <rdf:li xml:lang='x-default'>annotated text</rdf:li>
+         </rdf:Alt>
+        </Iptc4xmpExt:Name>
+        <xmp:Identifier>
+         <rdf:Bag>
+          <rdf:li>https://cv.iptc.org/newscodes/imageregionrole/annotatedText</rdf:li>
+         </rdf:Bag>
+        </xmp:Identifier>
+       </rdf:li>
+      </rdf:Bag>
+     </Iptc4xmpExt:rRole>
+    </rdf:li>
+   </rdf:Bag>
+  </Iptc4xmpExt:ImageRegion>
+ </rdf:Description>
+
+ <rdf:Description rdf:about=''
+  xmlns:dc='http://purl.org/dc/elements/1.1/'>
+  <dc:subject>
+   <rdf:Bag>
+    <rdf:li>Italy</rdf:li>
+    <rdf:li>Lazio</rdf:li>
+    <rdf:li>Rome</rdf:li>
+    <rdf:li>Municipio Roma I</rdf:li>
+    <rdf:li>Colosseum</rdf:li>
+    <rdf:li>Balustrade</rdf:li>
+    <rdf:li>Building</rdf:li>
+   </rdf:Bag>
+  </dc:subject>
+ </rdf:Description>
+
+ <rdf:Description rdf:about=''
+  xmlns:digiKam='http://www.digikam.org/ns/1.0/'>
+  <digiKam:TagsList>
+   <rdf:Seq>
+    <rdf:li>Places/Italy/Lazio/Rome/Municipio Roma I</rdf:li>
+    <rdf:li>Landmarks/Colosseum</rdf:li>
+    <rdf:li>Objects/Structure/Balustrade</rdf:li>
+    <rdf:li>Scenes/Urban/Building</rdf:li>
+   </rdf:Seq>
+  </digiKam:TagsList>
+ </rdf:Description>
+
+ <rdf:Description rdf:about=''
+  xmlns:lr='http://ns.adobe.com/lightroom/1.0/'>
+  <lr:hierarchicalSubject>
+   <rdf:Bag>
+    <rdf:li>Places|Italy|Lazio|Rome|Municipio Roma I</rdf:li>
+    <rdf:li>Landmarks|Colosseum</rdf:li>
+    <rdf:li>Objects|Structure|Balustrade</rdf:li>
+    <rdf:li>Scenes|Urban|Building</rdf:li>
+   </rdf:Bag>
+  </lr:hierarchicalSubject>
+ </rdf:Description>
+
+ <rdf:Description rdf:about=''
+  xmlns:photoshop='http://ns.adobe.com/photoshop/1.0/'>
+  <photoshop:City>Rome</photoshop:City>
+  <photoshop:Country>Italy</photoshop:Country>
+  <photoshop:State>Lazio</photoshop:State>
+ </rdf:Description>
+
+ <rdf:Description rdf:about=''
+  xmlns:phototools='https://github.com/j23n/photo-tools/ns/1.0/'>
+  <phototools:CLIPEmbedding>AAAAPwAAAD8AAIA/</phototools:CLIPEmbedding>
+  <phototools:CLIPModel>ViT-B-32/laion2b_s34b_b79k</phototools:CLIPModel>
+  <phototools:CountryCode>IT</phototools:CountryCode>
+  <phototools:OCRRan>2026-07-01T09:15:00+00:00</phototools:OCRRan>
+  <phototools:OCRText>
+   <rdf:Bag>
+    <rdf:li>Way Out</rdf:li>
+    <rdf:li>Pizza Roma</rdf:li>
+   </rdf:Bag>
+  </phototools:OCRText>
+  <phototools:TaggedAt>2026-07-01T09:15:00+00:00</phototools:TaggedAt>
+  <phototools:TaggerVersion>2026.4</phototools:TaggerVersion>
+ </rdf:Description>
+</rdf:RDF>
+</x:xmpmeta>
+<?xpacket end='w'?>

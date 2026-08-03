@@ -78,4 +78,7 @@ enum Log {
     static let contacts = tee("contacts")
     static let bg       = tee("background")
     static let widget   = tee("widget")
+    // On-device tagging (TaggingService + the Rust core's progress
+    // callbacks). Per-batch, not per-photo — the core batches for us.
+    static let ml       = tee("ml")
 }

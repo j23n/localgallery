@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "gallery-model",
+    "gallery-vfs",
+    "gallery-meta",
+    "gallery-ml",
+    "gallery-ffi",
+    "uniffi-bindgen",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+# default-features = false drops `cargo-metadata` (and with it cargo_metadata,
+# camino, serde_json) from the *runtime* crate — none of that belongs in a
+# library that ships to a phone. The bindgen crate opts back in below.
+uniffi = { version = "0.32.0", default-features = false }

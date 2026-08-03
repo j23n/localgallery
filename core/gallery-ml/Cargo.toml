@@ -1,0 +1,51 @@
+[package]
+name = "gallery-ml"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# ONNX Runtime is the only backend that exists today, and it is the default.
+# The `ImageEncoder` trait is the seam that keeps a `tract` fallback a
+# drop-in — see `src/encoder/mod.rs`.
+default = ["ort-backend"]
+ort-backend = ["dep:ort"]
+
+[dependencies]
+gallery-meta = { path = "../gallery-meta" }
+gallery-vfs = { path = "../gallery-vfs" }
+
+# --- determinism-critical, pinned to an exact version ---------------------
+# Every crate in the decode → orient → resize → tensor path is pinned to a
+# single version. A patch bump can change a rounding mode or a SIMD kernel and
+# silently move every pixel, which would invalidate the committed golden
+# tensor hashes (tests/preprocess_golden.rs) and, worse, move scores across
+# thresholds on devices that upgraded at a different time. Bump these
+# deliberately, regenerate the goldens, and note it in the model-pack version.
+image = { version = "=0.25.10", default-features = false, features = [
+    "jpeg",
+    "png",
+] }
+fast_image_resize = "=6.1.0"
+kamadak-exif = "=0.6.1"
+
+# --- everything else ------------------------------------------------------
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+# `download-binaries` fetches pyke's prebuilt static onnxruntime (including
+# `aarch64-apple-ios-sim`) at build time; `tls-native` uses the system TLS
+# stack so the build does not drag `ring` in. `ndarray`/`tracing` are dropped:
+# we hand ORT a flat `Vec<f32>` and read a flat slice back.
+[dependencies.ort]
+version = "=2.0.0-rc.13"
+optional = true
+default-features = false
+features = ["std", "download-binaries", "tls-native", "copy-dylibs", "api-27"]
+
+[dev-dependencies]
+tempfile = "3"

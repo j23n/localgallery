@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="XMP Core 5.5.0">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <!-- one Description for everything; prefixes chosen by the writer -->
+    <rdf:Description rdf:about=""
+        xmlns:dcx="http://purl.org/dc/elements/1.1/"
+        xmlns:dk="http://www.digikam.org/ns/1.0/"
+        xmlns:lrx="http://ns.adobe.com/lightroom/1.0/"
+        xmlns:ps="http://ns.adobe.com/photoshop/1.0/"
+        xmlns:pt="https://github.com/j23n/photo-tools/ns/1.0/"
+        xmlns:regions="http://www.metadataworkinggroup.com/schemas/regions/"
+        xmlns:area="http://ns.adobe.com/xmp/sType/Area#"
+        ps:City="Rome"
+        pt:CountryCode="IT"
+        pt:TaggerVersion="2026.4">
+      <dcx:subject>
+        <rdf:Seq>
+          <rdf:li>Trattoria Da Enzo &amp; Sons</rdf:li>
+          <rdf:li>Carla</rdf:li>
+        </rdf:Seq>
+      </dcx:subject>
+      <dk:TagsList>
+        <rdf:Bag>
+          <rdf:li>People/Carla</rdf:li>
+          <rdf:li><![CDATA[Places/Italy/Lazio]]></rdf:li>
+        </rdf:Bag>
+      </dk:TagsList>
+      <lrx:hierarchicalSubject>
+        <rdf:Bag>
+          <rdf:li>People|Carla</rdf:li>
+        </rdf:Bag>
+      </lrx:hierarchicalSubject>
+      <regions:Regions rdf:parseType="Resource">
+        <regions:RegionList>
+          <rdf:Bag>
+            <rdf:li rdf:parseType="Resource" regions:Name="Carla" regions:Type="Face">
+              <regions:Area area:x="0.25" area:y="0.3" area:w="0.08" area:h="0.1" area:unit="normalized"/>
+            </rdf:li>
+          </rdf:Bag>
+        </regions:RegionList>
+      </regions:Regions>
+    </rdf:Description>
+  </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>

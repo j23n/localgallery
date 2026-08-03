@@ -27,6 +27,8 @@ enum TestGalleryStore {
             memoriesCacheURL: tempDir.appending("memories_cache.json"),
             sidecarCacheURL: tempDir.appending("sidecar_cache.json"),
             thumbnailDir: tempDir.appending("thumbnails", isDirectory: true),
+            mlCacheDatabaseURL: tempDir.appending("gallery-cache.sqlite"),
+            modelPacksDirectoryURL: tempDir.appending("ModelPacks", isDirectory: true),
             bookmarkKey: "rootFolderBookmark"
         )
         let defaults = TestUserDefaults.make()

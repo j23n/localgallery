@@ -135,6 +135,9 @@ final class GalleryStore {
     /// fetches the deltas through `NSFileCoordinator`. Observed by the
     /// top-of-grid sync banner.
     let sidecarSync: SidecarSyncService
+    /// On-device tagging (Rust core). Writes `.xmp` sidecars; its results come
+    /// back through the ordinary sidecar pipeline, see `TaggingService`.
+    let tagging: TaggingService
 
     // MARK: Injected seams (test-overridable; production uses `.production` /
     // `.standard` defaults so existing call sites are unchanged).
@@ -189,8 +192,21 @@ final class GalleryStore {
             searchIndex: searchService,
             people: people
         )
+        self.tagging = TaggingService(
+            cacheDatabaseURL: paths.mlCacheDatabaseURL,
+            modelPacksDirectory: paths.modelPacksDirectoryURL
+        )
         self.sidecarSync.onFinished = { @MainActor [weak self] in
             self?.reapplySidecarMerges()
+        }
+        self.tagging.eligiblePhotos = { [weak self] in self?.allPhotos ?? [] }
+        // A tagging run creates sidecars the last scan never saw, so the only
+        // entry point that picks them up is a fresh scan: the light pass
+        // rebuilds the sidecar manifest (reusing cached PhotoFiles, so it is a
+        // stat per file and no EXIF), which feeds SidecarSyncService →
+        // reapplySidecarMerges → indexes/widget. See TaggingService's docs.
+        self.tagging.onSidecarsWritten = { [weak self] in
+            await self?.rescan(kind: .light, silent: true)
         }
         self.people.onMemoryAffectingChange = { [weak self] in
             self?.memories.forceRegenerate()

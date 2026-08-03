@@ -5,13 +5,32 @@
     .venv/bin/pip install -r requirements.txt
     .venv/bin/python build_pack.py --out ../../build/model_packs
 
-Writes `<out>/<version>/` containing exactly the four files
-`core/gallery-ml/src/pack.rs` documents:
+Writes `<out>/<version>/` containing the files `core/gallery-ml/src/pack.rs`
+documents:
 
     manifest.json          the only file read by name
     image_encoder.onnx     MobileCLIP-S2 visual tower, fp32
     labels.json            2 386 taxonomy paths + the prompt each embedding came from
     label_embeddings.f32   2 386 x 512 little-endian f32, row-major, labels order
+    face_detector.onnx     SCRFD-500M                     (schema 2, optional)
+    face_embedder.onnx     w600k_mbf, 512-d ArcFace       (schema 2, optional)
+
+The two face models are downloaded rather than exported (see `face_models.py`
+for which models and why), so they can be added to an existing pack without
+touching anything the tagger depends on:
+
+    .venv/bin/python build_pack.py --only-faces \\
+        --out ../../build/model_packs --version mobileclip-s2-v1
+
+That rewrites `manifest.json` in place with `schema: 2` and a `faces` block,
+leaving `pack_version` alone — deliberately. `pack_version` is what
+`ml_work.model_pack` records, so bumping it would re-tag the whole library for
+a change that cannot move a single tag. Face results have their own staleness
+key, derived from the two face model hashes (`ModelPack::face_pack_key`).
+
+`--no-faces` builds a schema-1, tagging-only pack, which must keep working
+forever: the `faces` block is optional and the app hides its face UI when it is
+absent.
 
 # Why MobileCLIP-S2
 
@@ -58,10 +77,22 @@ import sys
 import tempfile
 from pathlib import Path
 
-import numpy as np
-import torch
+import face_models
 
-import labels as labels_mod
+# The export stack (torch, open_clip, timm, numpy) is ~350 MB of wheels and is
+# needed only to build the *tagging* half. `--only-faces` adds two downloaded
+# ONNX files to a pack that already exists, so it must run without any of it —
+# which is why these are imported lazily rather than at module scope.
+
+
+def _export_stack():
+    """`(numpy, torch, labels)`, imported on first use."""
+    import numpy as np
+    import torch
+
+    import labels as labels_mod
+
+    return np, torch, labels_mod
 
 # ---------------------------------------------------------------------------
 # Pack constants
@@ -145,6 +176,7 @@ def write_json(path: Path, payload: dict) -> bytes:
 
 def load_model(device: str = "cpu"):
     import open_clip
+    import torch
 
     torch.manual_seed(0)
     torch.set_num_threads(1)
@@ -154,23 +186,6 @@ def load_model(device: str = "cpu"):
     model.eval()
     tokenizer = open_clip.get_tokenizer(MODEL_NAME)
     return model, preprocess, tokenizer
-
-
-class VisualTower(torch.nn.Module):
-    """`model.encode_image` as a standalone single-input module.
-
-    Named arguments matter: `torch.onnx.export` takes the graph input name from
-    `input_names`, but the *forward parameter* name is what the exporter uses
-    when tracing keyword calls, and keeping them the same removes one way for
-    the manifest and the graph to drift apart.
-    """
-
-    def __init__(self, visual: torch.nn.Module):
-        super().__init__()
-        self.visual = visual
-
-    def forward(self, image: torch.Tensor) -> torch.Tensor:  # noqa: D102
-        return self.visual(image)
 
 
 def export_encoder(model, out_path: Path, input_size: int) -> None:
@@ -189,7 +204,25 @@ def export_encoder(model, out_path: Path, input_size: int) -> None:
     0.017 (on vectors of norm ~40) and the cosine between the two embeddings
     is 1.0 to f32 precision, i.e. below the resolution of any threshold.
     """
+    import torch
     from timm.utils.model import reparameterize_model
+
+    class VisualTower(torch.nn.Module):
+        """`model.encode_image` as a standalone single-input module.
+
+        Named arguments matter: `torch.onnx.export` takes the graph input name from
+        `input_names`, but the *forward parameter* name is what the exporter uses
+        when tracing keyword calls, and keeping them the same removes one way for
+        the manifest and the graph to drift apart.
+        """
+
+        def __init__(self, visual: torch.nn.Module):
+            super().__init__()
+            self.visual = visual
+
+        def forward(self, image: torch.Tensor) -> torch.Tensor:  # noqa: D102
+            return self.visual(image)
+
 
     visual = reparameterize_model(copy.deepcopy(model.visual)).eval()
     tower = VisualTower(visual).eval()
@@ -211,8 +244,11 @@ def export_encoder(model, out_path: Path, input_size: int) -> None:
         )
 
 
-def embed_prompts(model, tokenizer, prompts: list[str]) -> np.ndarray:
+def embed_prompts(model, tokenizer, prompts: list[str]):
     """L2-normalized text embeddings, one row per prompt, in `prompts` order."""
+    import numpy as np
+    import torch
+
     rows = []
     with torch.no_grad():
         for start in range(0, len(prompts), TEXT_BATCH):
@@ -239,10 +275,13 @@ def build(
     photo_tools_root: Path | None,
     thresholds: dict[str, float],
     verify_determinism: bool,
+    with_faces: bool = True,
+    face_cache: Path | None = None,
 ) -> Path:
     pack_dir = out_root / version
     pack_dir.mkdir(parents=True, exist_ok=True)
 
+    _, _, labels_mod = _export_stack()
     label_list = labels_mod.build_labels(photo_tools_root)
     print(f"labels: {len(label_list)} from {labels_mod.mapping_path(photo_tools_root)}")
 
@@ -305,6 +344,8 @@ def build(
             for root in labels_mod.ROOTS
         },
     }
+    if with_faces:
+        add_faces(pack_dir, manifest, face_cache)
     write_json(pack_dir / "manifest.json", manifest)
 
     total = sum(f.stat().st_size for f in pack_dir.iterdir())
@@ -313,6 +354,41 @@ def build(
     if verify_determinism:
         _verify_determinism(model, tokenizer, input_size, label_list, model_sha, embeddings_sha)
 
+    return pack_dir
+
+
+def add_faces(pack_dir: Path, manifest: dict, cache: Path | None) -> None:
+    """Download the two face models into `pack_dir` and fill in `faces`.
+
+    Mutates `manifest` rather than writing it: the caller owns the file, and a
+    pack whose ONNX files landed but whose manifest did not would fail its own
+    hash check on the next load.
+    """
+    hashes = face_models.install(pack_dir, cache)
+    face_models.verify_graphs(pack_dir)
+    manifest["schema"] = 2
+    manifest["faces"] = face_models.faces_block(hashes)
+
+
+def add_faces_to_existing(pack_dir: Path, cache: Path | None) -> Path:
+    """`--only-faces`: upgrade a schema-1 pack in place, in one atomic-ish step.
+
+    `pack_version` is deliberately left alone. It is what `ml_work.model_pack`
+    records, so bumping it would re-tag a whole library for a change that cannot
+    move a single tag; face staleness has its own key
+    (`ModelPack::face_pack_key`), derived from the two model hashes.
+    """
+    manifest_path = pack_dir / "manifest.json"
+    if not manifest_path.exists():
+        raise SystemExit(f"{manifest_path} does not exist — build the pack first")
+    manifest = json.loads(manifest_path.read_bytes())
+    add_faces(pack_dir, manifest, cache)
+    write_json(manifest_path, manifest)
+    total = sum(f.stat().st_size for f in pack_dir.iterdir())
+    print(
+        f"pack: {pack_dir} is now schema {manifest['schema']} "
+        f"({total / 1e6:.1f} MB), pack_version {manifest['pack_version']!r} unchanged"
+    )
     return pack_dir
 
 
@@ -380,7 +456,7 @@ def main() -> None:
         "--photo-tools",
         type=Path,
         default=None,
-        help=f"photo-tools checkout (default: {labels_mod.DEFAULT_PHOTO_TOOLS})",
+        help="photo-tools checkout (default: a sibling photo-tools/)",
     )
     parser.add_argument(
         "--objects-threshold", type=float, default=ROOT_THRESHOLDS["Objects"]
@@ -394,11 +470,33 @@ def main() -> None:
     parser.add_argument(
         "--clean", action="store_true", help="delete the pack directory before writing"
     )
+    parser.add_argument(
+        "--no-faces",
+        dest="faces",
+        action="store_false",
+        help="build a schema-1, tagging-only pack",
+    )
+    parser.add_argument(
+        "--only-faces",
+        action="store_true",
+        help="add the face models to an existing pack and rewrite its manifest; "
+        "needs none of the torch export stack",
+    )
+    parser.add_argument(
+        "--face-cache",
+        type=Path,
+        default=None,
+        help="keep the downloaded face-model release asset here so rebuilds are offline",
+    )
     args = parser.parse_args()
 
     pack_dir = args.out / args.version
     if args.clean and pack_dir.exists():
         shutil.rmtree(pack_dir)
+
+    if args.only_faces:
+        add_faces_to_existing(pack_dir, args.face_cache)
+        return
 
     build(
         out_root=args.out,
@@ -409,6 +507,8 @@ def main() -> None:
             "Scenes": args.scenes_threshold,
         },
         verify_determinism=args.verify_determinism,
+        with_faces=args.faces,
+        face_cache=args.face_cache,
     )
 
 

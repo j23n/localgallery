@@ -46,6 +46,13 @@ pub enum MlError {
         /// What was wrong; for logs only.
         detail: String,
     },
+    /// The pack loaded fine but ships no face models, so the face pipeline has
+    /// nothing to run.
+    ///
+    /// Distinct from [`MlError::PackInvalid`] on purpose: a tagging-only pack
+    /// is a *valid* pack, and the app's answer is "hide the faces UI", not
+    /// "your model pack is broken".
+    FaceModelsUnavailable,
     /// SQLite said no.
     Cache {
         /// The rusqlite message; for logs only.
@@ -106,6 +113,7 @@ impl fmt::Display for MlError {
                 "model pack file {file} hashes to {actual}, manifest says {expected}"
             ),
             MlError::PackInvalid { detail } => write!(f, "invalid model pack: {detail}"),
+            MlError::FaceModelsUnavailable => write!(f, "model pack ships no face models"),
             MlError::Cache { detail } => write!(f, "cache db: {detail}"),
             MlError::Inference { detail } => write!(f, "inference: {detail}"),
             MlError::Preprocess { path, code, detail } => {
@@ -143,7 +151,8 @@ impl MlError {
             MlError::Cancelled => ErrorCode::Cancelled,
             MlError::PackFileMissing { .. }
             | MlError::PackHashMismatch { .. }
-            | MlError::PackInvalid { .. } => ErrorCode::Pack,
+            | MlError::PackInvalid { .. }
+            | MlError::FaceModelsUnavailable => ErrorCode::Pack,
         }
     }
 }

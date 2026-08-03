@@ -30,7 +30,7 @@
 pub mod ort_backend;
 
 #[cfg(feature = "ort-backend")]
-pub use ort_backend::OrtEncoder;
+pub use ort_backend::{OrtEncoder, OrtModel};
 
 use crate::error::MlResult;
 use crate::preprocess::Tensor;
@@ -50,6 +50,52 @@ pub trait ImageEncoder: Send + Sync {
 
     /// Length of the embeddings this encoder produces.
     fn embedding_dim(&self) -> usize;
+
+    /// Short identifier for logs and error messages.
+    fn backend_name(&self) -> &'static str;
+}
+
+/// One named output of a [`MultiOutputModel`] run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelOutput {
+    /// The output's dimensions, outermost first.
+    pub shape: Vec<usize>,
+    /// Row-major values.
+    pub data: Vec<f32>,
+}
+
+impl ModelOutput {
+    /// Total element count.
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Whether the output carries no values.
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+}
+
+/// A model with more than one output — the face detector, and nothing else so
+/// far.
+///
+/// Separate from [`ImageEncoder`] rather than a generalization of it because
+/// the two have different contracts: an encoder promises exactly one vector of
+/// a length the manifest declares, and 90% of this crate's call sites want that
+/// promise. A detector promises a *set* of tensors whose shapes depend on the
+/// input geometry, and only [`crate::face::detect`] knows how to read them.
+///
+/// Implementations must be `Send + Sync`; the face engine shares one across its
+/// workers.
+pub trait MultiOutputModel: Send + Sync {
+    /// Feed `tensor` in under `input_name` and return the named `outputs`, in
+    /// the order asked for.
+    fn run(
+        &self,
+        input_name: &str,
+        tensor: &Tensor,
+        outputs: &[String],
+    ) -> MlResult<Vec<ModelOutput>>;
 
     /// Short identifier for logs and error messages.
     fn backend_name(&self) -> &'static str;

@@ -1,0 +1,100 @@
+{
+  "faces": {
+    "detector": {
+      "anchors_per_cell": 2,
+      "bbox_outputs": [
+        "box_16",
+        "box_32"
+      ],
+      "file": "face_detector.onnx",
+      "input_name": "input",
+      "input_size": 32,
+      "kps_outputs": [
+        "kp_16",
+        "kp_32"
+      ],
+      "max_faces": 4,
+      "mean": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "min_face_pixels": 8.0,
+      "nms_iou": 0.4,
+      "resize_filter": "bilinear",
+      "score_outputs": [
+        "score_16",
+        "score_32"
+      ],
+      "score_threshold": 0.5,
+      "sha256": "cf1eed7eadb3668314831c9442ee81632a0f1bf10d1142837c5b1b31e8220ffe",
+      "std": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "strides": [
+        16,
+        32
+      ]
+    },
+    "embedder": {
+      "embedding_dim": 64,
+      "file": "face_embedder.onnx",
+      "input_name": "image",
+      "input_size": 64,
+      "mean": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "output_name": "embedding",
+      "sha256": "5b9bda4db4c12cb47d607a54c6857ab1598c77266a2b214fc50fbaca063313be",
+      "std": [
+        0.5,
+        0.5,
+        0.5
+      ]
+    }
+  },
+  "hysteresis_epsilon": 0.05,
+  "label_embeddings": {
+    "file": "label_embeddings.f32",
+    "sha256": "cd5117b567ed8b80d71596c092628ece297c675fcd3ad19876ef042f5c5ea0b5"
+  },
+  "labels": {
+    "file": "labels.json",
+    "sha256": "df186b72c06405f78bf64a01794ff31aad8b6fffba048bdb742bec242b64924d"
+  },
+  "model": {
+    "embedding_dim": 64,
+    "file": "encoder.onnx",
+    "input_name": "image",
+    "input_size": 64,
+    "mean": [
+      0.5,
+      0.5,
+      0.5
+    ],
+    "output_name": "embedding",
+    "resize_filter": "catmull_rom",
+    "sha256": "5b9bda4db4c12cb47d607a54c6857ab1598c77266a2b214fc50fbaca063313be",
+    "std": [
+      0.5,
+      0.5,
+      0.5
+    ]
+  },
+  "pack_version": "gallery-ml-facepack-1",
+  "roots": {
+    "Objects": {
+      "max_tags": 2,
+      "threshold": 0.6
+    },
+    "Scenes": {
+      "max_tags": 1,
+      "threshold": 0.6
+    }
+  },
+  "schema": 2
+}

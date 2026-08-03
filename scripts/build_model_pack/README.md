@@ -1,9 +1,10 @@
 # build_model_pack
 
-Builds the on-device tagging model pack: an ONNX image encoder plus the
-precomputed text embeddings for every taxonomy label. The app ships no text
-tower — tagging is a dot product against this matrix — so this script is where
-the model choice, the label set and the thresholds are all decided.
+Builds the on-device model pack: an ONNX image encoder plus the precomputed
+text embeddings for every taxonomy label, and — since Phase 2 — an optional
+pair of face models. The app ships no text tower (tagging is a dot product
+against this matrix), so this script is where the model choices, the label set
+and every threshold are decided.
 
 The pack format is defined by `core/gallery-ml/src/pack.rs`; that rustdoc is
 the spec, this is the producer.
@@ -24,18 +25,22 @@ git-ignored — **the pack is not committed**, this script is.
 Useful flags: `--version` (pack name and directory), `--photo-tools` (checkout
 to read the taxonomy from; defaults to a sibling `photo-tools/`), `--clean`,
 `--verify-determinism` (re-export and re-embed, assert both hashes reproduce),
-`--objects-threshold` / `--scenes-threshold`.
+`--objects-threshold` / `--scenes-threshold`, `--no-faces` / `--only-faces`
+(see "Face models" below), `--face-cache` (keep the face-model release asset so
+rebuilds are offline).
 
 ## What it produces
 
-`mobileclip-s2-v1`, 148.2 MB total:
+`mobileclip-s2-v1`, 164.3 MB total at schema 2:
 
 | File | Size | |
 | --- | --- | --- |
 | `image_encoder.onnx` | 143.0 MB | MobileCLIP-S2 visual tower, fp32, opset 17 |
 | `label_embeddings.f32` | 4.9 MB | 2 386 × 512 little-endian f32, row-major, `labels.json` order |
 | `labels.json` | 242 KB | taxonomy path + the prompt each row was embedded from |
-| `manifest.json` | 893 B | file hashes, input/output names, mean/std, resize filter, thresholds |
+| `face_detector.onnx` | 2.5 MB | SCRFD-500M (schema 2, optional) |
+| `face_embedder.onnx` | 13.6 MB | w600k_mbf, 512-d ArcFace (schema 2, optional) |
+| `manifest.json` | 2.0 KB | file hashes, input/output names, mean/std, resize filter, thresholds |
 
 ## Model choice
 
@@ -142,6 +147,92 @@ invent.
 is an order of magnitude above the measured cross-stack score drift (2.2e-3)
 and an order of magnitude below the gap between a photo that shows a cat and
 one that does not, so float drift cannot flap tags.
+
+## Face models (schema 2)
+
+Phase 2 added two more models to the same pack, both **optional**: a pack
+without them is still valid and the app simply has no face UI.
+
+```sh
+.venv/bin/python build_pack.py --only-faces \
+    --out ../../build/model_packs --version mobileclip-s2-v1
+```
+
+`--only-faces` upgrades an existing pack in place — it downloads the two ONNX
+files, verifies their hashes, checks the graphs against the manifest, sets
+`schema: 2` and writes a `faces` block. It needs **none** of the torch export
+stack (those imports are lazy), so a face-model refresh is a 15 MB download
+rather than a 350 MB one. `--no-faces` on a full build produces a schema-1,
+tagging-only pack.
+
+`pack_version` is deliberately **not** bumped by `--only-faces`. It is what
+`ml_work.model_pack` records, so changing it would re-tag an entire library for
+a change that cannot move a single tag. Face staleness has its own key,
+`ModelPack::face_pack_key`, derived from the two face model hashes plus
+`PREPROCESS_VERSION` and `ALIGN_VERSION`.
+
+| File | Size | |
+| --- | --- | --- |
+| `face_detector.onnx` | 2.5 MB | SCRFD-500M, opset 11, 640×640 letterbox |
+| `face_embedder.onnx` | 13.6 MB | w600k_mbf (ArcFace/MobileFaceNet), 112×112 → 512-d |
+
+Both come from insightface's `buffalo_sc` release asset, downloaded whole and
+hash-pinned (`face_models.py`). Nothing is converted or re-exported, so there is
+no export step that could be non-deterministic.
+
+### Why these two, and not YuNet + SFace
+
+|  | SCRFD-500M + w600k_mbf | YuNet + SFace |
+| --- | --- | --- |
+| distribution | one GitHub release asset, 15 MB, plain binary | two files in `opencv_zoo` behind git-lfs; a raw fetch returns a 131-byte pointer |
+| landmark convention | SCRFD's 5 points are the same order and definition `w600k_mbf`'s training crops were aligned with | YuNet emits the eyes in the opposite order |
+| ONNX graph | opset 11, static output shapes, no control flow | comparable |
+| size | 2.5 + 13.6 MB | 0.23 + 38 MB |
+| licence | **non-commercial research only** | Apache-2.0 / MIT |
+
+The alignment contract decided it. It is the one part of a face pipeline that
+fails *silently*: a mismatched landmark order produces crops that look wrong
+only if you render them, and embeddings that cluster badly for reasons no log
+line explains. A detector and an embedder built against each other have no
+conversion step to get wrong.
+
+The licence is a real constraint on shipping, not a footnote, and the mitigation
+is structural: the manifest declares the detector's geometry, normalization,
+output names, strides and anchor layout, so moving to the permissive pairing is
+a pack rebuild and a threshold re-calibration, not a code change.
+
+### Face thresholds
+
+Cosine similarities between L2-normalized `w600k_mbf` embeddings. Not
+transferable to another embedder.
+
+| | | |
+| --- | --- | --- |
+| `join` | 0.42 | a face joins the nearest **unlabeled** cluster |
+| `auto` | 0.55 | a face joins a **named** cluster, and so gets auto-tagged |
+| `merge` | 0.60 | two centroids this close produce a merge *proposal* |
+| `edge` | 0.45 | edge threshold of the chinese-whispers graph |
+| `min_quality` | 0.25 | below this a face still clusters but is not auto-tagged or used as a cover crop |
+
+Published ArcFace verification sits near 0.28 cosine at LFW-grade operating
+points. Clustering asks *O(n²)* questions where verification asks one, so the
+per-pair false-accept rate has to be far lower — hence `join` well above the
+verification point. `auto` gates a write to somebody's sidecar and is stricter
+again: a missed auto-match costs one review action, a wrong one edits a file.
+The manifest validator refuses a pack where `auto < join`.
+
+Measured on this embedder (`cargo test -p gallery-ml --test face_real_models --
+--ignored --nocapture`), over the two committed public-domain face fixtures and
+the reference photo set:
+
+* **same identity** through the imaging pipeline (rescale to 70%, JPEG q60–q90):
+  worst cosine **0.896**;
+* **distinct identities**: **0.058** for the two committed faces, and ≤ 0.091
+  across 121 crop pairs of the reference set.
+
+Every threshold sits inside a gap wider than 0.3 on both sides. Like the tagging
+thresholds, this is a small-sample calibration: it places the bar in an observed
+gap, and a library with thousands of people would justify revisiting it.
 
 ## Validation
 

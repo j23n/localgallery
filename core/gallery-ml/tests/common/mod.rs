@@ -22,9 +22,14 @@ pub fn fixture(name: &str) -> Vec<u8> {
     })
 }
 
-/// Path to the committed test model pack.
+/// Path to the committed test model pack. Schema 1: tagging only.
 pub fn test_pack_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/testpack")
+}
+
+/// Path to the committed face-capable test pack. Schema 2.
+pub fn face_pack_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/facepack")
 }
 
 /// Lowercase hex SHA-256.

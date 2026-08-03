@@ -212,6 +212,7 @@ mod tests {
                 label_embeddings: None,
                 hysteresis_epsilon: epsilon,
                 roots,
+                faces: None,
             },
             model_bytes: Vec::new(),
             labels: labels

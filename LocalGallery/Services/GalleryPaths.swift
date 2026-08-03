@@ -15,16 +15,29 @@ struct GalleryPaths: Sendable {
     let memoriesCacheURL: URL
     let sidecarCacheURL: URL
     let thumbnailDir: URL
+    /// `gallery-cache.sqlite` — the Rust core's derived-data store (ML work
+    /// queue + embeddings). Everything in it is recomputable, so it lives in
+    /// Application Support rather than Documents: no reason to back it up,
+    /// but it must survive the Caches eviction the system is free to do
+    /// mid-run. Owned exclusively by the core; Swift only supplies the path.
+    let mlCacheDatabaseURL: URL
+    /// `ModelPacks/` — one subdirectory per imported model pack. Application
+    /// Support because a pack is user-installed content the app cannot
+    /// re-derive, and losing it mid-run would fail every photo.
+    let modelPacksDirectoryURL: URL
     let bookmarkKey: String
 
     static var production: GalleryPaths {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let support = applicationSupport
         return GalleryPaths(
             libraryCacheURL: docs.appendingPathComponent("library_cache.json"),
             memoriesCacheURL: docs.appendingPathComponent("memories_cache.json"),
             sidecarCacheURL: docs.appendingPathComponent("sidecar_cache.json"),
             thumbnailDir: caches.appendingPathComponent("thumbnails", isDirectory: true),
+            mlCacheDatabaseURL: support.appendingPathComponent("gallery-cache.sqlite"),
+            modelPacksDirectoryURL: support.appendingPathComponent("ModelPacks", isDirectory: true),
             bookmarkKey: "rootFolderBookmark"
         )
     }

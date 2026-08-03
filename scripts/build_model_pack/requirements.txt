@@ -1,0 +1,30 @@
+# Exact pins for the model-pack build. Every one of these can move the bytes
+# the pack ships, and the manifest hashes are what the app verifies, so they
+# are pinned rather than bounded.
+#
+#   python3 -m venv .venv
+#   .venv/bin/pip install -r requirements.txt
+#
+# CPU-only by construction: the macOS arm64 torch wheel on PyPI has no CUDA in
+# it, and the build never touches a GPU (`torch.set_num_threads(1)`, CPU
+# device). Total download is ~350 MB, dominated by torch.
+#
+# Verified on macOS 15 / arm64 / CPython 3.14. Older CPython works; the wheel
+# tags below are the ones PyPI resolved for 3.14.
+
+# --- the encoder and its export path --------------------------------------
+torch==2.13.0
+torchvision==0.28.0          # open_clip's preprocessing transforms
+open_clip_torch==3.3.0       # MobileCLIP-S2 config, weights fetch, tokenizer
+timm==1.0.28                 # fastvit_mci2 trunk + reparameterize_model
+onnx==1.22.0
+onnxscript==0.7.1            # torch.onnx.export's opset library
+
+# --- taxonomy, tensors, images --------------------------------------------
+PyYAML==6.0.3                # reads photo-tools' ram_tag_mapping.yaml
+numpy==2.5.1
+pillow==12.3.0
+
+# --- validation only (parity.py, reference_images.py) ---------------------
+onnxruntime==1.28.0          # the Python-side ONNX encoder, for parity
+scikit-image==0.26.0         # the real-photograph reference set

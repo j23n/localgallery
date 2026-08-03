@@ -1,0 +1,22 @@
+[package]
+name = "uniffi-bindgen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# In-workspace binding generator so the version always matches the `uniffi`
+# runtime the core links, and no global `cargo install` is needed.
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/main.rs"
+
+[[bin]]
+name = "uniffi-bindgen-swift"
+path = "src/bin/uniffi-bindgen-swift.rs"
+
+[dependencies]
+# Host-only tool, so the heavyweight bindgen + cargo-metadata features live here
+# rather than in the workspace default.
+uniffi = { workspace = true, features = ["cli", "cargo-metadata"] }

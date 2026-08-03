@@ -1,0 +1,182 @@
+[
+  {
+    "label": "ascii-basic",
+    "input": "/Users/j/Pictures/2024/IMG_0001.jpg",
+    "uuid": "8f06fa91-04be-532f-b171-92d1943df4b2"
+  },
+  {
+    "label": "ascii-sibling",
+    "input": "/Users/j/Pictures/2024/IMG_0002.jpg",
+    "uuid": "6fc7abba-ccdf-5e71-a68c-cc8181089479"
+  },
+  {
+    "label": "ascii-lowercase-name",
+    "input": "/Users/j/Pictures/2024/img_0001.jpg",
+    "uuid": "5da2446d-7f5e-5014-9e0a-30e31dee0d8f"
+  },
+  {
+    "label": "ascii-uppercase-extension",
+    "input": "/Users/j/Pictures/2024/IMG_0001.JPG",
+    "uuid": "c6f40986-de93-53a6-b60f-cf3a63294ed5"
+  },
+  {
+    "label": "ascii-sidecar",
+    "input": "/Users/j/Pictures/2024/IMG_0001.jpg.xmp",
+    "uuid": "bda72c08-4b16-5939-ab16-ac31560aa32b"
+  },
+  {
+    "label": "empty",
+    "input": "",
+    "uuid": "e3b0c442-98fc-5c14-9afb-f4c8996fb924"
+  },
+  {
+    "label": "root",
+    "input": "/",
+    "uuid": "8a5edab2-8263-5443-a19e-051e4ade2d1d"
+  },
+  {
+    "label": "single-dot",
+    "input": ".",
+    "uuid": "cdb4ee2a-ea69-5c6a-8333-1bbe96dc2caa"
+  },
+  {
+    "label": "spaces",
+    "input": "/Volumes/My Shared Files/dev public/IMG 0001.jpg",
+    "uuid": "85c09b37-4223-5488-a86e-15292823de1f"
+  },
+  {
+    "label": "hash",
+    "input": "/Users/j/Pictures/Party #3/IMG_0001.jpg",
+    "uuid": "7cbb16b4-fe49-5b04-b78a-ab3ec407fcbd"
+  },
+  {
+    "label": "percent",
+    "input": "/Users/j/Pictures/100%/IMG_0001.jpg",
+    "uuid": "2928a598-6016-5db5-bac1-95fdd27b0cce"
+  },
+  {
+    "label": "plus",
+    "input": "/Users/j/Pictures/A+B/IMG_0001.jpg",
+    "uuid": "ac008a7b-555a-53a8-8e63-25fd37ae7682"
+  },
+  {
+    "label": "query-chars",
+    "input": "/Users/j/Pictures/q?x=1&y=2/IMG_0001.jpg",
+    "uuid": "86fd8075-d2dd-588e-b518-e68ce6c86b09"
+  },
+  {
+    "label": "literal-percent-escape",
+    "input": "/Users/j/Pictures/a%20b/IMG_0001.jpg",
+    "uuid": "3522c318-3cbd-532a-94a5-ce56c4e070f6"
+  },
+  {
+    "label": "ampersand",
+    "input": "/Users/j/Pictures/Ampersand & Co/IMG_0001.jpg",
+    "uuid": "b92c413b-4c83-52d8-a4d3-25926e1a4f5e"
+  },
+  {
+    "label": "quotes-and-backslash",
+    "input": "/Users/j/Pictures/say \"hi\"\\back/IMG_0001.jpg",
+    "uuid": "fbe61bef-4646-567f-b7a7-f1e79c497263"
+  },
+  {
+    "label": "control-chars",
+    "input": "/Users/j/Pictures/tab\tand\nnewline/IMG_0001.jpg",
+    "uuid": "26ba4b87-7c05-577f-8e21-302623702738"
+  },
+  {
+    "label": "folder-no-trailing-slash",
+    "input": "/Users/j/Pictures/2024",
+    "uuid": "d4b0a080-f874-5b7e-b4db-a1b0b8e740c1"
+  },
+  {
+    "label": "folder-trailing-slash",
+    "input": "/Users/j/Pictures/2024/",
+    "uuid": "db9b89f0-6511-581d-8dc0-8e7ae01e0aa6"
+  },
+  {
+    "label": "dot-dot-unstandardized",
+    "input": "/Users/j/Pictures/../Pictures/2024/IMG_0001.jpg",
+    "uuid": "d828c7fc-f6e5-54de-9bba-f5f914723be7"
+  },
+  {
+    "label": "dot-segment-unstandardized",
+    "input": "/Users/j/Pictures/./IMG_0001.jpg",
+    "uuid": "6062489b-f217-531c-bca8-bbc7789e56cd"
+  },
+  {
+    "label": "double-separators",
+    "input": "//Users//j//Pictures//IMG_0001.jpg",
+    "uuid": "e7a37c44-aa9e-5f2b-8bc2-2b4cfa2ca370"
+  },
+  {
+    "label": "nfc-cafe",
+    "input": "/Users/j/Pictures/Caf\u00e9/IMG_0001.jpg",
+    "uuid": "49b2a4ae-2c81-5f0d-8050-1ddec048cc9d"
+  },
+  {
+    "label": "nfd-cafe",
+    "input": "/Users/j/Pictures/Cafe\u0301/IMG_0001.jpg",
+    "uuid": "30d974e4-3610-5519-ac6e-c053ae920638"
+  },
+  {
+    "label": "nfc-zurich",
+    "input": "/Users/j/Pictures/Z\u00fcrich 2019/IMG_0001.jpg",
+    "uuid": "db86cdeb-9f97-5968-8cb2-a5058ca5e010"
+  },
+  {
+    "label": "nfd-zurich",
+    "input": "/Users/j/Pictures/Zu\u0308rich 2019/IMG_0001.jpg",
+    "uuid": "26ee7fcf-dc34-5636-bbe0-6461f34c8c87"
+  },
+  {
+    "label": "nfc-hangul",
+    "input": "/Users/j/Pictures/\ud55c\uad6d/IMG_0001.jpg",
+    "uuid": "78b4bfc8-74f6-569e-8388-6bdd4a258ed9"
+  },
+  {
+    "label": "nfd-hangul",
+    "input": "/Users/j/Pictures/\u1112\u1161\u11ab\u1100\u116e\u11a8/IMG_0001.jpg",
+    "uuid": "74c635e8-1e74-5c83-82a4-eb7435e917b8"
+  },
+  {
+    "label": "emoji-single",
+    "input": "/Users/j/Pictures/\ud83c\udf05 Sunrise/IMG_0001.jpg",
+    "uuid": "6977e2d3-63ba-5512-a28b-92381a09984d"
+  },
+  {
+    "label": "emoji-zwj-family",
+    "input": "/Users/j/Pictures/family \ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67\u200d\ud83d\udc66/IMG_0001.jpg",
+    "uuid": "8ec99868-9407-5201-acd8-7b160a265554"
+  },
+  {
+    "label": "emoji-flag",
+    "input": "/Users/j/Pictures/flag \ud83c\uddef\ud83c\uddf5/IMG_0001.jpg",
+    "uuid": "0ad14b4e-9adb-52ff-9c9e-1f2e83eaa940"
+  },
+  {
+    "label": "cjk-japanese",
+    "input": "/Users/j/Pictures/\u5199\u771f/2024\u5e74/\u753b\u50cf_0001.jpg",
+    "uuid": "ae56b93a-18cf-59c6-9e6e-da572ded607d"
+  },
+  {
+    "label": "cjk-chinese",
+    "input": "/Users/j/Pictures/\u7167\u7247/IMG_0001.jpg",
+    "uuid": "8a59db82-1dc3-51c8-a6f9-48a8034d61b6"
+  },
+  {
+    "label": "cjk-non-bmp",
+    "input": "/Users/j/Pictures/\ud842\udfb7\u91ce\u5bb6/IMG_0001.jpg",
+    "uuid": "6973439a-ef7b-5319-9bad-21be16d4e6b8"
+  },
+  {
+    "label": "deep-nesting",
+    "input": "/Users/j/Pictures/level1/level2/level3/level4/level5/level6/level7/level8/level9/level10/level11/level12/level13/level14/level15/level16/level17/level18/level19/level20/level21/level22/level23/level24/level25/level26/level27/level28/level29/level30/level31/level32/level33/level34/level35/level36/level37/level38/level39/level40/IMG_0001.jpg",
+    "uuid": "0b0af715-6c81-5d0d-90cd-4ae1513c61c2"
+  },
+  {
+    "label": "long-filename",
+    "input": "/Users/j/Pictures/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.jpg",
+    "uuid": "1073141a-ce01-5fa5-afce-e63890faca62"
+  }
+]

@@ -528,6 +528,61 @@ fn apply_plan(doc: &mut Document, root: &NodePath, plan: &Plan) {
     );
 }
 
+/// [`edit_list`] with case-sensitive matching, for [`crate::faces`].
+///
+/// The face half edits the same three keyword fields under different ownership
+/// bookkeeping, and the *matching rule* per field has to be the same one this
+/// module uses or the two halves would disagree about whether an entry is
+/// present.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn edit_list_exact(
+    doc: &mut Document,
+    root: &NodePath,
+    uri: &str,
+    prefix: &str,
+    local: &str,
+    kind: &str,
+    remove: &[String],
+    add: &[String],
+) {
+    edit_list(
+        doc,
+        root,
+        uri,
+        prefix,
+        local,
+        kind,
+        remove,
+        add,
+        MatchMode::Exact,
+    );
+}
+
+/// [`edit_list_exact`] for the fields compared case-insensitively.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn edit_list_ignore_case(
+    doc: &mut Document,
+    root: &NodePath,
+    uri: &str,
+    prefix: &str,
+    local: &str,
+    kind: &str,
+    remove: &[String],
+    add: &[String],
+) {
+    edit_list(
+        doc,
+        root,
+        uri,
+        prefix,
+        local,
+        kind,
+        remove,
+        add,
+        MatchMode::IgnoreCase,
+    );
+}
+
 /// Remove then append entries in one list property, creating it only if there
 /// is something to add.
 ///

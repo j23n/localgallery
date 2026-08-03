@@ -144,6 +144,11 @@ impl From<MlError> for TaggingError {
                 detail: MlError::FaceModelsUnavailable.to_string(),
             },
             MlError::Cache { detail } => TaggingError::Cache { detail },
+            // Only the face surface can produce this; from a tagging call it is
+            // a cache row that is not there, which is what `Cache` means.
+            MlError::ClusterNotFound { id } => TaggingError::Cache {
+                detail: format!("no such cluster: {id}"),
+            },
             MlError::Inference { detail } => TaggingError::Inference { detail },
             MlError::Preprocess { path, detail, .. } => TaggingError::Io { path, detail },
             MlError::Vfs(v) => v.into(),

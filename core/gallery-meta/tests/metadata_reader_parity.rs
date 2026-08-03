@@ -12,7 +12,9 @@
 mod common;
 
 use common::fixture;
-use gallery_meta::{apply_tags, TagWriteRequest};
+use gallery_meta::{
+    apply_faces, apply_tags, Area, FaceRegionWrite, FaceWriteRequest, TagWriteRequest,
+};
 
 // ---------------------------------------------------------------------------
 // Port of MetadataReader.parseXMPBytes / parseMWGRegions
@@ -274,6 +276,87 @@ fn people_entries_stay_visible_to_the_app_alongside_our_tags() {
             "Objects/Animal/Dog",
         ]
     );
+}
+
+// ---------------------------------------------------------------------------
+// The face writer
+// ---------------------------------------------------------------------------
+
+fn face_region(name: &str, x: f64, y: f64, w: f64, h: f64) -> FaceRegionWrite {
+    FaceRegionWrite {
+        name: name.to_string(),
+        area: Area::new(x, y, w, h),
+    }
+}
+
+fn face_request(regions: Vec<FaceRegionWrite>) -> FaceWriteRequest {
+    FaceWriteRequest::new(regions, "buffalo_sc-2026.1", "2026-08-03T10:00:00Z")
+        .with_image_size(4032, 3024)
+}
+
+#[test]
+fn the_app_reads_back_the_regions_we_write_with_the_right_names_on_them() {
+    // The whole reason the writer emits Name, Type, Area rather than exiftool's
+    // alphabetical Area, Name, Type: `parseMWGRegions` finds a region's name by
+    // scanning backwards from `<mwg-rs:Area`, so with the field order reversed
+    // every name lands on the wrong box (see the test below this one).
+    let bytes = apply_faces(
+        None,
+        &face_request(vec![
+            face_region("Alice", 0.4, 0.35, 0.12, 0.16),
+            face_region("Bob", 0.7, 0.3, 0.1, 0.14),
+        ]),
+    )
+    .unwrap()
+    .bytes;
+
+    let regions = parse_mwg_regions(&String::from_utf8_lossy(&bytes));
+    assert_eq!(regions.len(), 2);
+    assert_eq!(regions[0].name.as_deref(), Some("Alice"));
+    assert!((regions[0].center_x - 0.4).abs() < 1e-9);
+    assert!((regions[0].width - 0.12).abs() < 1e-9);
+    assert_eq!(regions[1].name.as_deref(), Some("Bob"));
+    assert!((regions[1].center_y - 0.3).abs() < 1e-9);
+
+    // And the People keywords land where the app's tag scan looks for them.
+    let parsed = parse_xmp_bytes(&bytes);
+    assert_eq!(parsed.raw_tags, vec!["People/Alice", "People/Bob"]);
+}
+
+#[test]
+fn our_region_appended_to_a_digikam_file_reads_correctly_even_though_theirs_does_not() {
+    // The fixture is exiftool-ordered, so the app mis-attributes *its* names
+    // (documented above). Ours is written digiKam-style and is unaffected —
+    // the lookback finds the `<mwg-rs:Name>` immediately before our Area.
+    let bytes = apply_faces(
+        Some(&fixture("digikam.jpg.xmp")),
+        &face_request(vec![face_region("Carol", 0.2, 0.8, 0.1, 0.1)]),
+    )
+    .unwrap()
+    .bytes;
+
+    let regions = parse_mwg_regions(&String::from_utf8_lossy(&bytes));
+    assert_eq!(regions.len(), 3);
+    assert_eq!(
+        regions[2].name.as_deref(),
+        Some("Carol"),
+        "our region must carry its own name"
+    );
+    assert!((regions[2].center_x - 0.2).abs() < 1e-9);
+}
+
+#[test]
+fn a_face_write_leaves_the_apps_view_of_foreign_regions_exactly_as_it_was() {
+    let original = fixture("digikam.jpg.xmp");
+    let before = parse_mwg_regions(&String::from_utf8_lossy(&original));
+    let bytes = apply_faces(
+        Some(&original),
+        &face_request(vec![face_region("Carol", 0.2, 0.8, 0.1, 0.1)]),
+    )
+    .unwrap()
+    .bytes;
+    let after = parse_mwg_regions(&String::from_utf8_lossy(&bytes));
+    assert_eq!(&after[..before.len()], &before[..]);
 }
 
 #[test]

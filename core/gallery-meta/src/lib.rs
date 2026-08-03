@@ -31,8 +31,10 @@
 
 mod edit;
 pub mod error;
+pub mod faces;
 pub mod model;
 pub mod read;
+pub mod regions;
 pub mod schema;
 pub mod sidecar;
 pub mod tags;
@@ -40,8 +42,11 @@ pub mod write;
 pub mod xml;
 
 pub use error::{MetaError, MetaResult};
-pub use model::{CoreSentinel, FaceRegion, PhotoToolsFields, SidecarView};
+pub use faces::{apply_faces, write_faces, AppliedFaces, FaceWriteRequest};
+pub use model::{AppliedDimensions, CoreSentinel, FaceRegion, PhotoToolsFields, SidecarView};
 pub use read::read_view;
+pub use regions::{Area, FaceRegionWrite, REGION_MATCH_IOU};
 pub use schema::CORE_AGENT;
 pub use sidecar::{alt_sidecar_path, sidecar_path};
+pub use tags::{normalize_person, person_tag};
 pub use write::{apply_tags, write_tags, AppliedTags, TagWriteRequest, WriteOutcome};

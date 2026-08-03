@@ -4,11 +4,26 @@
 //! DOM keeps it. This type exists so the writer can reason about what it owns
 //! and so callers (and Phase 2) can inspect a sidecar without touching XML.
 
+/// `mwg-rs:AppliedToDimensions` — the pixel size a file's normalized region
+/// areas were computed against.
+///
+/// Carried so [`crate::faces`] can tell "this file has no RegionInfo yet"
+/// (create one) from "it has one somebody else established" (leave its
+/// dimensions alone — see [`crate::regions`] for why that is safe).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AppliedDimensions {
+    /// `stDim:w`.
+    pub width: f64,
+    /// `stDim:h`.
+    pub height: f64,
+    /// `stDim:unit`, normally `pixel`.
+    pub unit: Option<String>,
+}
+
 /// One MWG-RS face region, normalized coordinates.
 ///
 /// Mirrors `LocalGallery/Models/FaceRegion.swift`, which
-/// `MetadataReader.parseMWGRegions` produces from the same bytes. The core
-/// never writes these in Phase 1.
+/// `MetadataReader.parseMWGRegions` produces from the same bytes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FaceRegion {
     /// `mwg-rs:Name`, when the writer set one.
@@ -69,12 +84,33 @@ pub struct CoreSentinel {
     /// `lr:hierarchicalSubject` without `digiKam:TagsList`, so an entry can
     /// already exist for a path we go on to add elsewhere.
     pub hierarchical: Vec<String>,
+    /// `photo-tools:CoreFacePack` — the face model pack behind [`Self::people`]
+    /// and [`Self::regions`].
+    pub face_pack: Option<String>,
+    /// `People/<Name>` paths the agent added to `digiKam:TagsList`.
+    pub people: Vec<String>,
+    /// `dc:subject` leaves the *face* half added.
+    pub people_subjects: Vec<String>,
+    /// `lr:hierarchicalSubject` entries the *face* half added.
+    pub people_hierarchical: Vec<String>,
+    /// Region claims, `"<x>,<y>,<w>,<h> <Name>"`; see
+    /// [`crate::schema::PROP_CORE_REGIONS`].
+    pub regions: Vec<String>,
 }
 
 impl CoreSentinel {
     /// Whether anything at all was recorded.
     pub fn is_present(&self) -> bool {
         self.agent.is_some() || !self.tags.is_empty()
+    }
+
+    /// Whether the face half has ever written to this file.
+    pub fn has_faces(&self) -> bool {
+        self.face_pack.is_some()
+            || !self.people.is_empty()
+            || !self.regions.is_empty()
+            || !self.people_subjects.is_empty()
+            || !self.people_hierarchical.is_empty()
     }
 }
 
@@ -89,8 +125,10 @@ pub struct SidecarView {
     pub hierarchical_subject: Vec<String>,
     /// `Iptc4xmpExt:PersonInImage` — person leaf names.
     pub person_in_image: Vec<String>,
-    /// MWG-RS face regions.
+    /// MWG-RS face regions, document order.
     pub regions: Vec<FaceRegion>,
+    /// `mwg-rs:AppliedToDimensions`, when the file carries a RegionInfo.
+    pub applied_dimensions: Option<AppliedDimensions>,
     /// photo-tools namespace fields.
     pub photo_tools: PhotoToolsFields,
     /// This crate's sentinel.
@@ -98,12 +136,32 @@ pub struct SidecarView {
 }
 
 impl SidecarView {
-    /// `digiKam:TagsList` entries under `People/` — the names digiKam owns.
+    /// `digiKam:TagsList` entries under `People/`.
+    ///
+    /// Not necessarily ours: digiKam, Lightroom and photo-tools all leave
+    /// entries here. [`CoreSentinel::people`] is the subset this crate wrote.
     pub fn people_tags(&self) -> Vec<&str> {
         self.tags_list
             .iter()
             .filter(|t| crate::tags::root_of(t) == crate::tags::PEOPLE_ROOT)
             .map(String::as_str)
             .collect()
+    }
+
+    /// Leaf names of [`Self::people_tags`], deduplicated case-insensitively,
+    /// document order — the `Iptc4xmpExt:PersonInImage` projection (§1.1).
+    pub fn person_leaves(&self) -> Vec<String> {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut out = Vec::new();
+        for tag in self.people_tags() {
+            let leaf = crate::tags::leaf_of(tag);
+            if leaf.is_empty() {
+                continue;
+            }
+            if seen.insert(crate::tags::nfc_lower(leaf)) {
+                out.push(crate::tags::nfc(leaf));
+            }
+        }
+        out
     }
 }

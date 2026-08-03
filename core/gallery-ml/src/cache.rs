@@ -411,6 +411,21 @@ pub struct StoredFace {
     pub image_h: u32,
 }
 
+/// A stored face together with the person a named cluster gives it.
+///
+/// The join the sidecar writer works from: a photo's sidecar has to name every
+/// person the core has identified *in that photo*, not just the one whose
+/// cluster was being edited, because the write is a replace set per file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NamedFace {
+    /// The cluster's `person_name`.
+    pub person: String,
+    /// The cluster it came from.
+    pub cluster_id: i64,
+    /// Geometry, quality and embedding.
+    pub face: StoredFace,
+}
+
 /// One cluster row.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClusterRow {
@@ -1493,6 +1508,111 @@ impl CacheDb {
         Ok(stats)
     }
 
+    /// Every queued photo path whose bytes hash to `hash`, in path order.
+    ///
+    /// Usually one. Not always: two copies of a photo in different folders are
+    /// two `face_work` rows sharing one content hash, and each has its own
+    /// sidecar to write — the detection is shared, the *file* is not. A naming
+    /// that wrote only one of them would leave the library half-labelled.
+    pub fn face_paths_for_hash(&self, hash: &[u8; 32]) -> MlResult<Vec<String>> {
+        let conn = self.lock();
+        let mut stmt =
+            conn.prepare("SELECT path FROM face_work WHERE content_hash = ?1 ORDER BY path")?;
+        let rows = stmt.query_map(params![hash.as_slice()], |r| r.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Every face in one photo that belongs to a **named** cluster, ordered by
+    /// `face_idx`.
+    ///
+    /// Faces in unlabeled or ignored clusters are absent by construction: only
+    /// a named cluster travels to a sidecar (standing decision 4).
+    pub fn named_faces_for_hash(&self, hash: &[u8; 32]) -> MlResult<Vec<NamedFace>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT c.person_name, c.cluster_id, {}
+             FROM faces f
+             JOIN cluster_members m
+               ON m.content_hash = f.content_hash AND m.face_idx = f.face_idx
+             JOIN clusters c ON c.cluster_id = m.cluster_id
+             WHERE f.content_hash = ?1 AND c.state = ?2 AND c.person_name IS NOT NULL
+             ORDER BY f.face_idx",
+            FACE_COLUMNS
+                .split(", ")
+                .map(|c| format!("f.{c}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))?;
+        let rows = stmt.query_map(
+            params![hash.as_slice(), ClusterState::Named.as_i64()],
+            |r| {
+                let person: String = r.get(0)?;
+                let cluster_id: i64 = r.get(1)?;
+                Ok(row_to_face_at(r, 2)?.map(|face| NamedFace {
+                    person,
+                    cluster_id,
+                    face,
+                }))
+            },
+        )?;
+        Ok(rows
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect())
+    }
+
+    /// Content hashes of one cluster's members, deduplicated, in hash order.
+    pub fn cluster_hashes(&self, id: i64) -> MlResult<Vec<[u8; 32]>> {
+        let mut out: Vec<[u8; 32]> = self
+            .cluster_members(id)?
+            .into_iter()
+            .map(|(hash, _)| hash)
+            .collect();
+        out.dedup();
+        Ok(out)
+    }
+
+    /// Ids of the named clusters carrying `person_name`, in id order.
+    ///
+    /// More than one is normal after a split, and after two clusters of the
+    /// same person are named separately — the UI does not force a merge, so a
+    /// rename has to reach all of them.
+    pub fn clusters_named(&self, person_name: &str) -> MlResult<Vec<i64>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT cluster_id FROM clusters
+             WHERE state = ?1 AND person_name = ?2 ORDER BY cluster_id",
+        )?;
+        let rows = stmt.query_map(params![ClusterState::Named.as_i64(), person_name], |r| {
+            r.get::<_, i64>(0)
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// One cluster row by id.
+    pub fn cluster(&self, id: i64) -> MlResult<Option<ClusterRow>> {
+        let conn = self.lock();
+        Ok(conn
+            .query_row(
+                "SELECT cluster_id, dim, centroid, size, state, person_name
+                 FROM clusters WHERE cluster_id = ?1",
+                params![id],
+                |r| {
+                    let dim: i64 = r.get(1)?;
+                    let bytes: Vec<u8> = r.get(2)?;
+                    Ok(ClusterRow {
+                        id: r.get(0)?,
+                        centroid: decode_vec(dim, &bytes).unwrap_or_default(),
+                        size: r.get::<_, i64>(3)?.max(0) as u32,
+                        state: ClusterState::from_i64(r.get(4)?),
+                        person_name: r.get(5)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
     /// Throw away every face, scan, cluster and proposal.
     ///
     /// Called when the face models change: the embeddings live in a different
@@ -1525,14 +1645,21 @@ const FACE_COLUMNS: &str = "content_hash, face_idx, bbox, landmarks, score, qual
                             embedding, image_w, image_h";
 
 fn row_to_face(r: &rusqlite::Row<'_>) -> rusqlite::Result<Option<StoredFace>> {
-    let hash: Vec<u8> = r.get(0)?;
+    row_to_face_at(r, 0)
+}
+
+/// [`row_to_face`] when [`FACE_COLUMNS`] starts at column `base` rather than at
+/// column 0 — a join that selects something of its own first.
+fn row_to_face_at(r: &rusqlite::Row<'_>, base: usize) -> rusqlite::Result<Option<StoredFace>> {
+    let col = |i: usize| base + i;
+    let hash: Vec<u8> = r.get(col(0))?;
     let Ok(content_hash) = <[u8; 32]>::try_from(hash.as_slice()) else {
         return Ok(None);
     };
-    let bbox_bytes: Vec<u8> = r.get(2)?;
-    let lm_bytes: Vec<u8> = r.get(3)?;
-    let dim: i64 = r.get(6)?;
-    let emb_bytes: Vec<u8> = r.get(7)?;
+    let bbox_bytes: Vec<u8> = r.get(col(2))?;
+    let lm_bytes: Vec<u8> = r.get(col(3))?;
+    let dim: i64 = r.get(col(6))?;
+    let emb_bytes: Vec<u8> = r.get(col(7))?;
     let (Some(bbox), Some(landmarks), Some(embedding)) = (
         decode_vec(4, &bbox_bytes),
         decode_vec(10, &lm_bytes),
@@ -1544,7 +1671,7 @@ fn row_to_face(r: &rusqlite::Row<'_>) -> rusqlite::Result<Option<StoredFace>> {
     };
     Ok(Some(StoredFace {
         content_hash,
-        face_idx: r.get::<_, i64>(1)?.max(0) as u32,
+        face_idx: r.get::<_, i64>(col(1))?.max(0) as u32,
         bbox: [bbox[0], bbox[1], bbox[2], bbox[3]],
         landmarks: [
             [landmarks[0], landmarks[1]],
@@ -1553,11 +1680,11 @@ fn row_to_face(r: &rusqlite::Row<'_>) -> rusqlite::Result<Option<StoredFace>> {
             [landmarks[6], landmarks[7]],
             [landmarks[8], landmarks[9]],
         ],
-        score: r.get::<_, f64>(4)? as f32,
-        quality: r.get::<_, f64>(5)? as f32,
+        score: r.get::<_, f64>(col(4))? as f32,
+        quality: r.get::<_, f64>(col(5))? as f32,
         embedding,
-        image_w: r.get::<_, i64>(8)?.max(0) as u32,
-        image_h: r.get::<_, i64>(9)?.max(0) as u32,
+        image_w: r.get::<_, i64>(col(8))?.max(0) as u32,
+        image_h: r.get::<_, i64>(col(9))?.max(0) as u32,
     }))
 }
 

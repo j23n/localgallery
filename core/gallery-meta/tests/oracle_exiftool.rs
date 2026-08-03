@@ -19,7 +19,9 @@ use std::path::Path;
 use std::process::Command;
 
 use common::{fixture, FIXTURES};
-use gallery_meta::{apply_tags, TagWriteRequest};
+use gallery_meta::{
+    apply_faces, apply_tags, Area, FaceRegionWrite, FaceWriteRequest, TagWriteRequest,
+};
 use serde_json::Value;
 
 const EXIFTOOL: &str = "/opt/homebrew/bin/exiftool";
@@ -291,6 +293,273 @@ fn a_sidecar_created_from_nothing_is_valid_to_exiftool() {
         !map.keys().any(|k| k.ends_with(":TaggerVersion")),
         "{map:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Faces
+// ---------------------------------------------------------------------------
+
+fn face_region(name: &str, x: f64, y: f64, w: f64, h: f64) -> FaceRegionWrite {
+    FaceRegionWrite {
+        name: name.to_string(),
+        area: Area::new(x, y, w, h),
+    }
+}
+
+fn face_request(regions: Vec<FaceRegionWrite>) -> FaceWriteRequest {
+    FaceWriteRequest::new(regions, "buffalo_sc-2026.1", "2026-08-03T10:00:00Z")
+        .with_image_size(4032, 3024)
+}
+
+/// One region as exiftool's `-struct` JSON reports it.
+///
+/// The coordinates come back as JSON *numbers*, so `0.400000` reads as `0.4`;
+/// comparing them as strings would be comparing exiftool's formatting, not our
+/// values.
+#[derive(Debug, Clone, PartialEq)]
+struct OracleRegion {
+    name: String,
+    kind: String,
+    area: [f64; 4],
+    unit: String,
+}
+
+fn region_structs(map: &BTreeMap<String, Value>) -> Vec<OracleRegion> {
+    let Some(info) = by_tag(map, "RegionInfo") else {
+        return Vec::new();
+    };
+    let Some(list) = info.get("RegionList").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let text = |v: Option<&Value>| v.and_then(Value::as_str).unwrap_or_default().to_string();
+    list.iter()
+        .map(|r| {
+            let area = r.get("Area");
+            let num = |k: &str| {
+                area.and_then(|a| a.get(k))
+                    .and_then(Value::as_f64)
+                    .unwrap_or(f64::NAN)
+            };
+            OracleRegion {
+                name: text(r.get("Name")),
+                kind: text(r.get("Type")),
+                area: [num("X"), num("Y"), num("W"), num("H")],
+                unit: text(area.and_then(|a| a.get("Unit"))),
+            }
+        })
+        .collect()
+}
+
+#[test]
+#[ignore = "shells out to exiftool"]
+fn exiftool_reads_back_the_region_structure_we_meant_to_write() {
+    if !have_exiftool() {
+        eprintln!("exiftool not installed; skipping");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = apply_faces(
+        None,
+        &face_request(vec![
+            face_region("Alice", 0.4, 0.35, 0.12, 0.16),
+            face_region("Bob", 0.7, 0.3, 0.1, 0.14),
+        ]),
+    )
+    .unwrap()
+    .bytes;
+    let map = exiftool_json(&place(dir.path(), "faces.jpg.xmp", &bytes));
+
+    let regions = region_structs(&map);
+    assert_eq!(
+        regions,
+        vec![
+            OracleRegion {
+                name: "Alice".into(),
+                kind: "Face".into(),
+                area: [0.4, 0.35, 0.12, 0.16],
+                unit: "normalized".into(),
+            },
+            OracleRegion {
+                name: "Bob".into(),
+                kind: "Face".into(),
+                area: [0.7, 0.3, 0.1, 0.14],
+                unit: "normalized".into(),
+            },
+        ]
+    );
+
+    let dims = by_tag(&map, "RegionInfo")
+        .and_then(|v| v.get("AppliedToDimensions"))
+        .cloned()
+        .unwrap();
+    assert_eq!(dims.get("W").and_then(Value::as_i64), Some(4032));
+    assert_eq!(dims.get("H").and_then(Value::as_i64), Some(3024));
+    assert_eq!(dims.get("Unit").and_then(Value::as_str), Some("pixel"));
+
+    // The keyword fan-out and the face sentinel, through exiftool's eyes.
+    assert_eq!(
+        as_list(by_tag(&map, "TagsList")),
+        vec!["People/Alice", "People/Bob"]
+    );
+    assert_eq!(as_list(by_tag(&map, "Subject")), vec!["Alice", "Bob"]);
+    assert_eq!(
+        as_list(by_tag(&map, "HierarchicalSubject")),
+        vec!["People|Alice", "People|Bob"]
+    );
+    assert_eq!(as_list(by_tag(&map, "PersonInImage")), vec!["Alice", "Bob"]);
+    assert_eq!(
+        by_tag(&map, "CoreFacePack").and_then(Value::as_str),
+        Some("buffalo_sc-2026.1")
+    );
+    assert_eq!(
+        as_list(by_tag(&map, "CorePeople")),
+        vec!["People/Alice", "People/Bob"]
+    );
+    assert_eq!(as_list(by_tag(&map, "CoreRegions")).len(), 2);
+    assert!(!map.keys().any(|k| k.ends_with(":TaggerVersion")));
+}
+
+#[test]
+#[ignore = "shells out to exiftool"]
+fn a_face_write_changes_nothing_exiftool_can_see_outside_the_face_fields() {
+    if !have_exiftool() {
+        eprintln!("exiftool not installed; skipping");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+
+    // Fields the face agent owns. `RegionInfo` and `PersonInImage` are checked
+    // separately below — the point of this test is everything *else*.
+    let owned = |key: &str| -> bool {
+        let (group, tag) = key.split_once(':').unwrap_or(("", key));
+        match tag {
+            "Subject" | "TagsList" | "HierarchicalSubject" | "RegionInfo" | "PersonInImage" => true,
+            t => group.starts_with("XMP-") && t.starts_with("Core"),
+        }
+    };
+
+    for name in FIXTURES {
+        let original = fixture(name);
+        let before = exiftool_json(&place(dir.path(), &format!("fb-{name}"), &original));
+
+        let written = apply_faces(
+            Some(&original),
+            &face_request(vec![face_region("Carol", 0.2, 0.82, 0.1, 0.1)]),
+        )
+        .unwrap()
+        .bytes;
+        let after = exiftool_json(&place(dir.path(), &format!("fa-{name}"), &written));
+
+        for (key, value) in &before {
+            if owned(key) {
+                continue;
+            }
+            assert_eq!(after.get(key), Some(value), "{name}: {key} changed");
+        }
+        for key in before.keys() {
+            assert!(after.contains_key(key), "{name}: {key} disappeared");
+        }
+
+        // Every region exiftool saw before is still there, in order, with the
+        // same name and the same box — ours is simply appended.
+        let regions_before = region_structs(&before);
+        let regions_after = region_structs(&after);
+        assert_eq!(
+            &regions_after[..regions_before.len()],
+            &regions_before[..],
+            "{name}: a foreign region was rewritten or reordered"
+        );
+        assert_eq!(
+            regions_after.len(),
+            regions_before.len() + 1,
+            "{name}: ours should be the only addition"
+        );
+        assert_eq!(regions_after.last().unwrap().name, "Carol", "{name}");
+        // Nothing pre-existing was dropped from the keyword fields either.
+        for tag in as_list(by_tag(&before, "TagsList")) {
+            assert!(
+                as_list(by_tag(&after, "TagsList")).contains(&tag),
+                "{name}: lost tag {tag}"
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "shells out to exiftool"]
+fn un_naming_gives_exiftool_back_the_file_it_first_saw() {
+    if !have_exiftool() {
+        eprintln!("exiftool not installed; skipping");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+
+    for name in FIXTURES {
+        let original = fixture(name);
+        let before = exiftool_json(&place(dir.path(), &format!("ub-{name}"), &original));
+
+        let named = apply_faces(
+            Some(&original),
+            &face_request(vec![face_region("Carol", 0.2, 0.82, 0.1, 0.1)]),
+        )
+        .unwrap()
+        .bytes;
+        let cleared = apply_faces(Some(&named), &face_request(Vec::new()))
+            .unwrap()
+            .bytes;
+        let after = exiftool_json(&place(dir.path(), &format!("ua-{name}"), &cleared));
+
+        assert_eq!(
+            region_structs(&after),
+            region_structs(&before),
+            "{name}: regions not restored"
+        );
+        for (key, value) in &before {
+            // The sentinel legitimately remains, claiming nothing, and the
+            // projection is published rather than restored (see faces.rs).
+            if key.contains(":Core") || key.ends_with(":PersonInImage") {
+                continue;
+            }
+            assert_eq!(after.get(key), Some(value), "{name}: {key} not restored");
+        }
+        assert!(as_list(by_tag(&after, "CorePeople")).is_empty(), "{name}");
+        assert!(as_list(by_tag(&after, "CoreRegions")).is_empty(), "{name}");
+    }
+}
+
+#[test]
+#[ignore = "shells out to exiftool"]
+fn exiftool_can_still_write_to_a_sidecar_whose_regions_we_authored() {
+    // Structural damage in a nested struct is the failure mode this catches:
+    // exiftool refuses to rewrite XMP it cannot make sense of.
+    if !have_exiftool() {
+        eprintln!("exiftool not installed; skipping");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = apply_faces(
+        Some(&fixture("digikam.jpg.xmp")),
+        &face_request(vec![face_region("Carol", 0.2, 0.82, 0.1, 0.1)]),
+    )
+    .unwrap()
+    .bytes;
+    let path = place(dir.path(), "frw.jpg.xmp", &bytes);
+
+    let out = Command::new(EXIFTOOL)
+        .args(["-overwrite_original", "-XMP-dc:Subject+=Holiday"])
+        .arg(&path)
+        .output()
+        .expect("run exiftool");
+    assert!(
+        out.status.success(),
+        "exiftool could not rewrite our sidecar: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let map = exiftool_json(&path);
+    assert_eq!(region_structs(&map).len(), 3);
+    assert!(as_list(by_tag(&map, "Subject")).contains(&"Holiday".to_string()));
+    assert!(as_list(by_tag(&map, "TagsList")).contains(&"People/Carol".to_string()));
 }
 
 #[test]

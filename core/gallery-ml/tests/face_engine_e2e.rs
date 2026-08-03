@@ -86,6 +86,8 @@ fn options() -> FaceRunOptions {
         limit: None,
         root_prefix: None,
         full_recluster: false,
+        tagged_at: Some("2026-08-03T10:00:00Z".to_string()),
+        skip_auto_tagging: false,
     }
 }
 

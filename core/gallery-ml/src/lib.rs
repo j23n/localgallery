@@ -46,9 +46,9 @@
 //! * Not a video pipeline. photo-tools samples frames with ffmpeg; there is no
 //!   ffmpeg on iOS, and there is no determinism story for a platform decoder.
 //! * Not a HEIC decoder — see [`preprocess`] for the gap and why it is open.
-//! * Not a sidecar writer for people. [`face`] stops at the cache DB; turning a
-//!   named cluster into `People/*` keywords and MWG-RS regions is
-//!   `gallery-meta`'s half of Phase 2.
+//! * Not the owner of the sidecar format. [`face::naming`] decides *what* a
+//!   named cluster means for a photo; `gallery-meta` decides how that lands in
+//!   the XMP and what it is allowed to touch there.
 //!
 //! ```no_run
 //! use std::sync::atomic::AtomicBool;
@@ -81,14 +81,15 @@ pub mod preprocess;
 pub mod tagger;
 
 pub use cache::{
-    CacheDb, ClusterRow, ClusterState, FaceLibraryStats, Stats, StoredFace, WorkItem, WorkState,
+    CacheDb, ClusterRow, ClusterState, FaceLibraryStats, NamedFace, Stats, StoredFace, WorkItem,
+    WorkState,
 };
 pub use encoder::{ImageEncoder, ModelOutput, MultiOutputModel};
 pub use engine::{NoProgress, RunOptions, RunSummary, TaggingEngine, TaggingProgress, MAX_WORKERS};
 pub use error::{ErrorCode, MlError, MlResult};
 pub use face::{
-    Detection, FaceEngine, FaceProgress, FaceRunOptions, FaceRunSummary, NoFaceProgress,
-    ReclusterSummary, ALIGN_VERSION,
+    Detection, FaceEngine, FaceProgress, FaceRunOptions, FaceRunSummary, FailedWrite,
+    NoFaceProgress, ReclusterSummary, SidecarWritePlan, ALIGN_VERSION,
 };
 pub use pack::{ClusteringConfig, FaceSpec, Manifest, ModelPack, RootConfig};
 pub use preprocess::{PreprocessConfig, ResizeFilter, Tensor, PREPROCESS_VERSION};

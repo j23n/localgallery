@@ -24,18 +24,18 @@
 //!          cluster — incremental assign, then an optional full pass
 //! ```
 //!
+//! Naming a cluster is the one thing that leaves the cache: [`naming`] turns it
+//! into `People/<Name>` keywords and `XMP-mwg-rs:RegionInfo` regions through
+//! `gallery_meta::write_faces`. Everything *else* here stops at the cache DB,
+//! which is the standing decision that unlabeled clusters and embeddings are
+//! per-device derived data while only named results travel.
+//!
 //! # What this module does not do
 //!
-//! It does not write sidecars. Naming a cluster — and so writing
-//! `People/<Name>` keywords and `XMP-mwg-rs:RegionInfo` regions — is the second
-//! half of Phase 2 and lives with the rest of the sidecar machinery in
-//! `gallery-meta`. Everything here stops at the cache DB, which is exactly the
-//! standing decision that unlabeled clusters and embeddings are per-device
-//! derived data while only *named* results travel.
-//!
-//! It also does not decide *who* anyone is. A cluster is a set of faces that
-//! look alike; turning one into a person is a human action, by design (Phase 2
-//! plan, non-goals).
+//! It does not decide *who* anyone is. A cluster is a set of faces that look
+//! alike; turning one into a person is a human action, by design (Phase 2 plan,
+//! non-goals). What the core does do on its own is extend an identity a human
+//! already gave it — see [`naming`]'s auto-tagging section.
 //!
 //! # Model choice
 //!
@@ -61,6 +61,7 @@ pub mod align;
 pub mod cluster;
 pub mod detect;
 pub mod engine;
+pub mod naming;
 pub mod quality;
 
 pub use align::{align_crop, align_tensor, umeyama, ALIGN_VERSION, ARCFACE_TEMPLATE};
@@ -71,4 +72,5 @@ pub use detect::{Detection, FaceDetector};
 pub use engine::{
     FaceEngine, FaceProgress, FaceRunOptions, FaceRunSummary, NoFaceProgress, ReclusterSummary,
 };
+pub use naming::{FailedWrite, SidecarWritePlan, SIDECAR_RETRIES};
 pub use quality::quality;

@@ -7,7 +7,7 @@
 //! from digiKam, Lightroom, exiftool and Apple Photos, and they disagree.
 
 use crate::error::MetaResult;
-use crate::model::{FaceRegion, SidecarView};
+use crate::model::{AppliedDimensions, FaceRegion, SidecarView};
 use crate::schema::*;
 use crate::xml::{parse, Document, Element, NsScope};
 
@@ -69,6 +69,13 @@ fn visit(el: &Element, outer: &NsScope, view: &mut SidecarView) {
         view.regions.extend(collect_regions(el, &scope));
         // The region subtree is fully consumed; nothing inside it is ours.
         return;
+    } else if scope.matches(el, NS_MWG_RS, PROP_APPLIED_TO_DIMENSIONS) {
+        // First occurrence wins: a second RegionInfo in the same packet is
+        // malformed, and the first is the one every reader will use.
+        if view.applied_dimensions.is_none() {
+            view.applied_dimensions = applied_dimensions(el, &scope);
+        }
+        return;
     } else if scope.resolve(&el.name).0 == Some(NS_PHOTO_TOOLS) {
         let local = el.local_name().to_string();
         match local.as_str() {
@@ -76,6 +83,13 @@ fn visit(el: &Element, outer: &NsScope, view: &mut SidecarView) {
             PROP_CORE_TAGS => view.core.tags.extend(collect_list(el, &scope)),
             PROP_CORE_SUBJECTS => view.core.subjects.extend(collect_list(el, &scope)),
             PROP_CORE_HIERARCHICAL => view.core.hierarchical.extend(collect_list(el, &scope)),
+            PROP_CORE_PEOPLE => view.core.people.extend(collect_list(el, &scope)),
+            PROP_CORE_PEOPLE_SUBJECTS => view.core.people_subjects.extend(collect_list(el, &scope)),
+            PROP_CORE_PEOPLE_HIERARCHICAL => view
+                .core
+                .people_hierarchical
+                .extend(collect_list(el, &scope)),
+            PROP_CORE_REGIONS => view.core.regions.extend(collect_list(el, &scope)),
             _ => absorb_photo_tools_scalar(&local, &el.text(), view),
         }
         return;
@@ -105,6 +119,10 @@ fn list_field_for<'v>(
         (NS_PHOTO_TOOLS, PROP_CORE_TAGS) => Some(&mut view.core.tags),
         (NS_PHOTO_TOOLS, PROP_CORE_SUBJECTS) => Some(&mut view.core.subjects),
         (NS_PHOTO_TOOLS, PROP_CORE_HIERARCHICAL) => Some(&mut view.core.hierarchical),
+        (NS_PHOTO_TOOLS, PROP_CORE_PEOPLE) => Some(&mut view.core.people),
+        (NS_PHOTO_TOOLS, PROP_CORE_PEOPLE_SUBJECTS) => Some(&mut view.core.people_subjects),
+        (NS_PHOTO_TOOLS, PROP_CORE_PEOPLE_HIERARCHICAL) => Some(&mut view.core.people_hierarchical),
+        (NS_PHOTO_TOOLS, PROP_CORE_REGIONS) => Some(&mut view.core.regions),
         _ => None,
     }
 }
@@ -123,6 +141,7 @@ fn absorb_photo_tools_scalar(local: &str, value: &str, view: &mut SidecarView) {
         PROP_CORE_AGENT => view.core.agent = owned(),
         PROP_CORE_MODEL_PACK => view.core.model_pack = owned(),
         PROP_CORE_TAGGED_AT => view.core.tagged_at = owned(),
+        PROP_CORE_FACE_PACK => view.core.face_pack = owned(),
         _ => {}
     }
 }
@@ -183,7 +202,25 @@ fn collect_regions(region_list: &Element, outer: &NsScope) -> Vec<FaceRegion> {
         .collect()
 }
 
-fn region_from_li(li: &Element, outer: &NsScope) -> Option<FaceRegion> {
+/// `mwg-rs:AppliedToDimensions` in either serialization.
+fn applied_dimensions(el: &Element, outer: &NsScope) -> Option<AppliedDimensions> {
+    let scope = outer.extended(el);
+    let num = |local: &str| {
+        field_value(el, &scope, NS_ST_DIM, local).and_then(|v| v.trim().parse::<f64>().ok())
+    };
+    Some(AppliedDimensions {
+        width: num("w")?,
+        height: num("h")?,
+        unit: field_value(el, &scope, NS_ST_DIM, "unit"),
+    })
+}
+
+/// One region out of an `<rdf:li>`, in whichever serialization the writer used.
+///
+/// `pub(crate)` so [`crate::regions`] can pair a parsed region with the exact
+/// `rdf:li` it came from — the merge has to decide about *elements*, not about
+/// a flat list of values.
+pub(crate) fn region_from_li(li: &Element, outer: &NsScope) -> Option<FaceRegion> {
     let scope = outer.extended(li);
     let (area, area_scope) = find_descendant(li, &scope, NS_MWG_RS, "Area")?;
 

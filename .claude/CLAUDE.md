@@ -49,9 +49,16 @@ Phases 0–1:
   `StableUUID.derive`.
 - **gallery-vfs** — `Vfs` trait + `StdVfs`; `write_atomic` = temp + rename.
 - **gallery-meta** — XMP sidecar read/write. Preservation-first
-  read-modify-write: the core replaces only the tags it previously wrote
-  (tracked under a `photo-tools` sentinel) and never touches `People/*` or
-  human keywords.
+  read-modify-write: the core replaces only what it previously wrote (tracked
+  under `photo-tools:Core*` sentinel fields) and never touches human keywords.
+  Two halves with **disjoint** ownership lists so they cannot retract each
+  other: `write.rs` for machine tags (`CoreTags`/`CoreSubjects`/
+  `CoreHierarchical`/`CoreModelPack`), and — Phase 2 — `faces.rs` + `regions.rs`
+  for `People/*` keywords, the `iptcExt:PersonInImage` projection and
+  `mwg-rs:RegionInfo` face regions (`CorePeople*`/`CoreRegions`/`CoreFacePack`).
+  Regions merge with foreign ones by IoU > 0.5 and are written in digiKam's
+  Name/Type/Area field order, which is what `MetadataReader.parseMWGRegions`
+  needs to attribute a name to the right box.
 - **gallery-ml** — `TaggingEngine`: content hash → embedding cache → pinned
   decode/resize → ONNX Runtime (CPU EP) → zero-shot tagger → `write_tags`.
   Owns `gallery-cache.sqlite` (work queue + embeddings, schema v2). The

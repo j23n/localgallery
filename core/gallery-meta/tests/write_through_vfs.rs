@@ -1,9 +1,12 @@
-//! `write_tags` end to end: sidecar naming, creation, and the no-op skip.
+//! `write_tags` / `write_faces` end to end: sidecar naming, creation, and the
+//! no-op skip.
 
 mod common;
 
 use common::fixture;
-use gallery_meta::{read_view, write_tags, TagWriteRequest};
+use gallery_meta::{
+    read_view, write_faces, write_tags, Area, FaceRegionWrite, FaceWriteRequest, TagWriteRequest,
+};
 use gallery_vfs::{MemVfs, StdVfs, Vfs};
 
 fn request(tags: &[&str]) -> TagWriteRequest {
@@ -12,6 +15,18 @@ fn request(tags: &[&str]) -> TagWriteRequest {
         "mobileclip-s2-2026.1",
         "2026-08-03T10:00:00Z",
     )
+}
+
+fn face_request(people: &[(&str, f64, f64)]) -> FaceWriteRequest {
+    FaceWriteRequest::new(
+        people.iter().map(|(name, x, y)| FaceRegionWrite {
+            name: (*name).to_string(),
+            area: Area::new(*x, *y, 0.1, 0.12),
+        }),
+        "buffalo_sc-2026.1",
+        "2026-08-03T10:00:00Z",
+    )
+    .with_image_size(4032, 3024)
 }
 
 #[test]
@@ -284,4 +299,113 @@ fn a_write_that_lands_between_our_read_and_our_rename_is_not_discarded() {
     let view = read_view(&vfs.inner.read("/lib/a.jpg.xmp").unwrap()).unwrap();
     assert_eq!(view.people_tags(), vec!["People/Alice", "People/Bob"]);
     assert!(view.tags_list.contains(&"Objects/Animal/Dog".to_string()));
+}
+
+// ---------------------------------------------------------------------------
+// Faces
+// ---------------------------------------------------------------------------
+
+#[test]
+fn naming_a_person_creates_the_sidecar_and_leaves_the_image_alone() {
+    let vfs = MemVfs::new();
+    vfs.insert("/lib/IMG_1234.jpg", b"jpeg bytes".to_vec());
+
+    let outcome = write_faces(
+        &vfs,
+        "/lib/IMG_1234.jpg",
+        &face_request(&[("Alice", 0.4, 0.35)]),
+    )
+    .unwrap();
+    assert_eq!(outcome.sidecar_path, "/lib/IMG_1234.jpg.xmp");
+    assert!(outcome.created && outcome.written);
+    assert_eq!(outcome.added, vec!["People/Alice"]);
+
+    let view = read_view(&vfs.read("/lib/IMG_1234.jpg.xmp").unwrap()).unwrap();
+    assert_eq!(view.people_tags(), vec!["People/Alice"]);
+    assert_eq!(view.regions.len(), 1);
+    assert_eq!(vfs.read("/lib/IMG_1234.jpg").unwrap(), b"jpeg bytes");
+}
+
+#[test]
+fn an_unchanged_face_re_run_writes_nothing_at_all() {
+    let dir = tempfile::tempdir().unwrap();
+    let image = dir.path().join("a.jpg");
+    std::fs::write(&image, b"a").unwrap();
+    let image = image.to_string_lossy().into_owned();
+    let sidecar = format!("{image}.xmp");
+
+    let first = write_faces(&StdVfs, &image, &face_request(&[("Alice", 0.4, 0.35)])).unwrap();
+    assert!(first.written);
+    let before = std::fs::read(&sidecar).unwrap();
+    let stamp = std::fs::metadata(&sidecar).unwrap().modified().unwrap();
+
+    let second = write_faces(&StdVfs, &image, &face_request(&[("Alice", 0.4, 0.35)])).unwrap();
+    assert!(!second.written, "a no-op re-run must not touch the file");
+    assert_eq!(std::fs::read(&sidecar).unwrap(), before);
+    assert_eq!(
+        std::fs::metadata(&sidecar).unwrap().modified().unwrap(),
+        stamp
+    );
+}
+
+#[test]
+fn a_face_write_that_lands_mid_flight_is_refused_and_retryable() {
+    let theirs = fixture("digikam.jpg.xmp");
+    let vfs = RacyVfs::new("/lib/a.jpg.xmp", theirs.clone());
+    vfs.inner.insert("/lib/a.jpg", b"a".to_vec());
+    vfs.inner
+        .insert("/lib/a.jpg.xmp", fixture("minimal.jpg.xmp"));
+
+    let err = write_faces(&vfs, "/lib/a.jpg", &face_request(&[("Carol", 0.2, 0.82)])).unwrap_err();
+    assert!(
+        matches!(err, gallery_meta::MetaError::ConcurrentModification { .. }),
+        "{err:?}"
+    );
+    assert!(err.is_retryable());
+    assert_eq!(vfs.inner.read("/lib/a.jpg.xmp").unwrap(), theirs);
+
+    // The retry merges into the bytes that landed, keeping their regions.
+    let outcome = write_faces(&vfs, "/lib/a.jpg", &face_request(&[("Carol", 0.2, 0.82)])).unwrap();
+    assert!(outcome.written);
+    let view = read_view(&vfs.inner.read("/lib/a.jpg.xmp").unwrap()).unwrap();
+    assert_eq!(view.regions.len(), 3);
+    assert_eq!(
+        view.people_tags(),
+        vec!["People/Alice", "People/Bob", "People/Carol"]
+    );
+}
+
+#[test]
+fn the_two_halves_of_the_core_write_the_same_sidecar_without_fighting() {
+    let vfs = MemVfs::new();
+    vfs.insert("/lib/a.jpg", b"a".to_vec());
+
+    assert!(
+        write_tags(&vfs, "/lib/a.jpg", &request(&["Objects/Animal/Dog"]))
+            .unwrap()
+            .written
+    );
+    assert!(
+        write_faces(&vfs, "/lib/a.jpg", &face_request(&[("Alice", 0.4, 0.35)]))
+            .unwrap()
+            .written
+    );
+
+    // Both now find the file already says what they say.
+    assert!(
+        !write_tags(&vfs, "/lib/a.jpg", &request(&["Objects/Animal/Dog"]))
+            .unwrap()
+            .written
+    );
+    assert!(
+        !write_faces(&vfs, "/lib/a.jpg", &face_request(&[("Alice", 0.4, 0.35)]))
+            .unwrap()
+            .written
+    );
+
+    let view = read_view(&vfs.read("/lib/a.jpg.xmp").unwrap()).unwrap();
+    assert_eq!(view.core.tags, vec!["Objects/Animal/Dog"]);
+    assert_eq!(view.core.people, vec!["People/Alice"]);
+    assert_eq!(view.tags_list, vec!["Objects/Animal/Dog", "People/Alice"]);
+    assert_eq!(view.subject, vec!["Dog", "Alice"]);
 }

@@ -38,7 +38,9 @@
 #
 # First build needs network access for that download. `ORT_LIB_LOCATION=<dir
 # containing libonnxruntime.a>` is the offline escape hatch and is honoured
-# both by `ort-sys` and by the merge step below.
+# both by `ort-sys` and by the merge step below — which validates whatever it
+# is handed (arm64, iOS-simulator platform) rather than trusting it, since a
+# macOS archive merged in here fails hundreds of lines into an Xcode link.
 
 set -euo pipefail
 
@@ -97,18 +99,55 @@ DYLIB="$BUILT_DIR/$DYLIB_NAME"
 # archive in its cargo output log, as `-L native=<dir>`. Reading that is more
 # robust than re-deriving pyke's cache layout, and it automatically follows
 # ORT_LIB_LOCATION when the build was run offline.
+#
+# Two traps this used to fall into, both silent:
+#
+#   * Several `ort-sys-*` build directories accumulate across feature/profile
+#     changes, and the first glob hit is not the freshest. We sort by mtime.
+#   * A hand-set ORT_LIB_LOCATION (or a stale build dir) can point at a *macOS*
+#     archive. Merging it produces an xcframework that links until the
+#     simulator refuses the slice, hundreds of lines into an Xcode build log.
+#     We check the architecture and the platform load command before merging.
+
+# `libonnxruntime.a` must be arm64 *and* built for the iOS simulator. Every
+# member carries an LC_BUILD_VERSION / LC_VERSION_MIN with the platform, so one
+# object is enough to tell an iOS-simulator archive from a macOS one.
+validate_ort_arch() {
+    local lib="$1" archs platforms
+    archs="$(lipo -info "$lib" 2>/dev/null || true)"
+    case "$archs" in
+        *arm64*) ;;
+        *)
+            echo "error: $lib is not arm64" >&2
+            echo "       lipo says: ${archs:-<unreadable>}" >&2
+            return 1 ;;
+    esac
+    # `otool -l` over the whole archive prints one load-command dump per
+    # member; PLATFORM 7 is IOSSIMULATOR, 1 is MACOS.
+    platforms="$(otool -l "$lib" 2>/dev/null | awk '/platform/ { print $2 }' | sort -u)"
+    if [[ -n "$platforms" ]] && ! grep -qx '7\|IOSSIMULATOR' <<<"$platforms"; then
+        echo "error: $lib is not built for the iOS simulator" >&2
+        echo "       otool reports platform(s): $(tr '\n' ' ' <<<"$platforms")" >&2
+        echo "       (7 / IOSSIMULATOR expected; 1 / MACOS means a host archive)" >&2
+        return 1
+    fi
+    return 0
+}
+
 find_ort_lib() {
     if [[ -n "${ORT_LIB_LOCATION:-}" && -f "$ORT_LIB_LOCATION/libonnxruntime.a" ]]; then
         echo "$ORT_LIB_LOCATION/libonnxruntime.a"
         return 0
     fi
     local log dir
-    for log in "$BUILT_DIR"/build/ort-sys-*/output; do
+    # Newest build directory first: `ls -t` on the output logs, so a stale
+    # ort-sys-* left over from an earlier feature set cannot win.
+    while IFS= read -r log; do
         [[ -f "$log" ]] || continue
         while IFS= read -r dir; do
             [[ -f "$dir/libonnxruntime.a" ]] && { echo "$dir/libonnxruntime.a"; return 0; }
         done < <(sed -n 's/^cargo:rustc-link-search=native=//p' "$log")
-    done
+    done < <(ls -t "$BUILT_DIR"/build/ort-sys-*/output 2>/dev/null)
     return 1
 }
 
@@ -119,6 +158,10 @@ if [[ -z "$ORT_LIB" ]]; then
     echo "       set ORT_LIB_LOCATION=<dir with libonnxruntime.a> to build offline." >&2
     exit 1
 fi
+validate_ort_arch "$ORT_LIB" || {
+    echo "       (${ORT_LIB_LOCATION:+ORT_LIB_LOCATION=$ORT_LIB_LOCATION; }target is $TARGET)" >&2
+    exit 1
+}
 
 echo "==> merging $(basename "$ORT_LIB") into $LIB_NAME"
 echo "    $ORT_LIB"
@@ -126,10 +169,17 @@ MERGED_LIB="$BUILT_DIR/libgallery_core_merged.a"
 rm -f "$MERGED_LIB"
 # `libtool -static` is the only Apple tool that merges archives while keeping
 # every member's architecture and symbol table intact; `ar` on macOS mangles
-# duplicate member names, which ORT's archive has plenty of. The warning about
-# members with the same name is expected and harmless.
-libtool -static -o "$MERGED_LIB" "$STATIC_LIB" "$ORT_LIB" 2>/dev/null
+# duplicate member names, which ORT's archive has plenty of.
+#
+# stderr is *not* suppressed. Two warning families are expected from ORT's
+# archive and only those two are filtered — hiding the whole stream also hid
+# the ones that matter (a table-of-contents failure, an object built for the
+# wrong architecture), which is how a bad merge could reach Xcode unnoticed.
+libtool -static -o "$MERGED_LIB" "$STATIC_LIB" "$ORT_LIB" 2> >(
+    grep -Ev 'same member name|has no symbols' >&2
+)
 [[ -f "$MERGED_LIB" ]] || { echo "error: libtool produced no archive" >&2; exit 1; }
+validate_ort_arch "$MERGED_LIB" || exit 1
 
 # UniFFI reads the interface metadata straight out of the built library, so the
 # bindings can never drift from the binary they describe.

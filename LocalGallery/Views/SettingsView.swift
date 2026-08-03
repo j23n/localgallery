@@ -308,6 +308,7 @@ struct SettingsView: View {
     // MARK: - On-device tagging
 
     @State private var showModelPackPicker = false
+    @State private var showResetTaggingAlert = false
 
     /// Tagging status, model-pack import, and the "Tag Library Now" run
     /// controls. The section is always present — with no pack installed it
@@ -347,6 +348,18 @@ struct SettingsView: View {
                 .disabled(!tagging.isAvailable || store.isScanning || store.allPhotos.isEmpty)
             }
 
+            // Recovery for a queue that has got itself stuck: rows that failed
+            // out of their retry budget, or paths left over from a library
+            // root the user has moved away from. Cached embeddings survive the
+            // reset, so re-tagging afterwards costs a hash per photo, not an
+            // inference.
+            Button(role: .destructive) {
+                showResetTaggingAlert = true
+            } label: {
+                Label("Reset Tagging Data", systemImage: "arrow.counterclockwise")
+            }
+            .disabled(!tagging.isAvailable || tagging.isRunning)
+
             if let summary = tagging.lastSummary {
                 LabeledContent("Last Run") {
                     Text(Self.summaryLine(summary))
@@ -368,7 +381,17 @@ struct SettingsView: View {
             guard case .success(let url) = result else { return }
             Task { await store.tagging.importModelPack(from: url) }
         }
+        .alert("Reset tagging data?", isPresented: $showResetTaggingAlert) {
+            Button("Cancel", role: .cancel) { }
+            Button("Reset", role: .destructive) {
+                Task { await store.tagging.resetQueue() }
+            }
+        } message: {
+            Text("Clears the tagging queue so every photo is considered again. Tags already written to `.xmp` sidecars are kept, and the cached image embeddings are kept too, so re-tagging does not re-run inference.")
+        }
         .task {
+            // Cheap on repeat visits: a pack whose manifest hasn't changed
+            // since it was verified isn't re-hashed. See `PackFingerprint`.
             await store.tagging.refreshAvailability()
         }
     }

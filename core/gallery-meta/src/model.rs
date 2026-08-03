@@ -62,6 +62,13 @@ pub struct CoreSentinel {
     pub tags: Vec<String>,
     /// `dc:subject` leaves the agent added and therefore may retract.
     pub subjects: Vec<String>,
+    /// `lr:hierarchicalSubject` entries (`|`-separated) the agent added and
+    /// therefore may retract.
+    ///
+    /// Not derivable from [`CoreSentinel::tags`]: Lightroom writes
+    /// `lr:hierarchicalSubject` without `digiKam:TagsList`, so an entry can
+    /// already exist for a path we go on to add elsewhere.
+    pub hierarchical: Vec<String>,
 }
 
 impl CoreSentinel {

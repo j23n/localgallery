@@ -89,6 +89,16 @@ pub const PROP_CORE_TAGS: &str = "CoreTags";
 /// hierarchical tags collapse to one leaf, and humans type bare leaves. Without
 /// this list a retraction could delete a keyword a person typed.
 pub const PROP_CORE_SUBJECTS: &str = "CoreSubjects";
+/// Sentinel: the exact `lr:hierarchicalSubject` entries this agent added, an
+/// `rdf:Bag`.
+///
+/// Separate from [`PROP_CORE_TAGS`] for the same reason [`PROP_CORE_SUBJECTS`]
+/// is: `lr:hierarchicalSubject` is *not* a pure function of
+/// `digiKam:TagsList`. Lightroom writes `lr:hierarchicalSubject` and no
+/// `digiKam:TagsList` at all, so a file can arrive carrying
+/// `Objects|Animal|Dog` that nobody here put there. Without this list, adding
+/// and later retracting `Objects/Animal/Dog` would delete the user's entry.
+pub const PROP_CORE_HIERARCHICAL: &str = "CoreHierarchical";
 
 /// The agent name this crate stamps into [`PROP_CORE_AGENT`].
 pub const CORE_AGENT: &str = "localgallery-core";

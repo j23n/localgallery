@@ -69,6 +69,9 @@ fn nfc_and_nfd_are_distinct() {
             .find(|v| v.label == format!("nfd-{stem}"))
             .unwrap_or_else(|| panic!("missing nfd-{stem} vector"));
         assert_ne!(nfc.input, nfd.input, "{stem}: fixture was normalized");
-        assert_ne!(nfc.uuid, nfd.uuid, "{stem}: composed/decomposed must differ");
+        assert_ne!(
+            nfc.uuid, nfd.uuid,
+            "{stem}: composed/decomposed must differ"
+        );
     }
 }

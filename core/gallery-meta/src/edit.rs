@@ -95,43 +95,73 @@ fn find_rdf_in(el: &Element, outer: &NsScope) -> Option<NodePath> {
     None
 }
 
-/// Locate a property element (`dc:subject`, `phototools:CoreTags`, …) anywhere
+/// Locate the *first* property element (`dc:subject`, `phototools:CoreTags`, …)
 /// under `root`, matched by namespace URI and local name.
+///
+/// "First" is right for the add path — new entries go somewhere, and the
+/// occurrence already in the file is the least surprising somewhere. It is
+/// wrong for the remove path; see [`find_properties`].
 pub(crate) fn find_property(
     doc: &Document,
     root: &[usize],
     uri: &str,
     local: &str,
 ) -> Option<NodePath> {
-    let el = element_at(doc, root)?;
-    let scope = scope_at(doc, root);
-    let mut sub = find_property_in(el, &scope, uri, local)?;
-    let mut path = root.to_vec();
-    path.append(&mut sub);
-    Some(path)
+    find_properties(doc, root, uri, local).into_iter().next()
 }
 
-fn find_property_in(el: &Element, outer: &NsScope, uri: &str, local: &str) -> Option<NodePath> {
+/// Every occurrence of a property under `root`, in document order.
+///
+/// A property may legally appear more than once: RDF permits several
+/// `rdf:Description` blocks about the same subject, and digiKam, Bridge and
+/// hand-edited files all produce them. Anything that *removes* entries has to
+/// see all of them, or it will delete an entry from its bookkeeping while
+/// leaving the entry itself in the file.
+pub(crate) fn find_properties(
+    doc: &Document,
+    root: &[usize],
+    uri: &str,
+    local: &str,
+) -> Vec<NodePath> {
+    let Some(el) = element_at(doc, root) else {
+        return Vec::new();
+    };
+    let scope = scope_at(doc, root);
+    let mut found = Vec::new();
+    collect_properties_in(el, &scope, uri, local, &mut Vec::new(), &mut found);
+    found
+        .into_iter()
+        .map(|sub| {
+            let mut path = root.to_vec();
+            path.extend(sub);
+            path
+        })
+        .collect()
+}
+
+fn collect_properties_in(
+    el: &Element,
+    outer: &NsScope,
+    uri: &str,
+    local: &str,
+    prefix: &mut NodePath,
+    found: &mut Vec<NodePath>,
+) {
     for (i, child) in el.children.iter().enumerate() {
         let Some(child_el) = child.as_element() else {
             continue;
         };
         let scope = outer.extended(child_el);
+        prefix.push(i);
         if scope.matches(child_el, uri, local) {
-            return Some(vec![i]);
+            found.push(prefix.clone());
+        } else if !is_container(child_el, outer) {
+            // Do not descend into list containers: an `<rdf:li>` inside a
+            // `dc:subject` Bag is a value, not a property of the same name.
+            collect_properties_in(child_el, &scope, uri, local, prefix, found);
         }
-        // Do not descend into list containers: an `<rdf:li>` inside a
-        // `dc:subject` Bag is a value, not a property of the same name.
-        if is_container(child_el, outer) {
-            continue;
-        }
-        if let Some(mut sub) = find_property_in(child_el, &scope, uri, local) {
-            let mut path = vec![i];
-            path.append(&mut sub);
-            return Some(path);
-        }
+        prefix.pop();
     }
-    None
 }
 
 /// Locate an `rdf:Description` under `root` that carries this property in
@@ -487,6 +517,42 @@ pub(crate) fn set_scalar(
     }
 }
 
+/// Move a list property out of attribute form and into element form.
+///
+/// RDF lets a single-valued array collapse onto the tag —
+/// `<rdf:Description dc:subject='Dog'/>` — and exiftool and Bridge both emit
+/// that. The element-based editor cannot see it, so without this step an
+/// addition would create a *second*, element-form `dc:subject` beside the
+/// attribute and the file would carry the same property twice, with different
+/// values, for every reader to disagree over.
+///
+/// A no-op when the property is absent or already in element form.
+pub(crate) fn migrate_attr_list(
+    doc: &mut Document,
+    root: &[usize],
+    uri: &str,
+    preferred_prefix: &str,
+    local: &str,
+    kind: &str,
+) {
+    let Some((desc_path, attr_name)) = find_attr_property(doc, root, uri, local) else {
+        return;
+    };
+    let Some(desc) = element_at_mut(doc, &desc_path) else {
+        return;
+    };
+    let value = desc.remove_attr(&attr_name).unwrap_or_default();
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        return;
+    }
+    let prop_path = ensure_property(doc, root, uri, preferred_prefix, local);
+    let container_path = ensure_container(doc, &prop_path, kind);
+    if !values_at(doc, &prop_path).contains(&value) {
+        append_li(doc, &container_path, &value);
+    }
+}
+
 /// Replace a list property's entries wholesale, creating it if needed.
 pub(crate) fn set_list(
     doc: &mut Document,
@@ -497,6 +563,9 @@ pub(crate) fn set_list(
     kind: &str,
     values: &[String],
 ) {
+    // Fold any attribute form in first, so the property exists in exactly one
+    // shape before we replace its contents (or delete it).
+    migrate_attr_list(doc, root, uri, preferred_prefix, local, kind);
     if values.is_empty() {
         if let Some(prop_path) = find_property(doc, root, uri, local) {
             remove_property(doc, &prop_path);
@@ -511,13 +580,19 @@ pub(crate) fn set_list(
     }
 }
 
-/// Read a list property's current entries (empty when absent).
+/// Read a list property's current entries across **every** occurrence, in
+/// document order (empty when absent).
 pub(crate) fn list_values(doc: &Document, root: &[usize], uri: &str, local: &str) -> Vec<String> {
-    let Some(prop_path) = find_property(doc, root, uri, local) else {
-        return Vec::new();
-    };
-    let scope = scope_at(doc, &prop_path);
-    let Some(prop) = element_at(doc, &prop_path) else {
+    find_properties(doc, root, uri, local)
+        .iter()
+        .flat_map(|path| values_at(doc, path))
+        .collect()
+}
+
+/// Entries of the one list property at `prop_path`.
+pub(crate) fn values_at(doc: &Document, prop_path: &[usize]) -> Vec<String> {
+    let scope = scope_at(doc, prop_path);
+    let Some(prop) = element_at(doc, prop_path) else {
         return Vec::new();
     };
     match container_of(prop, &scope) {

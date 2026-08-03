@@ -31,35 +31,51 @@ pub fn view_of(doc: &Document) -> SidecarView {
 fn visit(el: &Element, outer: &NsScope, view: &mut SidecarView) {
     let scope = outer.extended(el);
 
-    // Attribute-form scalars: `<rdf:Description phototools:CountryCode='IT'/>`.
+    // Attribute form: `<rdf:Description phototools:CountryCode='IT'/>` for
+    // scalars, and — because RDF lets a one-entry array collapse onto the tag,
+    // which exiftool and Bridge both emit — `<rdf:Description dc:subject='Dog'/>`
+    // for the keyword lists. Missing the second form is not merely a read gap:
+    // the writer would then add an *element*-form property alongside the
+    // attribute and the file would carry the same property twice.
     for attr in el.attrs() {
         if attr.name.starts_with("xmlns") {
             continue;
         }
         let (uri, local) = scope.resolve(&attr.name);
-        if uri == Some(NS_PHOTO_TOOLS) {
+        if let Some(list) = list_field_for(uri, local, view) {
+            let value = attr.value.trim();
+            if !value.is_empty() {
+                list.push(value.to_string());
+            }
+        } else if uri == Some(NS_PHOTO_TOOLS) {
             absorb_photo_tools_scalar(local, &attr.value, view);
         }
     }
 
+    // Lists **accumulate** rather than assign. A property may legally appear
+    // more than once — several `rdf:Description` blocks, or one property split
+    // across them — and the last occurrence is not the whole truth. Assigning
+    // would hide entries from the ownership planner, which would then claim (and
+    // later delete) a keyword a human wrote.
     if scope.matches(el, NS_DC, PROP_SUBJECT) {
-        view.subject = collect_list(el, &scope);
+        view.subject.extend(collect_list(el, &scope));
     } else if scope.matches(el, NS_DIGIKAM, PROP_TAGS_LIST) {
-        view.tags_list = collect_list(el, &scope);
+        view.tags_list.extend(collect_list(el, &scope));
     } else if scope.matches(el, NS_LR, PROP_HIERARCHICAL_SUBJECT) {
-        view.hierarchical_subject = collect_list(el, &scope);
+        view.hierarchical_subject.extend(collect_list(el, &scope));
     } else if scope.matches(el, NS_IPTC_EXT, PROP_PERSON_IN_IMAGE) {
-        view.person_in_image = collect_list(el, &scope);
+        view.person_in_image.extend(collect_list(el, &scope));
     } else if scope.matches(el, NS_MWG_RS, PROP_REGION_LIST) {
-        view.regions = collect_regions(el, &scope);
+        view.regions.extend(collect_regions(el, &scope));
         // The region subtree is fully consumed; nothing inside it is ours.
         return;
     } else if scope.resolve(&el.name).0 == Some(NS_PHOTO_TOOLS) {
         let local = el.local_name().to_string();
         match local.as_str() {
-            PROP_OCR_TEXT => view.photo_tools.ocr_text = collect_list(el, &scope),
-            PROP_CORE_TAGS => view.core.tags = collect_list(el, &scope),
-            PROP_CORE_SUBJECTS => view.core.subjects = collect_list(el, &scope),
+            PROP_OCR_TEXT => view.photo_tools.ocr_text.extend(collect_list(el, &scope)),
+            PROP_CORE_TAGS => view.core.tags.extend(collect_list(el, &scope)),
+            PROP_CORE_SUBJECTS => view.core.subjects.extend(collect_list(el, &scope)),
+            PROP_CORE_HIERARCHICAL => view.core.hierarchical.extend(collect_list(el, &scope)),
             _ => absorb_photo_tools_scalar(&local, &el.text(), view),
         }
         return;
@@ -67,6 +83,29 @@ fn visit(el: &Element, outer: &NsScope, view: &mut SidecarView) {
 
     for child in el.child_elements() {
         visit(child, &scope, view);
+    }
+}
+
+/// The list field a namespace/local pair names, when it names one.
+///
+/// Shared by the attribute-form reader and (indirectly) the writer, so the two
+/// agree on exactly which properties are arrays.
+fn list_field_for<'v>(
+    uri: Option<&str>,
+    local: &str,
+    view: &'v mut SidecarView,
+) -> Option<&'v mut Vec<String>> {
+    let uri = uri?;
+    match (uri, local) {
+        (NS_DC, PROP_SUBJECT) => Some(&mut view.subject),
+        (NS_DIGIKAM, PROP_TAGS_LIST) => Some(&mut view.tags_list),
+        (NS_LR, PROP_HIERARCHICAL_SUBJECT) => Some(&mut view.hierarchical_subject),
+        (NS_IPTC_EXT, PROP_PERSON_IN_IMAGE) => Some(&mut view.person_in_image),
+        (NS_PHOTO_TOOLS, PROP_OCR_TEXT) => Some(&mut view.photo_tools.ocr_text),
+        (NS_PHOTO_TOOLS, PROP_CORE_TAGS) => Some(&mut view.core.tags),
+        (NS_PHOTO_TOOLS, PROP_CORE_SUBJECTS) => Some(&mut view.core.subjects),
+        (NS_PHOTO_TOOLS, PROP_CORE_HIERARCHICAL) => Some(&mut view.core.hierarchical),
+        _ => None,
     }
 }
 

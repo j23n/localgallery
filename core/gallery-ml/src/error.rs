@@ -136,6 +136,7 @@ impl MlError {
             MlError::Preprocess { code, .. } => *code,
             MlError::Vfs(VfsError::NotFound { .. }) => ErrorCode::NotFound,
             MlError::Vfs(_) => ErrorCode::Io,
+            MlError::Meta(MetaError::ConcurrentModification { .. }) => ErrorCode::SidecarConflict,
             MlError::Meta(_) => ErrorCode::SidecarWrite,
             MlError::Inference { .. } => ErrorCode::Inference,
             MlError::Cache { .. } => ErrorCode::Cache,
@@ -177,6 +178,12 @@ pub enum ErrorCode {
     Pack = 9,
     /// The run was cancelled while this photo was in flight.
     Cancelled = 10,
+    /// Another program wrote the sidecar between our read and our write.
+    ///
+    /// Unlike every other code here this one is **retryable** — the row goes
+    /// back through the queue's normal `retry_count` path and the next attempt
+    /// re-reads and re-merges the other writer's changes.
+    SidecarConflict = 11,
 }
 
 impl ErrorCode {
@@ -198,6 +205,7 @@ impl ErrorCode {
             8 => ErrorCode::Cache,
             9 => ErrorCode::Pack,
             10 => ErrorCode::Cancelled,
+            11 => ErrorCode::SidecarConflict,
             _ => ErrorCode::None,
         }
     }
@@ -221,10 +229,18 @@ mod tests {
             ErrorCode::Cache,
             ErrorCode::Pack,
             ErrorCode::Cancelled,
+            ErrorCode::SidecarConflict,
         ] {
             assert_eq!(ErrorCode::from_i64(code.as_i64()), code);
         }
         assert_eq!(ErrorCode::from_i64(9999), ErrorCode::None);
+    }
+
+    #[test]
+    fn a_sidecar_race_is_classified_as_retryable_not_as_a_write_failure() {
+        let e = MlError::Meta(MetaError::ConcurrentModification { path: "/x".into() });
+        assert_eq!(e.error_code(), ErrorCode::SidecarConflict);
+        assert!(matches!(&e, MlError::Meta(m) if m.is_retryable()));
     }
 
     #[test]

@@ -54,10 +54,17 @@ Phases 0–1:
   human keywords.
 - **gallery-ml** — `TaggingEngine`: content hash → embedding cache → pinned
   decode/resize → ONNX Runtime (CPU EP) → zero-shot tagger → `write_tags`.
-  Owns `gallery-cache.sqlite` (work queue + embeddings).
+  Owns `gallery-cache.sqlite` (work queue + embeddings, schema v2). The
+  embedding cache is keyed on the **encoder's SHA-256** + `PREPROCESS_VERSION`,
+  not `pack_version`, so a labels-only pack rebuild re-scores from cached
+  vectors and runs no inference; `pack_version` still drives re-scoring via
+  `mark_stale_for_pack`. Every run starts by reclaiming abandoned `hashing`
+  rows, re-opening `skipped` rows a previous decoder generation refused, and
+  re-statting `done` rows so an in-place edit is re-tagged.
 - **gallery-ffi** — the sole crate the app sees (proc-macro UniFFI, namespace
-  `GalleryCore`). Phase 1 adds `TaggingSession` (`enqueue` / `start` /
-  `cancel` / `isRunning` / `stats` / `resetQueue` / `modelPackInfo`), the
+  `GalleryCore`). Phase 1 adds `TaggingSession` (`enqueue` /
+  `start(progress:rootPrefix:)` / `cancel` / `isRunning` / `stats` /
+  `resetQueue` / `modelPackInfo`), the
   `TaggingProgressListener` foreign trait, `inspectModelPack`, and the
   `TaggingError` enum. `start` spawns a core-owned thread and returns; a
   second `start` while running is `TaggingError.AlreadyRunning`.
@@ -123,7 +130,7 @@ Anything that dedupes by String will disagree with anything that dedupes by id.
 - **SearchIndex** + **TagIndex** — sorted photo list (date desc, URL-path tiebreak so rescans don't shuffle), search corpus, tag → photos index, async tag aggregator.
 - **SidecarCacheStore** / **SidecarSyncService** / **SidecarRefreshService** — parsed `.xmp` cache + bulk provider fetches + BG refresh.
 - **SlideshowMusic** — `AVAudioEngine`-based ambient pad synthesis for the six slideshow music themes.
-- **TaggingService** — on-device tagging (Phase 1). Owns the Rust core's `TaggingSession`, finds/verifies the installed model pack, feeds it the eligible photos (`allPhotos` minus videos and non-downloaded placeholders — the enrichment rule), and publishes `isAvailable`/`isRunning`/`progress`/`lastSummary`. **Results come back through the existing sidecar pipeline, not a new read path**: a run writes `.xmp` files the last scan never saw, so the service triggers a **light rescan** (coalesced, `refreshInterval` 30s + one at the end) → fresh sidecar manifest → `SidecarSyncService` → `reapplySidecarMerges` → tags/indexes/widget. Progress callbacks arrive on core worker threads and hop to the main actor through a `Sendable` bridge holding only `@Sendable` closures.
+- **TaggingService** — on-device tagging (Phase 1). Owns the Rust core's `TaggingSession`, finds/verifies the installed model pack, feeds it the eligible photos, and publishes `isAvailable`/`isRunning`/`progress`/`lastSummary`. Eligibility is *not* the enrichment rule restated: both exclude non-downloaded placeholders (no bytes), but enrichment reads videos' dates while tagging refuses them (no frame sampler in the core). A run is scoped to the current library root (`rootPrefix`) because the core's cache DB is one file per app keyed by absolute path and outlives any one root. **Results come back through the existing sidecar pipeline, not a new read path**: a run writes `.xmp` files the last scan never saw, so the service triggers a **light rescan** (coalesced, `refreshInterval` 30s + one at the end) → fresh sidecar manifest → `SidecarSyncService` → `reapplySidecarMerges` → tags/indexes/widget. Coalescing *defers*, never drops: a refresh requested while one is in flight is drained after it, since that walk may predate the sidecars. Pack verification is cached on the manifest's size+mtime (Settings' `.task` fires on every appearance and a full verify SHA-256s the whole ONNX); the core re-verifies at session open regardless. Progress callbacks arrive on core worker threads and hop to the main actor through a `Sendable` bridge holding only `@Sendable` closures.
 - **SlideshowVideoRenderer** — renders a memory's photo list as a crossfading MP4 (1080×1080, H.264).
 - **ThumbnailService** — in-memory + on-disk thumbnail and full-resolution caches (see invalidation matrix below).
 - **VideoExportShield** — iOS 26+ `BGContinuedProcessingTask` wrapper that keeps the slideshow MP4 export alive (with system progress UI) when the app is backgrounded mid-render; the render still runs in `CollectionsView.startRender`, the shield only tracks/expires it. No-op when the system declines or pre-26. Registered in AppDelegate; identifier listed in `BGTaskSchedulerPermittedIdentifiers`.
@@ -143,7 +150,7 @@ One type per file. Notable groupings:
 - **Viewer/** — `PhotoViewerView` (chrome + filmstrip), `PagingPhotoView` (UIPageViewController wrapper), `PhotoPageView` (one page incl. video/live/materialize states), `ZoomableImageView`, `SwipeToDismissGesture`.
 - **Collections/** — `PersonCard`, `PersonContextMenu` (shared Me/Feature/Link/Hide menu), `MemoryCardView`, `MemoryGridView`, `TagGridView`, `PeopleListView`.
 - **PhotoChrome.swift** — pill formatting helpers + the shared `ChromePill` and `ViewerDismissButton` used by viewer and slideshow, plus the Liquid Glass adapters (`chromeGlass(in:legacyOpacity:)`, `ChromeGlassGroup`): glass on iOS 26+, the legacy translucent white fills earlier.
-- **PhotoInfoPanel.swift**, **AllPhotosView**, **FolderBrowserView**, **CollectionsView**, **PhotoGridScreen** (grid + search + selection; still the largest view), **SettingsView** (Photo Library · Cloud Storage · Sidecars · People · **On-device Tagging** — model-pack status, "Import Model Pack…" folder picker, "Tag Library Now" with progress/cancel, last-run summary · Stats · Diagnostics · About), **MemorySlideshowView**, **PeopleContactLinking**, **LogsView**, **EXIFFormatters** (incl. `photoCountLabel`).
+- **PhotoInfoPanel.swift**, **AllPhotosView**, **FolderBrowserView**, **CollectionsView**, **PhotoGridScreen** (grid + search + selection; still the largest view), **SettingsView** (Photo Library · Cloud Storage · Sidecars · People · **On-device Tagging** — model-pack status, "Import Model Pack…" folder picker, "Tag Library Now" with progress/cancel, "Reset Tagging Data" (destructive, confirmed; clears the queue, keeps sidecars and cached embeddings), last-run summary · Stats · Diagnostics · About), **MemorySlideshowView**, **PeopleContactLinking**, **LogsView**, **EXIFFormatters** (incl. `photoCountLabel`).
 
 ### Components (`LocalGallery/Components/`)
 `ThumbnailView` (task keyed on URL **and** cell size), `PersonThumbnailView`, `FolderGridView`, `GridLayoutConfig`, `PhotoShareKit`, `RemoteBadge`, `ScanProgressBanner` (owns the shared `ScanProgress.countText`), `SettingsToolbarButton`, `LibraryEmptyState`, `ShareSheet` / `AVPlayerLayerView`. Folder picking goes through SwiftUI `.fileImporter` (Settings); logs/redaction-key exports through `ShareLink` — `ShareSheet.present` remains only for the multi-file crash-report share.
@@ -160,7 +167,7 @@ The most intricate behavior in the app (`GalleryStore+Scanning.swift`):
 
 - **Kinds**: `.light` (pull-to-refresh; reuses cached `PhotoFile`s for unchanged files — one stat per file, no provider probe, no EXIF), `.full` (Settings "Reload Library"; probes + rebuilds everything), `.auto` (foreground/cold-launch; light, promoted to full when >48h since the last full pass — `fullScanInterval`).
 - **Two-phase**: a requested full scan with a warm cache runs a quick light pre-pass first so new files surface in seconds, then the full pass follows.
-- **Dedupe**: concurrent scans of the same URL await the in-flight task; a `.full` request is **not** satisfied by an in-flight light scan (it re-runs after); scans of different roots serialize.
+- **Dedupe**: concurrent scans of the same URL await the in-flight task, but a request is only *satisfied* by a pass that could answer it — not by a weaker one (a `.full` request re-runs behind an in-flight light scan) and not by an **earlier** one (a pass that began before the request may have walked the tree before the request's files existed; this is what dropped a tagging run's sidecars). The re-run carries the original request timestamp, so it costs one extra pass, not a storm. Scans of different roots serialize.
 - **Light-scan blind spot**: in-place file modifications are invisible until the 48h full-scan backstop (light scan trusts cached size/modDate without statting).
 - **After the final pass**: sidecar sync plan → `memories.generateIfNeeded()` → widget snapshot export.
 

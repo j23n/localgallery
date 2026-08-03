@@ -75,11 +75,8 @@ fn run(pack_dir: &str, root: &Path, sample: usize) -> Result<(), Box<dyn std::er
     println!("enqueued {queued}");
 
     let started = std::time::Instant::now();
-    let summary = engine.run_with_options(
-        &NoProgress,
-        &AtomicBool::new(false),
-        &RunOptions::default(),
-    )?;
+    let summary =
+        engine.run_with_options(&NoProgress, &AtomicBool::new(false), &RunOptions::default())?;
     let elapsed = started.elapsed();
     println!(
         "\nrun: processed={} tagged={} written={} cache_hits={} skipped={} failed={} \

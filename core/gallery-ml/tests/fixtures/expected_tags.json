@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "pack_version": "gallery-ml-testpack-1",
+  "_comment": [
+    "The tags the committed test pack produces for the committed image",
+    "fixtures. Read by BOTH core/gallery-ml/tests/engine_e2e.rs (host) and",
+    "LocalGalleryTests/Unit/TaggingSessionTests.swift (simulator), which is",
+    "what makes the pair a cross-target determinism check rather than two",
+    "suites that happen to agree. Duplicating the lists in each language put",
+    "nothing on the line: an arm64-simulator drift would have been fixed up in",
+    "whichever copy was noticed first.",
+    "These are as much a property of the pack as the golden tensor hashes are",
+    "of the preprocessor -- the thresholds in labels.json were chosen so the",
+    "fixtures land on THESE sets and not on 'everything' or 'nothing', which",
+    "are the two ways a threshold test passes without testing anything.",
+    "Regenerate the pack with tests/make_test_pack.py; update this file with",
+    "cargo test -p gallery-ml --test engine_e2e -- --ignored --nocapture."
+  ],
+  "tags": {
+    "gradient.jpg": [
+      "Objects/Animal/Dog",
+      "Objects/Vehicle/Car",
+      "Scenes/Nature/Forest"
+    ],
+    "stripes.jpg": [
+      "Scenes/Urban/Street"
+    ],
+    "meadow.png": [
+      "Objects/Animal/Dog",
+      "Objects/Vehicle/Car",
+      "Scenes/Nature/Forest"
+    ]
+  }
+}

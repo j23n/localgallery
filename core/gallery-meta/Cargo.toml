@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 gallery-vfs = { path = "../gallery-vfs" }
 quick-xml = "0.41"
+unicode-normalization = "0.1"
 
 [dev-dependencies]
 tempfile = "3"

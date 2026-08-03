@@ -17,6 +17,13 @@ pub fn sidecar_path(image_path: &str) -> String {
 pub fn alt_sidecar_path(image_path: &str) -> Option<String> {
     let file_start = image_path.rfind('/').map(|i| i + 1).unwrap_or(0);
     let dot = image_path[file_start..].rfind('.')? + file_start;
+    // A leading dot is a hidden file, not an extension: `.hidden` would
+    // otherwise yield `<dir>/.xmp`, a single file *shared by every dotfile in
+    // the directory*. Reading it would attribute one photo's metadata to
+    // another, and a future write side would have them overwrite each other.
+    if dot == file_start {
+        return None;
+    }
     if image_path[dot..].eq_ignore_ascii_case(".xmp") {
         return None;
     }
@@ -46,6 +53,18 @@ mod tests {
         assert_eq!(alt_sidecar_path("/a/IMG_1234"), None);
         assert_eq!(alt_sidecar_path("/a/IMG_1234.xmp"), None);
         assert_eq!(alt_sidecar_path("/a/IMG_1234.XMP"), None);
+    }
+
+    #[test]
+    fn a_dotfile_has_no_extension_to_replace() {
+        // `/a/.xmp` would be shared by every dotfile in the directory.
+        assert_eq!(alt_sidecar_path("/a/.hidden"), None);
+        assert_eq!(alt_sidecar_path(".hidden"), None);
+        // A dotfile that does have an extension still works.
+        assert_eq!(
+            alt_sidecar_path("/a/.hidden.jpg").as_deref(),
+            Some("/a/.hidden.xmp")
+        );
     }
 
     #[test]

@@ -6,6 +6,19 @@ use quick_xml::Reader;
 use super::dom::{Attr, Document, Element, Node};
 use crate::error::{MetaError, MetaResult};
 
+/// Deepest element nesting this parser will build.
+///
+/// Everything downstream of the parser walks the tree recursively — the typed
+/// reader, the property finder, the serializer, and `Element`'s own generated
+/// `Drop`. A file nested tens of thousands deep is 140 KB of `<a>` and takes
+/// the process down with a stack overflow, which is an *abort*: no unwind, no
+/// failed row, no chance for the caller to skip the photo. Capping the depth at
+/// parse time is the one place that bounds all of them at once.
+///
+/// XMP nests about ten levels at its worst (an `mwg-rs` region struct inside a
+/// Bag inside a property inside a Description). 100 is far past anything real.
+const MAX_DEPTH: usize = 100;
+
 /// Parse an XMP packet.
 ///
 /// Errors on UTF-16 input rather than guessing: the writer would have to
@@ -22,6 +35,16 @@ pub fn parse(bytes: &[u8]) -> MetaResult<Document> {
         detail: format!("not valid UTF-8: {e}"),
     })?;
 
+    // A UTF-8 BOM is not part of the XML, so the parser drops it — and dropping
+    // it on the way *out* silently rewrites the first three bytes of somebody
+    // else's file. Some Windows writers require it. Strip it here (so the
+    // reader's byte offsets line up with `text`) and re-attach it as a leading
+    // text node, which serializes verbatim.
+    let (text, bom) = match text.strip_prefix('\u{feff}') {
+        Some(rest) => (rest, true),
+        None => (text, false),
+    };
+
     let mut reader = Reader::from_str(text);
     let cfg = reader.config_mut();
     cfg.trim_text(false);
@@ -36,13 +59,26 @@ pub fn parse(bytes: &[u8]) -> MetaResult<Document> {
     // the stack is empty.
     let mut stack: Vec<Element> = Vec::new();
 
+    let mut event_start = reader.buffer_position() as usize;
     loop {
         let event = reader.read_event().map_err(|e| MetaError::MalformedXml {
             detail: e.to_string(),
         })?;
+        // Byte span of the event just read, for the one node type whose
+        // decoded form is lossy (see `doctype_inner`).
+        let span_start = event_start;
+        event_start = reader.buffer_position() as usize;
+        let span = text
+            .get(span_start..event_start.min(text.len()))
+            .unwrap_or_default();
         match event {
             Event::Eof => break,
             Event::Start(e) => {
+                if stack.len() >= MAX_DEPTH {
+                    return Err(MetaError::MalformedXml {
+                        detail: format!("element nesting deeper than {MAX_DEPTH}"),
+                    });
+                }
                 let el = element_from_start(&e, false)?;
                 stack.push(el);
             }
@@ -87,18 +123,55 @@ pub fn parse(bytes: &[u8]) -> MetaResult<Document> {
                 push_node(&mut doc, &mut stack, Node::Decl(raw));
             }
             Event::DocType(e) => {
-                let raw = decode(e.into_inner().as_ref())?;
-                push_node(&mut doc, &mut stack, Node::DocType(raw));
+                let decoded = decode(e.into_inner().as_ref())?;
+                push_node(
+                    &mut doc,
+                    &mut stack,
+                    Node::DocType(doctype_inner(span, &decoded)),
+                );
             }
         }
     }
 
-    // Unclosed elements: close them in place rather than dropping the subtree.
-    while let Some(el) = stack.pop() {
-        push_node(&mut doc, &mut stack, Node::Element(el));
+    // Elements still open at EOF mean the document was cut short — most often
+    // a sidecar truncated by a full disk or an interrupted cloud sync.
+    //
+    // Closing them in place would be the *dangerous* repair: the file parses
+    // clean, everything after the cut is gone, and the next write serializes
+    // the amputated tree back over the original. The loss becomes permanent
+    // while the result looks pristine. Refusing costs one failed row; repairing
+    // costs the user their metadata.
+    if let Some(open) = stack.last() {
+        return Err(MetaError::MalformedXml {
+            detail: format!(
+                "unexpected end of document with <{}> still open ({} element(s) unclosed); \
+                 the file looks truncated",
+                open.name,
+                stack.len()
+            ),
+        });
+    }
+
+    if bom {
+        doc.nodes.insert(0, Node::Text("\u{feff}".into()));
     }
 
     Ok(doc)
+}
+
+/// Everything between `<!DOCTYPE` and the closing `>`, verbatim.
+///
+/// quick-xml hands back the doctype content with its leading whitespace
+/// trimmed, so re-emitting `<!DOCTYPE` + content produces `<!DOCTYPEhtml>` —
+/// not well-formed, and a strict reader (Adobe's XMP toolkit among them) will
+/// reject the file we just "preserved". The raw source span keeps the original
+/// spacing byte for byte; `decoded` is only the fallback for the case where the
+/// span does not look like a doctype at all.
+fn doctype_inner(span: &str, decoded: &str) -> String {
+    span.strip_prefix("<!DOCTYPE")
+        .and_then(|rest| rest.strip_suffix('>'))
+        .map(str::to_string)
+        .unwrap_or_else(|| format!(" {decoded}"))
 }
 
 fn decode(bytes: &[u8]) -> MetaResult<String> {

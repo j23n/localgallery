@@ -1,6 +1,46 @@
 //! Tag-path helpers and the casing rules from schema §3.
 
+use unicode_normalization::UnicodeNormalization;
+
 use crate::error::{MetaError, MetaResult};
+
+/// Unicode NFC — the one normalization form this crate compares in.
+///
+/// # Policy
+///
+/// `Café` has two legal spellings: NFC (`é` as one code point) and NFD (`e` +
+/// combining acute). They render identically, and no user will ever accept
+/// that their library contains both `Places/Café` and `Places/Café`. macOS
+/// hands out NFD from its filesystem APIs, so a tagger that lifted a keyword
+/// from a filename really does produce the other form. So:
+///
+/// 1. **Requested tags are NFC-normalized on entry** ([`normalize_tag`]). The
+///    crate's own output is therefore always NFC.
+/// 2. **Comparisons against entries already in a sidecar are made on NFC
+///    forms** — "is this tag already here", "is this the leaf I claimed", "is
+///    this the entry I must retract". An NFD entry in the file matches the NFC
+///    tag we hold, so nothing duplicates and no claim is orphaned.
+/// 3. **Entries the crate is not editing are never rewritten.** Normalization
+///    is a comparison rule, not a rewrite rule: a human's NFD keyword keeps its
+///    bytes. Preservation outranks tidiness (crate doc).
+///
+/// The one place bytes do change is the crate's own `Core*` sentinel, which is
+/// rewritten wholesale from the NFC values it now holds — that is our field to
+/// normalize.
+pub fn nfc(value: &str) -> String {
+    value.nfc().collect()
+}
+
+/// NFC plus lowercase: the key `dc:subject` leaves are compared on.
+///
+/// Keyword matching in this ecosystem is case-insensitive by convention (the
+/// planner has always compared leaves that way), and the retraction path has to
+/// use exactly the same rule as the claim path or a leaf whose case drifted
+/// after we claimed it would be dropped from `CoreSubjects` while surviving in
+/// the file — an orphaned claim that nothing ever cleans up.
+pub fn nfc_lower(value: &str) -> String {
+    nfc(value).to_lowercase()
+}
 
 /// `Places/Italy/Rome` → `Rome`. A flat tag comes back unchanged.
 pub fn leaf_of(tag: &str) -> &str {
@@ -28,8 +68,9 @@ pub fn root_of(tag: &str) -> &str {
 /// (schema §2.1) and Phase 2 will take that over deliberately, not by accident.
 pub const PEOPLE_ROOT: &str = "People";
 
-/// Normalize a requested tag: trim each segment, collapse internal runs of
-/// whitespace, titlecase every segment (§3), drop empty segments.
+/// Normalize a requested tag: NFC-compose it, trim each segment, collapse
+/// internal runs of whitespace, titlecase every segment (§3), drop empty
+/// segments.
 ///
 /// Rejects a tag that ends up empty, or that targets `People/` — Phase 1 has
 /// no business there.
@@ -40,7 +81,11 @@ pub fn normalize_tag(tag: &str) -> MetaResult<String> {
             reason: "contains control characters".into(),
         });
     }
-    let segments: Vec<String> = tag
+    // NFC first, so titlecasing sees a composed `é` rather than a bare `e`
+    // followed by a combining mark — and so the whole crate has exactly one
+    // spelling of every tag it produces (see [`nfc`]).
+    let composed = nfc(tag);
+    let segments: Vec<String> = composed
         .split('/')
         .map(str::trim)
         .filter(|s| !s.is_empty())

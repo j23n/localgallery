@@ -50,6 +50,17 @@ pub fn content_hash(
     Ok(Some(hasher.finalize().into()))
 }
 
+/// SHA-256 of an in-memory buffer.
+///
+/// The streamed [`content_hash`] and this one are the same function over
+/// different sources, and the engine needs both: the streamed hash to probe the
+/// embedding cache without reading the pixels, and this one over the buffer it
+/// actually decoded, so a file rewritten between the two reads cannot store the
+/// new content's embedding under the old content's key.
+pub fn hash_bytes(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -21,11 +21,9 @@ import os
 /// and `performScan` then hands that manifest to `SidecarSyncService` →
 /// `onFinished` → `reapplySidecarMerges()` → tags/indexes/widget.
 ///
-/// Rescans are coalesced (`refreshInterval`) so a 20k-photo run doesn't kick
-/// off a tree walk every 32 photos. Coalescing **defers** a refresh, it never
-/// drops one: a request that arrives while a rescan is in flight is remembered
-/// and drained after it (see `scheduleRefresh`), because that in-flight walk
-/// may have listed the tree before the sidecars in question existed.
+/// Rescans are coalesced and drained by `SidecarRefreshCoalescer`, which
+/// `FaceService` shares — the rules are identical and the drain half is subtle
+/// enough that having one copy matters.
 @Observable
 @MainActor
 final class TaggingService {
@@ -58,9 +56,17 @@ final class TaggingService {
     }
 
     /// The installed model pack, as Settings renders it.
+    ///
+    /// Also the single answer to "is there a pack, and what can it do" for the
+    /// whole app: `FaceService` reads `hasFaces` off this rather than
+    /// discovering and SHA-256-verifying the same directory a second time.
     struct PackStatus: Equatable, Sendable {
         var version: String
         var labelCount: Int
+        /// Whether the pack ships the two face models (manifest schema 2). A
+        /// tagging-only pack is valid — this is the cue to hide the faces
+        /// controls, not to report a problem.
+        var hasFaces: Bool
         var directory: URL
     }
 
@@ -113,7 +119,15 @@ final class TaggingService {
     @ObservationIgnored var libraryRoot: (@MainActor () -> URL?)?
     /// Called when freshly written sidecars need to be pulled into the app.
     /// `GalleryStore` wires this to a light rescan.
-    @ObservationIgnored var onSidecarsWritten: (@MainActor () async -> Void)?
+    @ObservationIgnored var onSidecarsWritten: (@MainActor () async -> Void)? {
+        get { refresh.onRefresh }
+        set { refresh.onRefresh = newValue }
+    }
+    /// Called before an import replaces the installed pack. `GalleryStore`
+    /// wires this to `FaceService`, which holds the *same* pack's face models
+    /// open in its own session and would otherwise keep scanning under the
+    /// version the user has just replaced.
+    @ObservationIgnored var onPackWillChange: (@MainActor () async -> Void)?
 
     /// Open session. Held across runs: it owns the ONNX sessions and the
     /// SQLite connection, both of which are expensive to build.
@@ -121,13 +135,13 @@ final class TaggingService {
     /// Which pack `session` was opened against, so a pack change reopens it
     /// instead of quietly tagging under the old one.
     @ObservationIgnored private var sessionPackDirectory: URL?
+    /// Coalesces + drains the rescans a run's sidecar writes trigger.
+    @ObservationIgnored private let refresh = SidecarRefreshCoalescer(interval: refreshInterval)
     /// When a refresh last actually ran. Internal so `TaggingServiceTests`
     /// can assert that a *suppressed* batch does not move it.
-    @ObservationIgnored private(set) var lastRefreshAt: Date?
-    @ObservationIgnored private(set) var refreshTask: Task<Void, Never>?
-    /// A refresh asked for while one was already in flight. Drained by
-    /// `scheduleRefresh`'s loop rather than dropped.
-    @ObservationIgnored private var refreshPending = false
+    @ObservationIgnored var lastRefreshAt: Date? { refresh.lastRefreshAt }
+    /// The in-flight refresh, for callers that need to await it.
+    @ObservationIgnored var refreshTask: Task<Void, Never>? { refresh.task }
     /// `cancel()` arrived before the core had a run to cancel.
     @ObservationIgnored private var cancelRequested = false
     @ObservationIgnored private var verifiedPack: PackFingerprint?
@@ -177,10 +191,12 @@ final class TaggingService {
         let scoped = source.startAccessingSecurityScopedResource()
         defer { if scoped { source.stopAccessingSecurityScopedResource() } }
 
-        // Tear the session down first — it holds the old pack's files open,
-        // and a replaced pack must not keep tagging under the old version.
-        // Off the main actor: releasing a session joins the core's run thread.
+        // Tear the sessions down first — they hold the old pack's files open,
+        // and a replaced pack must not keep tagging (or detecting) under the
+        // old version. Off the main actor: releasing a session joins the core's
+        // run thread.
         await releaseSession()
+        await onPackWillChange?()
 
         let destination = modelPacksDirectory
             .appendingPathComponent(source.lastPathComponent, isDirectory: true)
@@ -265,6 +281,7 @@ final class TaggingService {
                 return .success(PackStatus(
                     version: info.version,
                     labelCount: Int(info.labelCount),
+                    hasFaces: info.hasFaces,
                     directory: dir
                 ))
             } catch {
@@ -404,15 +421,10 @@ final class TaggingService {
     /// to stage a whole run.
     func noteSidecarsWritten(_ count: Int) {
         Log.ml.debug("\(count) sidecars written")
-        if let last = lastRefreshAt, Date().timeIntervalSince(last) < Self.refreshInterval {
-            // Deliberately coalesced: a 20k-photo run must not walk the tree
-            // every 32 photos. Nothing is lost — `finish` refreshes
-            // unconditionally at the end of the run. `lastRefreshAt` is
-            // *not* advanced here: it marks when a refresh actually ran, so a
-            // suppressed batch cannot keep pushing the window out.
-            return
-        }
-        scheduleRefresh()
+        // Deliberately coalesced: a 20k-photo run must not walk the tree every
+        // 32 photos. Nothing is lost — `finish` refreshes unconditionally at
+        // the end of the run.
+        refresh.note()
     }
 
     private func finish(_ summary: Summary) async {
@@ -434,31 +446,11 @@ final class TaggingService {
         await refreshTask?.value
     }
 
-    /// Run one refresh, plus one more for every request that arrived while it
-    /// was in flight.
-    ///
-    /// The obvious `guard refreshTask == nil else { return }` drops those
-    /// requests, and dropping them loses tags: the in-flight rescan may have
-    /// walked the tree *before* the sidecars that prompted the new request
-    /// existed, so its manifest cannot contain them and no later trigger would
-    /// look again. Draining costs at most one extra tree walk per burst, and
-    /// `refreshInterval` still bounds how often a burst can start one.
-    /// Internal so tests can drive it directly; the end-of-run refresh in
-    /// `finish` takes this same unconditional path.
+    /// Refresh now, regardless of the coalescing interval. Internal so tests
+    /// can drive it directly; the end-of-run refresh in `finish` takes this
+    /// same unconditional path.
     func scheduleRefresh() {
-        lastRefreshAt = Date()
-        guard refreshTask == nil else {
-            refreshPending = true
-            return
-        }
-        refreshTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            repeat {
-                self.refreshPending = false
-                await self.onSidecarsWritten?()
-            } while self.refreshPending
-            self.refreshTask = nil
-        }
+        refresh.schedule()
     }
 
     // MARK: - Eligibility

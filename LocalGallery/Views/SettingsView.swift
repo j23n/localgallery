@@ -345,7 +345,14 @@ struct SettingsView: View {
                 } label: {
                     Label("Tag Library Now", systemImage: "sparkles.rectangle.stack")
                 }
-                .disabled(!tagging.isAvailable || store.isScanning || store.allPhotos.isEmpty)
+                // Not while a face scan is running: the two engines hold
+                // separate SQLite connections to the same cache file, and WAL
+                // allows one writer. Serialising them here is cheaper (and far
+                // more legible) than teaching both to retry SQLITE_BUSY.
+                .disabled(
+                    !tagging.isAvailable || store.isScanning || store.allPhotos.isEmpty
+                        || store.faces.isRunning
+                )
             }
 
             // Recovery for a queue that has got itself stuck: rows that failed
@@ -372,10 +379,12 @@ struct SettingsView: View {
                     .font(.footnote)
                     .foregroundStyle(.red)
             }
+
+            facesRows
         } header: {
             Text("On-device Tagging")
         } footer: {
-            Text("Tags photos with the photo-tools Objects and Scenes taxonomy and writes the result into each photo's `.xmp` sidecar — the image files are never modified. Everything runs on this device. A model pack has to be imported first; tagging a photo twice writes nothing.")
+            Text("Tags photos with the photo-tools Objects and Scenes taxonomy and writes the result into each photo's `.xmp` sidecar — the image files are never modified. Everything runs on this device. A model pack has to be imported first; tagging a photo twice writes nothing. A pack that also ships face models adds face scanning: groups of faces appear under People › Review New People, and naming one writes `People/<name>` keywords and face regions to the same sidecars.")
         }
         .fileImporter(isPresented: $showModelPackPicker, allowedContentTypes: [.folder]) { result in
             guard case .success(let url) = result else { return }
@@ -427,6 +436,85 @@ struct SettingsView: View {
                 ProgressView().progressViewStyle(.linear)
             }
         }
+    }
+
+    // MARK: - Faces
+
+    /// The faces half of the On-device Tagging section.
+    ///
+    /// Rows rather than a section of its own: faces come from the *same* model
+    /// pack, and a separate section would imply a separate thing to install.
+    /// Present only when the installed pack actually ships face models — a
+    /// tagging-only pack is valid, so there is nothing to explain.
+    @ViewBuilder
+    private var facesRows: some View {
+        let faces = store.faces
+        if faces.isAvailable {
+            if faces.isRunning {
+                facesProgressRow
+                Button(role: .destructive) {
+                    faces.cancel()
+                } label: {
+                    Label("Cancel Face Scan", systemImage: "stop.circle")
+                }
+            } else {
+                Button {
+                    Task { await store.faces.startScan() }
+                } label: {
+                    Label("Scan Faces", systemImage: "person.crop.square.badge.camera")
+                }
+                .disabled(store.isScanning || store.allPhotos.isEmpty || store.tagging.isRunning)
+            }
+
+            if let summary = faces.lastSummary {
+                LabeledContent("Last Face Scan") {
+                    Text(Self.faceSummaryLine(summary))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if let error = faces.lastError, error != .cancelled {
+                Text(error.message)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var facesProgressRow: some View {
+        let progress = store.faces.progress
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Finding faces…")
+                    .font(.caption.weight(.semibold))
+                Spacer(minLength: 0)
+                if let progress {
+                    Text("\(progress.done) / \(progress.total)")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if let progress, progress.total > 0 {
+                ProgressView(value: Double(progress.done), total: Double(progress.total))
+                    .progressViewStyle(.linear)
+            } else {
+                ProgressView().progressViewStyle(.linear)
+            }
+        }
+    }
+
+    private static func faceSummaryLine(_ summary: FaceService.Summary) -> String {
+        if summary.processed == 0 && summary.facesFound == 0 {
+            return summary.cancelled ? "Cancelled" : "Nothing to do"
+        }
+        var parts = ["\(summary.facesFound) faces", "\(summary.clustersCreated) new groups"]
+        if summary.sidecarsWritten > 0 { parts.append("\(summary.sidecarsWritten) written") }
+        if summary.failed > 0 { parts.append("\(summary.failed) failed") }
+        if summary.cancelled { parts.append("cancelled") }
+        return parts.joined(separator: ", ")
     }
 
     private static func summaryLine(_ summary: TaggingService.Summary) -> String {

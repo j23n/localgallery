@@ -81,8 +81,8 @@ pub mod preprocess;
 pub mod tagger;
 
 pub use cache::{
-    CacheDb, ClusterRow, ClusterState, FaceLibraryStats, NamedFace, Stats, StoredFace, WorkItem,
-    WorkState,
+    CacheDb, ClusterRow, ClusterState, FaceLibraryStats, FaceThumb, NamedFace, Stats, StoredFace,
+    WorkItem, WorkState,
 };
 pub use encoder::{ImageEncoder, ModelOutput, MultiOutputModel};
 pub use engine::{NoProgress, RunOptions, RunSummary, TaggingEngine, TaggingProgress, MAX_WORKERS};

@@ -8,6 +8,10 @@ enum CollectionsRoute: Hashable {
     case memoryGrid(Memory)
     case peopleList
     case personGrid(TagSuggestion)
+    /// The on-device face review queue — unlabeled clusters waiting for a name.
+    case peopleReview
+    /// One cluster's faces, with Name / Not a person.
+    case clusterReview(Int64)
 }
 
 struct CollectionsView: View {
@@ -126,6 +130,10 @@ struct CollectionsView: View {
                 PeopleListView()
             case .personGrid(let tag):
                 TagGridView(tag: tag)
+            case .peopleReview:
+                PeopleReviewView()
+            case .clusterReview(let id):
+                ClusterReviewView(clusterID: id)
             }
         }
     }

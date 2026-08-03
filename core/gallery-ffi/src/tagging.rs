@@ -26,15 +26,12 @@
 //! reacts to `onFinished` by calling `isRunning()` (or by starting another
 //! run) always sees a settled session.
 //!
-//! Two things make that contract survive contact with a real listener:
-//! [`FinishGuard`] runs the release-then-report pair on the way out of the run
-//! thread even if it unwinds, and [`join_unless_current`] keeps a listener that
-//! restarts or releases the session from self-joining the thread it is standing
-//! on.
+//! The mechanics of items 1–2 and of that ordering live in [`crate::support`],
+//! shared with the face session: one [`RunLock`], one [`FinishGuard`], one
+//! `join_unless_current`. Only the typed half — the error enum, the summary and
+//! the listener — is this module's own.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
+use std::sync::Arc;
 
 use gallery_ml::{
     engine::iso8601_utc_now, MlError, RunOptions, RunSummary, TaggingEngine, TaggingProgress,
@@ -42,6 +39,8 @@ use gallery_ml::{
 use gallery_vfs::{StdVfs, VfsError};
 
 use gallery_meta::MetaError;
+
+use crate::support::{FinishGuard, RunLock, StartError};
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -288,6 +287,13 @@ pub struct ModelPackInfo {
     pub embedding_dim: u32,
     /// Encoder input edge, in pixels.
     pub input_size: u32,
+    /// Whether the pack also ships the two face models.
+    ///
+    /// A tagging-only pack is a *valid* pack, so this is the app's cue to hide
+    /// the faces controls rather than to report a broken pack — and it is
+    /// cheap: `ModelPack::load` reads the manifest, and the face weights are
+    /// only hashed when a [`crate::faces::FaceSession`] actually opens.
+    pub has_faces: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -347,11 +353,7 @@ impl TaggingProgress for ProgressAdapter {
 #[derive(uniffi::Object)]
 pub struct TaggingSession {
     engine: Arc<TaggingEngine>,
-    cancel: Arc<AtomicBool>,
-    running: Arc<AtomicBool>,
-    /// The in-flight (or just-finished) run thread, joined on the next
-    /// `start` and on drop so a session never outlives its worker.
-    thread: Mutex<Option<JoinHandle<()>>>,
+    run: RunLock,
 }
 
 #[uniffi::export]
@@ -369,9 +371,7 @@ impl TaggingSession {
         let engine = TaggingEngine::open(&cache_db_path, &model_pack_dir, Arc::new(StdVfs))?;
         Ok(Arc::new(TaggingSession {
             engine: Arc::new(engine),
-            cancel: Arc::new(AtomicBool::new(false)),
-            running: Arc::new(AtomicBool::new(false)),
-            thread: Mutex::new(None),
+            run: RunLock::new(),
         }))
     }
 
@@ -397,86 +397,69 @@ impl TaggingSession {
         progress: Arc<dyn TaggingProgressListener>,
         root_prefix: Option<String>,
     ) -> Result<(), TaggingError> {
-        // Acquire the run lock before touching anything else: two concurrent
-        // `start` calls must not both get as far as spawning.
-        if self
-            .running
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Err(TaggingError::AlreadyRunning);
-        }
-
-        // Reap the previous run's thread. It has already cleared `running`, so
-        // this join is effectively instant; skipping it would leak a thread
-        // handle per run.
-        let mut slot = lock(&self.thread);
-        if let Some(previous) = slot.take() {
-            join_unless_current(previous);
-        }
-
-        self.cancel.store(false, Ordering::Release);
-
         let engine = Arc::clone(&self.engine);
-        let cancel = Arc::clone(&self.cancel);
-        let running = Arc::clone(&self.running);
         let listener = Arc::clone(&progress);
 
-        let spawned = std::thread::Builder::new()
-            .name("gallery-tagging".to_string())
-            .spawn(move || {
-                // The cleanup — release the run lock, then report — lives in a
-                // drop guard so it also happens if this thread unwinds. Without
-                // it a panic anywhere below leaves `running` true forever:
-                // every later `start` answers `AlreadyRunning` and the app's
-                // tagging UI is wedged until it is killed.
-                let mut guard = FinishGuard {
-                    running,
-                    listener: Arc::clone(&listener),
-                    summary: None,
-                };
-                let adapter = ProgressAdapter {
-                    inner: Arc::clone(&listener),
-                };
-                // One timestamp for the whole run: gallery-meta writes it
-                // verbatim, so a per-photo clock read would make two identical
-                // runs produce different sidecar bytes.
-                let opts = RunOptions {
-                    tagged_at: Some(iso8601_utc_now()),
-                    root_prefix,
-                    ..RunOptions::default()
-                };
-                let outcome = engine.run_with_options(&adapter, &cancel, &opts);
-                guard.summary = Some(match outcome {
-                    Ok(s) => TaggingRunSummary::from(s),
-                    Err(e) => {
-                        let err = TaggingError::from(e);
-                        TaggingRunSummary {
-                            processed: 0,
-                            tagged: 0,
-                            sidecars_written: 0,
-                            cache_hits: 0,
-                            skipped: 0,
-                            failed: 0,
-                            cancelled: cancel.load(Ordering::Acquire),
-                            failure: Some(TaggingFailure::from(&err)),
-                        }
-                    }
-                });
+        let spawned = self.run.start("gallery-tagging", move |cancel, running| {
+            // The cleanup — release the run lock, then report — lives in a drop
+            // guard so it also happens if this thread unwinds. Without it a
+            // panic anywhere below leaves `running` true forever: every later
+            // `start` answers `AlreadyRunning` and the app's tagging UI is
+            // wedged until it is killed.
+            let reporter = Arc::clone(&listener);
+            let mut guard = FinishGuard::new(running, move |summary| {
+                reporter.on_finished(summary.unwrap_or(TaggingRunSummary {
+                    processed: 0,
+                    tagged: 0,
+                    sidecars_written: 0,
+                    cache_hits: 0,
+                    skipped: 0,
+                    failed: 0,
+                    cancelled: false,
+                    // Reached only when the run thread unwound: the engine's
+                    // own guarantees say nothing about a panic, so the run is
+                    // reported as a failure rather than as a quiet zero-item
+                    // success.
+                    failure: Some(TaggingFailure::Inference),
+                }));
             });
+            let adapter = ProgressAdapter {
+                inner: Arc::clone(&listener),
+            };
+            // One timestamp for the whole run: gallery-meta writes it verbatim,
+            // so a per-photo clock read would make two identical runs produce
+            // different sidecar bytes.
+            let opts = RunOptions {
+                tagged_at: Some(iso8601_utc_now()),
+                root_prefix,
+                ..RunOptions::default()
+            };
+            let outcome = engine.run_with_options(&adapter, &cancel, &opts);
+            guard.summary = Some(match outcome {
+                Ok(s) => TaggingRunSummary::from(s),
+                Err(e) => {
+                    let err = TaggingError::from(e);
+                    TaggingRunSummary {
+                        processed: 0,
+                        tagged: 0,
+                        sidecars_written: 0,
+                        cache_hits: 0,
+                        skipped: 0,
+                        failed: 0,
+                        cancelled: cancel.load(std::sync::atomic::Ordering::Acquire),
+                        failure: Some(TaggingFailure::from(&err)),
+                    }
+                }
+            });
+        });
 
         match spawned {
-            Ok(handle) => {
-                *slot = Some(handle);
-                Ok(())
-            }
-            Err(e) => {
-                self.running.store(false, Ordering::Release);
-                Err(TaggingError::Io {
-                    path: String::new(),
-                    detail: format!("could not spawn tagging thread: {e}"),
-                })
-            }
+            Ok(()) => Ok(()),
+            Err(StartError::AlreadyRunning) => Err(TaggingError::AlreadyRunning),
+            Err(StartError::Spawn(detail)) => Err(TaggingError::Io {
+                path: String::new(),
+                detail: format!("could not spawn tagging thread: {detail}"),
+            }),
         }
     }
 
@@ -484,12 +467,12 @@ impl TaggingSession {
     /// next item boundary (or the next 256 KiB of a content hash) and reports
     /// through `on_finished` with `cancelled == true`.
     pub fn cancel(&self) {
-        self.cancel.store(true, Ordering::Release);
+        self.run.request_cancel();
     }
 
     /// Whether a run is in flight.
     pub fn is_running(&self) -> bool {
-        self.running.load(Ordering::Acquire)
+        self.run.is_running()
     }
 
     /// Queue counts.
@@ -523,62 +506,8 @@ impl TaggingSession {
 
 impl Drop for TaggingSession {
     fn drop(&mut self) {
-        // A detached worker thread would keep an `Arc<TaggingEngine>` — and
-        // with it the SQLite connection — alive past the session the app
-        // thinks it released.
-        self.cancel.store(true, Ordering::Release);
-        if let Some(handle) = lock(&self.thread).take() {
-            join_unless_current(handle);
-        }
+        self.run.shutdown();
     }
-}
-
-/// Runs the end-of-run cleanup on the way out of the run thread, unwinding or
-/// not: release the run lock first, then report.
-///
-/// The ordering is the documented contract — a listener that reacts to
-/// `onFinished` by calling `isRunning()` or `start()` must see a settled
-/// session — and it is why this is a guard rather than two statements: a panic
-/// between them would strand the lock.
-struct FinishGuard {
-    running: Arc<AtomicBool>,
-    listener: Arc<dyn TaggingProgressListener>,
-    summary: Option<TaggingRunSummary>,
-}
-
-impl Drop for FinishGuard {
-    fn drop(&mut self) {
-        self.running.store(false, Ordering::Release);
-        let summary = self.summary.take().unwrap_or(TaggingRunSummary {
-            processed: 0,
-            tagged: 0,
-            sidecars_written: 0,
-            cache_hits: 0,
-            skipped: 0,
-            failed: 0,
-            cancelled: false,
-            // Reached only when the run thread unwound: the engine's own
-            // guarantees say nothing about a panic, so the run is reported as a
-            // failure rather than as a quiet zero-item success.
-            failure: Some(TaggingFailure::Inference),
-        });
-        self.listener.on_finished(summary);
-    }
-}
-
-/// Join `handle` unless it *is* the current thread.
-///
-/// `on_finished` runs on the run thread, and the contract explicitly invites a
-/// listener to call `start()` from it — or to drop its last session reference,
-/// which reaches `Drop`. Both paths would otherwise join the very thread they
-/// are running on, and a self-join aborts the process. Skipping the join
-/// detaches the thread, which is safe precisely here: the thread is finishing
-/// its own last statement, so nothing outlives what the join was protecting.
-fn join_unless_current(handle: JoinHandle<()>) {
-    if handle.thread().id() == std::thread::current().id() {
-        return;
-    }
-    let _ = handle.join();
 }
 
 /// Verify and inspect a model pack directory without opening a session.
@@ -598,13 +527,7 @@ fn pack_info(pack: &gallery_ml::ModelPack) -> ModelPackInfo {
         label_count: pack.labels.len() as u32,
         embedding_dim: pack.manifest.model.embedding_dim as u32,
         input_size: pack.manifest.model.input_size,
-    }
-}
-
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    match m.lock() {
-        Ok(g) => g,
-        Err(poisoned) => poisoned.into_inner(),
+        has_faces: pack.faces().is_some(),
     }
 }
 
@@ -649,127 +572,6 @@ mod tests {
             }),
             TaggingFailure::Pack
         );
-    }
-
-    /// The guard is what keeps a panicking run thread from latching `running`
-    /// true forever — after which every `start` answers `AlreadyRunning` and
-    /// the app's tagging UI is wedged until it is killed.
-    #[test]
-    fn an_unwinding_run_thread_still_releases_the_lock_and_reports() {
-        #[derive(Default)]
-        struct Recorder {
-            finished: Mutex<Vec<TaggingRunSummary>>,
-            /// `running` as observed from inside `on_finished` — the ordering
-            /// the trait documents.
-            running_when_reported: Mutex<Vec<bool>>,
-            running: Mutex<Option<Arc<AtomicBool>>>,
-        }
-        impl TaggingProgressListener for Recorder {
-            fn on_progress(&self, _done: u32, _total: u32) {}
-            fn on_photos_tagged(&self, _paths: Vec<String>) {}
-            fn on_finished(&self, summary: TaggingRunSummary) {
-                let observed = lock(&self.running)
-                    .as_ref()
-                    .map(|r| r.load(Ordering::Acquire))
-                    .unwrap_or(true);
-                lock(&self.running_when_reported).push(observed);
-                lock(&self.finished).push(summary);
-            }
-        }
-
-        let running = Arc::new(AtomicBool::new(true));
-        let recorder = Arc::new(Recorder::default());
-        *lock(&recorder.running) = Some(Arc::clone(&running));
-
-        let previous = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
-        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = FinishGuard {
-                running: Arc::clone(&running),
-                listener: Arc::clone(&recorder) as Arc<dyn TaggingProgressListener>,
-                summary: None,
-            };
-            panic!("the run thread exploded");
-        }))
-        .is_err();
-        std::panic::set_hook(previous);
-
-        assert!(unwound);
-        assert!(
-            !running.load(Ordering::Acquire),
-            "the run lock was stranded"
-        );
-        let finished = lock(&recorder.finished);
-        assert_eq!(finished.len(), 1, "on_finished must fire exactly once");
-        assert_eq!(finished[0].failure, Some(TaggingFailure::Inference));
-        // Released *before* the report, so a listener that restarts the session
-        // from `on_finished` sees a settled one.
-        assert_eq!(lock(&recorder.running_when_reported).as_slice(), &[false]);
-    }
-
-    #[test]
-    fn a_completed_run_reports_the_summary_it_was_given() {
-        #[derive(Default)]
-        struct Recorder {
-            finished: Mutex<Vec<TaggingRunSummary>>,
-        }
-        impl TaggingProgressListener for Recorder {
-            fn on_progress(&self, _done: u32, _total: u32) {}
-            fn on_photos_tagged(&self, _paths: Vec<String>) {}
-            fn on_finished(&self, summary: TaggingRunSummary) {
-                lock(&self.finished).push(summary);
-            }
-        }
-
-        let recorder = Arc::new(Recorder::default());
-        let done = TaggingRunSummary::from(RunSummary {
-            processed: 7,
-            ..RunSummary::default()
-        });
-        drop(FinishGuard {
-            running: Arc::new(AtomicBool::new(true)),
-            listener: Arc::clone(&recorder) as Arc<dyn TaggingProgressListener>,
-            summary: Some(done),
-        });
-        assert_eq!(lock(&recorder.finished).as_slice(), &[done]);
-    }
-
-    /// `on_finished` runs on the run thread and the contract invites a listener
-    /// to call `start()` (or release its last session reference) from it. Both
-    /// reach a `JoinHandle` for the thread they are standing on, and joining
-    /// yourself aborts the process.
-    #[test]
-    fn a_thread_handed_its_own_handle_does_not_self_join() {
-        let done = Arc::new(AtomicBool::new(false));
-        let (tx, rx) = std::sync::mpsc::channel::<JoinHandle<()>>();
-
-        let flag = Arc::clone(&done);
-        let handle = std::thread::spawn(move || {
-            let own = rx.recv().expect("handle");
-            join_unless_current(own);
-            flag.store(true, Ordering::SeqCst);
-        });
-        tx.send(handle).unwrap();
-
-        for _ in 0..300 {
-            if done.load(Ordering::SeqCst) {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        panic!("the thread never got past join_unless_current — it self-joined");
-    }
-
-    #[test]
-    fn a_handle_for_another_thread_is_still_joined() {
-        let done = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&done);
-        let handle = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-            flag.store(true, Ordering::SeqCst);
-        });
-        join_unless_current(handle);
-        assert!(done.load(Ordering::SeqCst), "the join did not wait");
     }
 
     #[test]

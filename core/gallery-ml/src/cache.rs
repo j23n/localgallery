@@ -426,6 +426,26 @@ pub struct NamedFace {
     pub face: StoredFace,
 }
 
+/// A cluster member reduced to what a face crop needs.
+///
+/// The review UI's currency: where the photo is, where the face sits in it, and
+/// how good the crop will look. See [`CacheDb::cluster_face_thumbs`] for why
+/// this exists rather than a [`StoredFace`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct FaceThumb {
+    /// A photo carrying these bytes. One of possibly several — the detection is
+    /// keyed by content hash, the files are not.
+    pub path: String,
+    /// `[x0, y0, x1, y1]` in oriented-image pixels.
+    pub bbox: [f32; 4],
+    /// Composite quality; see [`crate::face::quality`].
+    pub quality: f32,
+    /// Oriented image width the box is relative to.
+    pub image_w: u32,
+    /// Oriented image height.
+    pub image_h: u32,
+}
+
 /// One cluster row.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClusterRow {
@@ -1387,6 +1407,56 @@ impl CacheDb {
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
             .filter_map(|(h, i)| <[u8; 32]>::try_from(h.as_slice()).ok().map(|h| (h, i)))
+            .collect())
+    }
+
+    /// The best-looking faces of one cluster, highest quality first.
+    ///
+    /// The read behind a review UI, and deliberately **not**
+    /// [`crate::face::FaceEngine::cluster_faces`]: that one hands back whole
+    /// [`StoredFace`]s, and a grid that shows four crops per cluster across a
+    /// library's worth of clusters would drag a 512-float embedding across the
+    /// boundary for every face it never looks at. This selects only what a crop
+    /// needs, ranks in SQL, and stops at `limit` (`0` means everything).
+    ///
+    /// The ordering tiebreak is `(content_hash, face_idx)` so equal-quality
+    /// faces come back in the same order on every device. A face whose photo
+    /// has no queue row left — the file was removed from the library — is
+    /// dropped: there is no path to render a crop from.
+    pub fn cluster_face_thumbs(&self, id: i64, limit: usize) -> MlResult<Vec<FaceThumb>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT (SELECT w.path FROM face_work w
+                      WHERE w.content_hash = f.content_hash ORDER BY w.path LIMIT 1),
+                    f.bbox, f.quality, f.image_w, f.image_h
+             FROM faces f
+             JOIN cluster_members m
+               ON m.content_hash = f.content_hash AND m.face_idx = f.face_idx
+             WHERE m.cluster_id = ?1
+             ORDER BY f.quality DESC, f.content_hash, f.face_idx
+             LIMIT ?2",
+        )?;
+        // SQLite reads a negative LIMIT as "no limit", which is what `0` means
+        // here — spelling it as a huge number would be a second magic value.
+        let cap: i64 = if limit == 0 { -1 } else { limit as i64 };
+        let rows = stmt.query_map(params![id, cap], |r| {
+            let path: Option<String> = r.get(0)?;
+            let bbox_bytes: Vec<u8> = r.get(1)?;
+            let (Some(path), Some(bbox)) = (path, decode_vec(4, &bbox_bytes)) else {
+                return Ok(None);
+            };
+            Ok(Some(FaceThumb {
+                path,
+                bbox: [bbox[0], bbox[1], bbox[2], bbox[3]],
+                quality: r.get::<_, f64>(2)? as f32,
+                image_w: r.get::<_, i64>(3)?.max(0) as u32,
+                image_h: r.get::<_, i64>(4)?.max(0) as u32,
+            }))
+        })?;
+        Ok(rows
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
             .collect())
     }
 
@@ -2443,6 +2513,56 @@ mod tests {
         assert_eq!(s.named_clusters, 1);
         assert_eq!(s.ignored_clusters, 1);
         assert_eq!(s.unlabeled_clusters, 1);
+    }
+
+    /// The review grid shows a handful of crops per cluster and picks them by
+    /// quality, so the ranking and the cap both have to live in the query —
+    /// pulling every member back to sort in Rust is what this method exists to
+    /// avoid.
+    #[test]
+    fn cluster_thumbs_come_back_best_first_and_stop_at_the_limit() {
+        let db = db();
+        let cluster = db.create_cluster(&[1.0]).unwrap();
+        for (i, quality) in [(0u8, 0.2f32), (1, 0.9), (2, 0.5)] {
+            let mut f = face(h(i), 0, vec![1.0]);
+            f.quality = quality;
+            db.put_faces(&h(i), "m", 100, 200, &[f]).unwrap();
+            let path = format!("/lib/{i}.jpg");
+            db.face_enqueue(std::slice::from_ref(&path)).unwrap();
+            assert!(db.face_begin(&path).unwrap());
+            assert!(db.face_set_content_hash(&path, &h(i)).unwrap());
+            db.set_cluster_member(cluster, &h(i), 0).unwrap();
+        }
+
+        let all = db.cluster_face_thumbs(cluster, 0).unwrap();
+        assert_eq!(
+            all.iter().map(|t| t.path.as_str()).collect::<Vec<_>>(),
+            vec!["/lib/1.jpg", "/lib/2.jpg", "/lib/0.jpg"]
+        );
+        assert_eq!(all[0].bbox, [1.0, 2.0, 3.0, 4.0]);
+        assert_eq!((all[0].image_w, all[0].image_h), (100, 200));
+
+        let capped = db.cluster_face_thumbs(cluster, 2).unwrap();
+        assert_eq!(capped.len(), 2);
+        assert_eq!(capped[0].path, "/lib/1.jpg");
+    }
+
+    /// A face whose photo has left the library has nothing to crop from. It
+    /// still counts toward the cluster's size — the detection is real — but it
+    /// cannot be an exemplar.
+    #[test]
+    fn a_face_with_no_surviving_photo_is_left_out_of_the_thumbs() {
+        let db = db();
+        let cluster = db.create_cluster(&[1.0]).unwrap();
+        db.put_faces(&h(1), "m", 1, 1, &[face(h(1), 0, vec![1.0])])
+            .unwrap();
+        db.set_cluster_member(cluster, &h(1), 0).unwrap();
+        assert!(db.cluster_face_thumbs(cluster, 0).unwrap().is_empty());
+
+        db.face_enqueue(&["/lib/a.jpg".into()]).unwrap();
+        assert!(db.face_begin("/lib/a.jpg").unwrap());
+        assert!(db.face_set_content_hash("/lib/a.jpg", &h(1)).unwrap());
+        assert_eq!(db.cluster_face_thumbs(cluster, 0).unwrap().len(), 1);
     }
 
     #[test]

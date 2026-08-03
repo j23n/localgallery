@@ -140,6 +140,11 @@ final class GalleryStore {
     /// On-device tagging (Rust core). Writes `.xmp` sidecars; its results come
     /// back through the ordinary sidecar pipeline, see `TaggingService`.
     let tagging: TaggingService
+    /// On-device face detection, clustering and naming (Rust core). Shares the
+    /// core's cache file and the model pack with `tagging` and nothing else —
+    /// the two runs are independently resumable. Named results reach the app
+    /// through the same sidecar pipeline, so `people` needs no new read path.
+    let faces: FaceService
 
     // MARK: Injected seams (test-overridable; production uses `.production` /
     // `.standard` defaults so existing call sites are unchanged).
@@ -198,6 +203,7 @@ final class GalleryStore {
             cacheDatabaseURL: paths.mlCacheDatabaseURL,
             modelPacksDirectory: paths.modelPacksDirectoryURL
         )
+        self.faces = FaceService(cacheDatabaseURL: paths.mlCacheDatabaseURL)
         self.sidecarSync.onFinished = { @MainActor [weak self] in
             self?.reapplySidecarMerges()
         }
@@ -214,6 +220,22 @@ final class GalleryStore {
         // reapplySidecarMerges → indexes/widget. See TaggingService's docs.
         self.tagging.onSidecarsWritten = { [weak self] in
             await self?.rescan(kind: .light, silent: true)
+        }
+        // Faces read the pack `TaggingService` already found and verified,
+        // rather than discovering (and re-hashing) the same directory twice.
+        self.faces.installedPack = { [weak self] in self?.tagging.pack }
+        self.faces.eligiblePhotos = { [weak self] in self?.allPhotos ?? [] }
+        self.faces.libraryRoot = { [weak self] in self?.bookmarks.activeURL }
+        // Naming a cluster writes `People/*` keywords and MWG regions into
+        // sidecars the last scan never saw — the same situation tagging is in,
+        // and the same fix: a light rescan feeds SidecarSyncService →
+        // reapplySidecarMerges → PeopleStore.
+        self.faces.onSidecarsWritten = { [weak self] in
+            await self?.rescan(kind: .light, silent: true)
+        }
+        // An imported pack replaces the face models the open FaceSession holds.
+        self.tagging.onPackWillChange = { [weak self] in
+            await self?.faces.invalidateSession()
         }
         self.people.onMemoryAffectingChange = { [weak self] in
             self?.memories.forceRegenerate()

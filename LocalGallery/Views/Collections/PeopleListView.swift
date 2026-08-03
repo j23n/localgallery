@@ -13,8 +13,24 @@ struct PeopleListView: View {
         return all.filter { $0.displayName.localizedCaseInsensitiveContains(searchText) }
     }
 
+    /// Unlabeled face clusters big enough to ask about. See
+    /// `FaceService.reviewMinimumFaces` for the threshold and why it is 3.
+    private var reviewable: [FaceService.Cluster] {
+        store.faces.reviewableClusters
+    }
+
     var body: some View {
         List {
+            // Only while the search field is empty: search is about the people
+            // who already have names, and a review banner is not one of them.
+            if searchText.isEmpty, !reviewable.isEmpty {
+                Section {
+                    NavigationLink(value: CollectionsRoute.peopleReview) {
+                        PeopleReviewRow(count: reviewable.count)
+                    }
+                }
+            }
+
             ForEach(filteredPeople) { person in
                 NavigationLink(value: CollectionsRoute.personGrid(person)) {
                     PeopleListRow(tag: person)
@@ -38,6 +54,11 @@ struct PeopleListView: View {
         .background(Design.bg)
         .sheet(item: $linkingPerson) { person in
             ContactLinkSheet(person: person)
+        }
+        .task {
+            // Cheap (one bounded query per cluster) and the only place the
+            // review entry point can learn it has something to offer.
+            await store.faces.refreshClusters()
         }
     }
 

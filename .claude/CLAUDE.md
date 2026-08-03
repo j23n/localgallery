@@ -43,7 +43,7 @@ exposes (`store.people`, `store.memories`), and focused services under
 ### Rust core (`core/`)
 
 Cargo workspace behind a UniFFI boundary; the roadmap lives in `_plans/`.
-Phases 0–1:
+Phases 0–2:
 
 - **gallery-model** — `stable_uuid::derive`, the byte-for-byte mirror of
   `StableUUID.derive`.
@@ -67,7 +67,16 @@ Phases 0–1:
   vectors and runs no inference; `pack_version` still drives re-scoring via
   `mark_stale_for_pack`. Every run starts by reclaiming abandoned `hashing`
   rows, re-opening `skipped` rows a previous decoder generation refused, and
-  re-statting `done` rows so an in-place edit is re-tagged.
+  re-statting `done` rows so an in-place edit is re-tagged. Phase 2 adds the
+  sibling `face::FaceEngine` — detect / align / embed / quality / cluster, its
+  own queue and tables in the same cache file, plus `face::naming`
+  (`name_cluster` / `rename_person` / `unname_cluster` / `ignore_cluster` /
+  `sync_sidecars`) and the auto-tag pass that extends an already-named cluster
+  to newly matched faces. A sibling rather than an extension: the two queues
+  must be independently resumable, and a tagging-only pack has to keep working.
+  Face results are keyed on `face_pack_key` (the two face model hashes +
+  `PREPROCESS_VERSION` + `ALIGN_VERSION`), so adding face models to a pack does
+  not re-tag and a labels rebuild does not re-detect.
 - **gallery-ffi** — the sole crate the app sees (proc-macro UniFFI, namespace
   `GalleryCore`). Phase 1 adds `TaggingSession` (`enqueue` /
   `start(progress:rootPrefix:)` / `cancel` / `isRunning` / `stats` /
@@ -75,6 +84,29 @@ Phases 0–1:
   `TaggingProgressListener` foreign trait, `inspectModelPack`, and the
   `TaggingError` enum. `start` spawns a core-owned thread and returns; a
   second `start` while running is `TaggingError.AlreadyRunning`.
+  Phase 2 adds the sibling `FaceSession` (`enqueue` /
+  `start(progress:rootPrefix:)` / `cancel` / `isRunning` / `stats` /
+  `libraryStats` / `resetQueue` / `clusters` / `clusterFaces` / `nameCluster` /
+  `unnameCluster` / `ignoreCluster` / `renamePerson` / `recluster`), the
+  `FaceProgressListener` foreign trait (`onPhotosWithFaces` = the cache
+  changed, `onSidecarsWritten` = a file did — only the second obliges a
+  re-read), and the `FaceError` enum, whose `ModelsUnavailable` is how the app
+  learns a pack is tagging-only and `InvalidName` is the one case a user can
+  fix by typing something else. `ModelPackInfo.hasFaces` answers the same
+  question without opening a session. **Everything that writes —
+  name/unname/ignore/rename/recluster/resetQueue — refuses with
+  `AlreadyRunning` while a run is in flight** rather than blocking the caller
+  or racing the run's own auto-tag pass over the cluster table; reads
+  (`clusters`, `clusterFaces`) stay open so a review screen does not go blank
+  for the length of a scan. `ClusterSummary` carries ≤4 exemplar `FaceRef`s —
+  photo path plus a **normalized MWG centre/extent rectangle**, chosen best
+  quality first and one per photo where possible — so Swift crops from its own
+  thumbnail pipeline and no pixels cross the boundary.
+  `src/support.rs` holds the run-thread mechanics both sessions share:
+  `RunLock` (one run at a time, cancel flag, thread slot), the generic
+  `FinishGuard` (release the lock *then* report, even on unwind), and
+  `join_unless_current` (a listener that restarts or releases the session from
+  `onFinished` must not self-join).
 
 Plus an in-workspace `uniffi-bindgen` bin so no global install is needed.
 Toolchain pinned in `core/rust-toolchain.toml`.
@@ -123,6 +155,7 @@ Anything that dedupes by String will disagree with anything that dedupes by id.
 - **CrashDiagnosticsService** — MetricKit `MXMetricManagerSubscriber` that persists the latest crash payload to disk for the in-app share flow.
 - **EXIFService** — lazy EXIF + photo-tools XMP read for the info panel.
 - **EnrichmentService** — parallel `TaskGroup` enrichment of stale photo metadata; caller cancellation is forwarded into the detached work. Non-downloaded placeholders skip the byteless read and are re-enriched when their bytes arrive (locality-transition triggers in the scanner and `ensureMaterialized`).
+- **FaceService** — on-device faces (Phase 2). Owns the Rust core's `FaceSession` and mirrors `TaggingService` structurally (session held across runs, `cancelRequested` covering the window before a run exists, off-actor open/release, root-scoped runs, the shared `SidecarRefreshCoalescer`). Two things are its own: **availability is read from `TaggingService.pack.hasFaces`** through an injected `installedPack` closure, so a Settings appearance never SHA-256s the same ONNX twice, and it has calls that write to disk *without* being a run — `name` / `unname` / `ignore` / `rename` / `recluster`, all refused by the core while a run is in flight, hence `isRunning` gates the review buttons and not just the progress row. Eligibility calls straight through to `TaggingService.isEligible` (same bytes, same decoder, same sidecar). `allClusters` is refreshed after every run and every mutation; `reviewableClusters` is the unlabeled ones with ≥ `reviewMinimumFaces` (3), biggest first. Results reach the app the same way tagging's do: the light rescan → `SidecarSyncService` → `reapplySidecarMerges` → `PeopleStore`, which needs no new read path because the core writes the `People/*` keywords and `mwg-rs` regions it already parses.
 - **FileProviderDetector** — probes URLs for file-provider non-local status + `fileContentIdentifierKey`-based content versions.
 - **FolderScanner** — iterative folder traversal returning `(rootFolder, flatPhotos, needsEnrichment, sidecarManifest, added/removed/modified URLs, failedDirectoryPaths)`. Directories whose listing throws are excluded from removal accounting — the Store carries their cached photos forward so a transient I/O error can't wipe a subtree.
 - **GalleryPaths** — single source of truth for every disk location + the bookmark key. Services take paths by injection with **no defaults**, so a missed injection fails loudly instead of writing production paths from tests. `mlCacheDatabaseURL` / `modelPacksDirectoryURL` (Application Support) belong to the Rust core — Swift only supplies the paths.
@@ -136,6 +169,7 @@ Anything that dedupes by String will disagree with anything that dedupes by id.
 - **PhotoMaterializer** — kicks off + tracks file-provider downloads; coalesces by photo id with token-checked cleanup; gates *prefetch* on `NWPathMonitor.isExpensive` when "Use Cellular Data" is off.
 - **SearchIndex** + **TagIndex** — sorted photo list (date desc, URL-path tiebreak so rescans don't shuffle), search corpus, tag → photos index, async tag aggregator.
 - **SidecarCacheStore** / **SidecarSyncService** / **SidecarRefreshService** — parsed `.xmp` cache + bulk provider fetches + BG refresh.
+- **SidecarRefreshCoalescer** — shared by `TaggingService` and `FaceService`: turns a burst of "the core wrote sidecars" callbacks into at most one rescan per `refreshInterval` (30s), and **drains rather than drops** a request that arrives during an in-flight rescan — that walk may have listed the tree before the sidecars existed, so dropping it loses the results until something else happens to scan. `lastRefreshAt` marks when a refresh actually *ran*, so a steady drip of suppressed batches cannot keep pushing the window out.
 - **SlideshowMusic** — `AVAudioEngine`-based ambient pad synthesis for the six slideshow music themes.
 - **TaggingService** — on-device tagging (Phase 1). Owns the Rust core's `TaggingSession`, finds/verifies the installed model pack, feeds it the eligible photos, and publishes `isAvailable`/`isRunning`/`progress`/`lastSummary`. Eligibility is *not* the enrichment rule restated: both exclude non-downloaded placeholders (no bytes), but enrichment reads videos' dates while tagging refuses them (no frame sampler in the core). A run is scoped to the current library root (`rootPrefix`) because the core's cache DB is one file per app keyed by absolute path and outlives any one root. **Results come back through the existing sidecar pipeline, not a new read path**: a run writes `.xmp` files the last scan never saw, so the service triggers a **light rescan** (coalesced, `refreshInterval` 30s + one at the end) → fresh sidecar manifest → `SidecarSyncService` → `reapplySidecarMerges` → tags/indexes/widget. Coalescing *defers*, never drops: a refresh requested while one is in flight is drained after it, since that walk may predate the sidecars. Pack verification is cached on the manifest's size+mtime (Settings' `.task` fires on every appearance and a full verify SHA-256s the whole ONNX); the core re-verifies at session open regardless. Progress callbacks arrive on core worker threads and hop to the main actor through a `Sendable` bridge holding only `@Sendable` closures.
 - **SlideshowVideoRenderer** — renders a memory's photo list as a crossfading MP4 (1080×1080, H.264).
@@ -155,9 +189,9 @@ Anything that dedupes by String will disagree with anything that dedupes by id.
 ### Views (`LocalGallery/Views/`)
 One type per file. Notable groupings:
 - **Viewer/** — `PhotoViewerView` (chrome + filmstrip), `PagingPhotoView` (UIPageViewController wrapper), `PhotoPageView` (one page incl. video/live/materialize states), `ZoomableImageView`, `SwipeToDismissGesture`.
-- **Collections/** — `PersonCard`, `PersonContextMenu` (shared Me/Feature/Link/Hide menu), `MemoryCardView`, `MemoryGridView`, `TagGridView`, `PeopleListView`.
+- **Collections/** — `PersonCard`, `PersonContextMenu` (shared Me/Feature/Link/Hide menu), `MemoryCardView`, `MemoryGridView`, `TagGridView`, `PeopleListView`, and the Phase 2 face review: `PeopleReviewRow` (the People-screen doorway, shown only when `faces.reviewableClusters` is non-empty) → `PeopleReviewView` (cluster grid) → `ClusterReviewView` (every face, a name field with contact/library suggestions, and "Not a Person"). Crops are `PersonThumbnailView` with the region the core returned — no new crop path, because `FaceRef` is already MWG-shaped. Merge/split are deliberately absent: proposals are computed but applying one is not implemented.
 - **PhotoChrome.swift** — pill formatting helpers + the shared `ChromePill` and `ViewerDismissButton` used by viewer and slideshow, plus the Liquid Glass adapters (`chromeGlass(in:legacyOpacity:)`, `ChromeGlassGroup`): glass on iOS 26+, the legacy translucent white fills earlier.
-- **PhotoInfoPanel.swift**, **AllPhotosView**, **FolderBrowserView**, **CollectionsView**, **PhotoGridScreen** (grid + search + selection; still the largest view), **SettingsView** (Photo Library · Cloud Storage · Sidecars · People · **On-device Tagging** — model-pack status, "Import Model Pack…" folder picker, "Tag Library Now" with progress/cancel, "Reset Tagging Data" (destructive, confirmed; clears the queue, keeps sidecars and cached embeddings), last-run summary · Stats · Diagnostics · About), **MemorySlideshowView**, **PeopleContactLinking**, **LogsView**, **EXIFFormatters** (incl. `photoCountLabel`).
+- **PhotoInfoPanel.swift**, **AllPhotosView**, **FolderBrowserView**, **CollectionsView**, **PhotoGridScreen** (grid + search + selection; still the largest view), **SettingsView** (Photo Library · Cloud Storage · Sidecars · People · **On-device Tagging** — model-pack status, "Import Model Pack…" folder picker, "Tag Library Now" with progress/cancel, "Reset Tagging Data" (destructive, confirmed; clears the queue, keeps sidecars and cached embeddings), last-run summary, plus a **faces sub-block** ("Scan Faces" with its own progress/cancel and last-run line) that is present only when the installed pack ships face models — rows rather than a section of its own, because faces come from the *same* pack. The two run buttons disable each other: the engines hold separate SQLite connections to one WAL cache file, and serialising in the UI beats teaching both to retry `SQLITE_BUSY` · Stats · Diagnostics · About), **MemorySlideshowView**, **PeopleContactLinking**, **LogsView**, **EXIFFormatters** (incl. `photoCountLabel`).
 
 ### Components (`LocalGallery/Components/`)
 `ThumbnailView` (task keyed on URL **and** cell size), `PersonThumbnailView`, `FolderGridView`, `GridLayoutConfig`, `PhotoShareKit`, `RemoteBadge`, `ScanProgressBanner` (owns the shared `ScanProgress.countText`), `SettingsToolbarButton`, `LibraryEmptyState`, `ShareSheet` / `AVPlayerLayerView`. Folder picking goes through SwiftUI `.fileImporter` (Settings); logs/redaction-key exports through `ShareLink` — `ShareSheet.present` remains only for the multi-file crash-report share.
@@ -219,7 +253,7 @@ catch-up regenerates the same ids on the matching day.
 - A `DefaultsBacked` property wrapper was considered for the hand-rolled `didSet { defaults.set(...) }` persistence pattern and rejected: the `@Observable` macro doesn't support property wrappers on observed properties. The didSet pattern is the @Observable-compatible way.
 - Stable photo/folder IDs derived from the file URL via SHA-256 (prefix-16 bytes, RFC 4122 variant + version-5 marker; namespace-less; matches localmusic) — grid doesn't flicker on rescan.
 - The BG-task handler in `AppDelegate.handleBackgroundRefresh` calls into `MemoryRefreshService` (held on the AppDelegate); the WindowGroup attaches the live Store via a `.task` modifier. Expiration handlers cancel the work and the cancellation actually propagates.
-- Tests: `LocalGalleryTests/Unit` + `Support` (fixtures, `TempDir`, `TestUserDefaults`, `TestGalleryStore`). The memory engine/coordinator suites pass an explicit UTC calendar or noon-UTC fixtures for timezone robustness.
+- Tests: `LocalGalleryTests/Unit` + `Support` (fixtures, `TempDir`, `TestUserDefaults`, `TestGalleryStore`). The memory engine/coordinator suites pass an explicit UTC calendar or noon-UTC fixtures for timezone robustness. `TaggingSessionTests`/`FaceSessionTests` drive the real FFI against the *same* committed test packs `cargo test` uses (`core/gallery-ml/tests/{testpack,facepack,fixtures}`, folder references in `project.yml`), so a simulator-vs-host drift fails rather than being fixed up in one copy — that is also why the packs are referenced in place and never duplicated into the test target.
 - iOS 26 APIs are adopted behind `if #available(iOS 26.0, *)` while the target stays 18: Liquid Glass chrome (PhotoChrome adapters), `tabBarMinimizeBehavior`, `scrollEdgeEffectStyle`, and the `BGContinuedProcessingTask` export shield. The UIKit nav/tab appearance overrides in `configureAppearance` are deliberately **not** gated — re-theming the system bars for glass is a separate design decision.
 
 ## Known follow-ups (deliberately not done yet)
@@ -229,6 +263,10 @@ catch-up regenerates the same ids on the matching day.
 - Collections navigation mixes typed `CollectionsRoute` pushes with closure-based `NavigationLink`s; unifying on typed routes would let deep links reach every screen.
 - `TagIndex` stores full `PhotoFile` copies per bucket; switching to `[String: [UUID]]` + `photoByID` would shrink it.
 - `clearAllDownloads` enumerates file-provider domains once per photo; the domain list could be fetched once per run (needs care: `NSFileProviderDomain` isn't Sendable).
+- Face **merge and split** are unimplemented: `merge_proposals` are computed and stored, but `merge(a, b)` / `split(id, faces)` do not exist in the core and nothing surfaces them in the UI.
+- Renaming an already-named person is core-side only (`FaceSession.renamePerson` / `FaceService.rename`); no UI reaches it yet, and the existing person screens still key off the `People/*` tag.
+- The face review screen shows *unlabeled* clusters only. There is no per-person "recent auto-adds" list, which the Phase 2 plan wants as the safety valve on auto-tagging.
+- Reading face clusters costs a full `FaceSession` open (both ONNX models), because that is the only route to the cluster table — so opening the People tab with a face-capable pack loads weights the user may never scan with. Off the main actor and once per launch, and skipped entirely for a tagging-only pack, but a cache-only FFI entry point would remove it.
 
 ## External
 

@@ -11,11 +11,23 @@
 //!
 //! * Phase 0 — [`core_version`], [`stable_uuid`].
 //! * Phase 1 — [`tagging`]: [`TaggingSession`] and its progress listener.
+//! * Phase 2 — [`faces`]: [`FaceSession`], its progress listener, and the
+//!   cluster-review calls (`clusters` / `cluster_faces` / `name_cluster` /
+//!   `rename_person` / `unname_cluster` / `ignore_cluster` / `recluster`).
+//!
+//! The two sessions are siblings sharing one cache file: [`support`] holds the
+//! run-thread mechanics both are built on.
 
 uniffi::setup_scaffolding!("GalleryCore");
 
+pub mod faces;
+mod support;
 pub mod tagging;
 
+pub use faces::{
+    ClusterState, ClusterSummary, FaceError, FaceFailure, FaceLibraryStats, FaceProgressListener,
+    FaceRef, FaceRunSummary, FaceSession, FaceStats, ReclusterSummary, SidecarWriteReport,
+};
 pub use tagging::{
     inspect_model_pack, ModelPackInfo, TaggingError, TaggingFailure, TaggingProgressListener,
     TaggingRunSummary, TaggingSession, TaggingStats,

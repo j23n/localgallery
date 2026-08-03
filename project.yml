@@ -210,6 +210,12 @@ targets:
       - path: core/gallery-ml/tests/testpack
         type: folder
         buildPhase: resources
+      # The face-capable (schema 2) test pack, for FaceSessionTests. Same
+      # deal: referenced in place so the simulator runs the same synthetic
+      # detector/embedder `cargo test` does. ~30 KB.
+      - path: core/gallery-ml/tests/facepack
+        type: folder
+        buildPhase: resources
       - path: core/gallery-ml/tests/fixtures
         type: folder
         buildPhase: resources

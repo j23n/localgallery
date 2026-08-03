@@ -15,6 +15,49 @@ naming a cluster in the new review UI writes sidecars; after the sidecar
 refresh the person appears in the existing People tab with a face-region
 cover crop; digiKam opened on the same tree shows the same people/regions.
 
+## Status
+
+**Done — detection through sidecar writes (the whole Rust core).**
+
+- `gallery-ml::face` — detect / align / embed / quality / cluster, plus
+  `FaceEngine` and its queue (`face_work`, `face_scans`, `faces`, `clusters`,
+  `cluster_members`, `cluster_merge_proposals`).
+- `gallery-meta::regions` + `gallery-meta::faces` — `mwg-rs:RegionInfo` read,
+  IoU merge and write; `People/*` fan-out to `digiKam:TagsList` /
+  `dc:subject` / `lr:hierarchicalSubject`; the `iptcExt:PersonInImage`
+  projection; the `phototools:CoreFacePack` / `CorePeople*` / `CoreRegions`
+  ownership sentinel. Registered in the photo-tools schema doc §1.7 and in
+  `exiftool_phototools.config`.
+- `gallery-ml::face::naming` — `name_cluster` / `rename_person` /
+  `unname_cluster` / `ignore_cluster` / `sync_sidecars`, plus the auto-tag pass
+  at the end of a run (gated on `ClusteringConfig::auto` **and**
+  `min_quality`, and switchable off via `FaceRunOptions::skip_auto_tagging`).
+- 411 workspace tests green including the exiftool oracle, covering
+  preservation of digiKam-authored regions, `MetadataReader.parseMWGRegions`
+  parity (we write digiKam's Name/Type/Area field order, not exiftool's
+  alphabetical one — see the note in `regions::append_region`), idempotence,
+  and byte-determinism across independent libraries.
+
+**Remaining.**
+
+- **FFI + Swift.** None of the surface below exists yet: no `faces_open`, no
+  `FaceSession`, no `FaceService.swift`, no People-review UI. The signatures to
+  wrap are `FaceEngine::{enqueue, run_with_options, cancel via AtomicBool,
+  clusters, cluster_faces, merge_proposals, stats, library_stats, recluster,
+  name_cluster, rename_person, unname_cluster, ignore_cluster}` and the
+  `SidecarWritePlan` / `FailedWrite` result types.
+- **Merge and split.** `merge_proposals` are computed and stored; applying one
+  (`merge(a, b)`) and `split(id, face_refs)` are not implemented.
+- **Model pack v2 in production.** The committed `tests/facepack` is
+  synthetic; shipping SCRFD-500M + w600k_mbf is a pack build, not code.
+- **Re-detection drops a naming.** `put_faces` clears `cluster_members` for a
+  re-detected photo, so a photo edited in place loses its cluster membership
+  and its sidecar keeps the old `People/*` until the face rejoins the named
+  cluster (which the auto path then writes). Retracting eagerly would be worse
+  — a transient re-detect would strip names off disk.
+- **Swift-side acceptance:** cover-crop performance with 10–100× more regions,
+  and the digiKam cross-check on a real tree.
+
 ## Non-goals
 
 - Auto-assigning names to new faces of *unreviewed* clusters — matching a
@@ -52,20 +95,30 @@ cover crop; digiKam opened on the same tree shows the same people/regions.
 Storage: `faces` / `clusters` / `cluster_members` tables (overview schema).
 All recomputable; content-hash keyed.
 
-## Sidecar writes (in `gallery-meta`)
+## Sidecar writes (in `gallery-meta`) — done
 
 On naming a cluster (and on subsequent auto-matches into named clusters):
 
 - `People/<Name>` appended to the keyword fields (never removing other
   `People/*` entries — the schema's §2.1 contract, now with the core as the
-  face-owner).
+  face-owner), plus the `iptcExt:PersonInImage` projection.
 - `XMP-mwg-rs:RegionInfo` regions: normalized center/size rects (match the
   shape `MetadataReader.parseMWGRegions` reads: name, centerX/Y,
   width/height), `Type=Face`, applied-to dimensions from the decoded image.
-  Merge with existing regions by geometric overlap (IoU > 0.5 → replace,
-  else append) so digiKam-authored regions survive.
+  Merge with existing regions by geometric overlap (IoU > 0.5 → replace if
+  ours, otherwise defer to theirs and add no duplicate) so digiKam-authored
+  regions survive.
 - Un-naming / renaming a person rewrites affected sidecars accordingly
-  (rename = keyword + region Name swap; batched, atomic per file).
+  (rename = keyword + region Name swap; atomic per file, retried on
+  `ConcurrentModification`).
+
+Ownership lives in five new photo-tools fields — `CoreFacePack`,
+`CorePeople`, `CorePeopleSubjects`, `CorePeopleHierarchical`, `CoreRegions` —
+kept separate from the tagging half's `CoreTags`/`CoreSubjects`/
+`CoreHierarchical`/`CoreModelPack` so the two passes do not retract each
+other's entries and can both reach a fixed point on the same file. Region
+claims are matched by IoU rather than by name, so a region digiKam renames is
+still recognisably ours while one digiKam *moves* quietly stops being ours.
 
 ## FFI additions
 

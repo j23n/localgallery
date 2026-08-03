@@ -76,6 +76,16 @@ pub enum MlError {
     Vfs(VfsError),
     /// The sidecar layer said no.
     Meta(MetaError),
+    /// A cluster id the caller named does not exist.
+    ///
+    /// Its own variant rather than a silent no-op: naming, renaming and
+    /// un-naming all write to disk, and "I did nothing because the cluster you
+    /// meant is gone" has to reach the UI, which is holding an id from a list
+    /// that a re-cluster pass may have rebuilt underneath it.
+    ClusterNotFound {
+        /// The id that was not found.
+        id: i64,
+    },
     /// The caller set the cancellation flag.
     Cancelled,
 }
@@ -121,6 +131,7 @@ impl fmt::Display for MlError {
             }
             MlError::Vfs(e) => write!(f, "{e}"),
             MlError::Meta(e) => write!(f, "{e}"),
+            MlError::ClusterNotFound { id } => write!(f, "no such cluster: {id}"),
             MlError::Cancelled => write!(f, "cancelled"),
         }
     }
@@ -147,7 +158,7 @@ impl MlError {
             MlError::Meta(MetaError::ConcurrentModification { .. }) => ErrorCode::SidecarConflict,
             MlError::Meta(_) => ErrorCode::SidecarWrite,
             MlError::Inference { .. } => ErrorCode::Inference,
-            MlError::Cache { .. } => ErrorCode::Cache,
+            MlError::Cache { .. } | MlError::ClusterNotFound { .. } => ErrorCode::Cache,
             MlError::Cancelled => ErrorCode::Cancelled,
             MlError::PackFileMissing { .. }
             | MlError::PackHashMismatch { .. }

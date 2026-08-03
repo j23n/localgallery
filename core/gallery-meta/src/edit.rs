@@ -198,11 +198,11 @@ pub(crate) fn find_attr_property(
 ///
 /// exiftool indents one space per nesting level, counting `rdf:RDF`'s children
 /// as level 1 regardless of whether an `x:xmpmeta` wrapper is present.
-fn child_indent(path: &[usize]) -> usize {
+pub(crate) fn child_indent(path: &[usize]) -> usize {
     path.len().max(2) - 1
 }
 
-fn indent_text(width: usize) -> String {
+pub(crate) fn indent_text(width: usize) -> String {
     format!("\n{}", " ".repeat(width))
 }
 
@@ -260,20 +260,27 @@ fn find_description_binding(
     None
 }
 
-/// Append a fresh `rdf:Description` binding `uri` to `prefix`, laid out the way
-/// exiftool lays one out. Returns its path.
-fn create_description(doc: &mut Document, root: &[usize], uri: &str, prefix: &str) -> NodePath {
+/// Append a fresh `rdf:Description` binding each `(prefix, uri)`, laid out the
+/// way exiftool lays one out. Returns its path.
+///
+/// More than one binding is needed for structured properties: an MWG-RS
+/// `Regions` block names three namespaces (`mwg-rs`, `stArea`, `stDim`), and
+/// putting them all on a Description we author keeps us out of somebody else's
+/// tag — mutating a foreign element's attributes would re-serialize its whole
+/// attribute list and churn a file we were only meant to add to.
+fn create_description(doc: &mut Document, root: &[usize], bindings: &[(&str, &str)]) -> NodePath {
     let indent = child_indent(root);
     let mut desc = Element::new("rdf:Description");
     desc.push_attr(Attr::new("rdf:about", ""));
-    desc.push_attr(Attr::new(format!("xmlns:{prefix}"), uri));
+    let mut raw = " rdf:about=''".to_string();
+    for (prefix, uri) in bindings {
+        desc.push_attr(Attr::new(format!("xmlns:{prefix}"), *uri));
+        raw.push_str(&format!("\n{} xmlns:{prefix}='{uri}'", " ".repeat(indent)));
+    }
     // exiftool puts `rdf:about` on the tag line and each xmlns on its own,
     // indented one past the element. Match it so diffs against exiftool-written
     // files stay small.
-    desc.set_attrs_raw(format!(
-        " rdf:about=''\n{} xmlns:{prefix}='{uri}'",
-        " ".repeat(indent)
-    ));
+    desc.set_attrs_raw(raw);
 
     let root_el = element_at_mut(doc, root).expect("caller located the root");
     let at = line_insert_position(root_el);
@@ -298,7 +305,7 @@ fn description_for(
     if let Some(found) = find_description_binding(doc, root, uri) {
         return found;
     }
-    let path = create_description(doc, root, uri, preferred_prefix);
+    let path = create_description(doc, root, &[(preferred_prefix, uri)]);
     (path, preferred_prefix.to_string())
 }
 
@@ -339,6 +346,63 @@ pub(crate) fn ensure_property(
     let mut path = desc_path;
     path.push(index);
     path
+}
+
+/// [`ensure_property`] for a property whose *contents* name namespaces beyond
+/// its own.
+///
+/// `bindings[0]` is the property's own namespace and supplies its prefix; the
+/// rest are bound alongside it so the struct fields underneath have prefixes to
+/// use. An existing property is reused untouched — the extra bindings are only
+/// established when this call creates the `rdf:Description`.
+pub(crate) fn ensure_struct_property(
+    doc: &mut Document,
+    root: &[usize],
+    local: &str,
+    bindings: &[(&str, &str)],
+) -> NodePath {
+    let (prefix, uri) = bindings[0];
+    if let Some(path) = find_property(doc, root, uri, local) {
+        return path;
+    }
+    let desc_path = create_description(doc, root, bindings);
+    let indent = child_indent(&desc_path);
+    let prop = Element::new(format!("{prefix}:{local}"));
+
+    let desc = element_at_mut(doc, &desc_path).expect("just created");
+    let at = line_insert_position(desc);
+    let index = insert_child_line(
+        desc,
+        at,
+        indent_text(indent),
+        Node::Element(prop),
+        indent - 1,
+    );
+    let mut path = desc_path;
+    path.push(index);
+    path
+}
+
+/// Bind `uri` to `prefix` on the nearest ancestor of `path` (inclusive) if it
+/// is not already in scope there, and return the prefix to use for it.
+///
+/// The fallback for a file that carries an `mwg-rs:Regions` block without
+/// binding `stArea` anywhere an authored child could see it. Rare enough that
+/// re-serializing that element's attribute list is an acceptable price for
+/// emitting well-formed XML.
+pub(crate) fn ensure_ns_binding(
+    doc: &mut Document,
+    path: &[usize],
+    uri: &str,
+    preferred_prefix: &str,
+) -> String {
+    if let Some(prefix) = scope_at(doc, path).prefix_for(uri) {
+        return prefix.to_string();
+    }
+    if let Some(el) = element_at_mut(doc, path) {
+        el.set_attr(format!("xmlns:{preferred_prefix}"), uri);
+    }
+    preferred_prefix.to_string()
 }
 
 /// Get (or create) the `rdf:Bag` / `rdf:Seq` inside a property.
@@ -389,6 +453,14 @@ pub(crate) fn ensure_container(doc: &mut Document, prop_path: &[usize], kind: &s
 /// is one, so an insert into a digiKam- or Lightroom-formatted file matches its
 /// neighbours instead of imposing exiftool's layout.
 pub(crate) fn append_li(doc: &mut Document, container_path: &[usize], value: &str) {
+    let mut li = Element::new("rdf:li");
+    li.set_text(value);
+    append_li_element(doc, container_path, li);
+}
+
+/// [`append_li`] for an `<rdf:li>` the caller has already built — a region
+/// entry, say, whose children are a whole struct rather than one text node.
+pub(crate) fn append_li_element(doc: &mut Document, container_path: &[usize], li: Element) {
     let indent = child_indent(container_path);
     let scope = scope_at(doc, container_path);
     let container = element_at_mut(doc, container_path).expect("caller located the container");
@@ -405,9 +477,6 @@ pub(crate) fn append_li(doc: &mut Document, container_path: &[usize], value: &st
         })
         .unwrap_or_else(|| indent_text(indent));
 
-    let mut li = Element::new("rdf:li");
-    li.set_text(value);
-
     let at = match last_li {
         Some(i) => i + 1,
         None => line_insert_position(container),
@@ -422,6 +491,19 @@ pub(crate) fn remove_lis(
     container_path: &[usize],
     should_remove: &dyn Fn(&str) -> bool,
 ) {
+    remove_li_elements(doc, container_path, &|el, _| should_remove(&el.text()));
+}
+
+/// [`remove_lis`] with the whole element in hand.
+///
+/// A region entry has no text of its own — everything about it lives in child
+/// elements or attributes — so the predicate needs the element and the
+/// namespace scope it sits in.
+pub(crate) fn remove_li_elements(
+    doc: &mut Document,
+    container_path: &[usize],
+    should_remove: &dyn Fn(&Element, &NsScope) -> bool,
+) {
     let scope = scope_at(doc, container_path);
     let Some(container) = element_at_mut(doc, container_path) else {
         return;
@@ -430,7 +512,7 @@ pub(crate) fn remove_lis(
     while i < container.children.len() {
         let hit = container.children[i]
             .as_element()
-            .is_some_and(|e| is_li(e, &scope) && should_remove(&e.text()));
+            .is_some_and(|e| is_li(e, &scope) && should_remove(e, &scope));
         if !hit {
             i += 1;
             continue;
@@ -441,6 +523,44 @@ pub(crate) fn remove_lis(
             i -= 1;
         }
     }
+}
+
+/// Append `el` as a new child *line* of the element at `path`, indented for its
+/// depth. Returns the new element's path.
+pub(crate) fn append_child_element(doc: &mut Document, path: &[usize], el: Element) -> NodePath {
+    let indent = child_indent(path);
+    let Some(parent) = element_at_mut(doc, path) else {
+        return path.to_vec();
+    };
+    let at = line_insert_position(parent);
+    let index = insert_child_line(
+        parent,
+        at,
+        indent_text(indent),
+        Node::Element(el),
+        indent - 1,
+    );
+    let mut child = path.to_vec();
+    child.push(index);
+    child
+}
+
+/// Index of the first child element of `path` matching `uri`/`local`.
+pub(crate) fn child_property(
+    doc: &Document,
+    path: &[usize],
+    uri: &str,
+    local: &str,
+) -> Option<NodePath> {
+    let scope = scope_at(doc, path);
+    let el = element_at(doc, path)?;
+    let index = el.children.iter().position(|n| {
+        n.as_element()
+            .is_some_and(|c| scope.extended(c).matches(c, uri, local))
+    })?;
+    let mut out = path.to_vec();
+    out.push(index);
+    Some(out)
 }
 
 /// Remove the element at `path`, taking the indentation in front of it along.

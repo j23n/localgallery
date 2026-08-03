@@ -83,6 +83,16 @@ pub trait FaceProgress: Send + Sync {
     /// nothing, so the app's downstream refresh is not woken for a no-op.
     fn on_photos_with_faces(&self, paths: &[String]);
 
+    /// Photos whose sidecar the auto-tag pass rewrote, once, at the end of the
+    /// run.
+    ///
+    /// Separate from [`FaceProgress::on_photos_with_faces`] because they answer
+    /// different questions: that one means "the cache changed", this one means
+    /// "a file on disk changed", and only the second obliges the app to re-read
+    /// sidecars. Defaulted to nothing so a listener that does not care about
+    /// disk writes need not implement it.
+    fn on_sidecars_written(&self, _paths: &[String]) {}
+
     /// Called exactly once, whether the run finished or was cancelled.
     fn on_finished(&self, summary: &FaceRunSummary);
 }
@@ -116,6 +126,15 @@ pub struct FaceRunSummary {
     pub faces_assigned: usize,
     /// Clusters that pass created.
     pub clusters_created: usize,
+    /// Faces that joined an already-**named** cluster and cleared the quality
+    /// floor, so their photo's sidecar was written without anybody asking.
+    pub faces_auto_tagged: usize,
+    /// Sidecars the auto-tag pass actually rewrote. Lower than
+    /// [`Self::faces_auto_tagged`] whenever a photo already said the right
+    /// thing, or held several newly-matched faces.
+    pub sidecars_written: usize,
+    /// Sidecars the auto-tag pass could not write.
+    pub sidecars_failed: usize,
     /// Whether the run stopped early because `cancel` was set.
     pub cancelled: bool,
 }
@@ -151,6 +170,20 @@ pub struct FaceRunOptions {
     /// expected to trigger it after a large ingest, which is exactly when
     /// arrival-order artefacts have had a chance to accumulate.
     pub full_recluster: bool,
+    /// ISO 8601 UTC stamp for any sidecar the auto-tag pass writes. `None`
+    /// reads the system clock.
+    ///
+    /// Caller-supplied for the same reason
+    /// [`gallery_meta::FaceWriteRequest::tagged_at`] is: a test that wants
+    /// byte-reproducible sidecars cannot have a clock in the middle of the
+    /// pipeline.
+    pub tagged_at: Option<String>,
+    /// Skip the auto-tag pass entirely.
+    ///
+    /// It writes to files nobody asked about in this run, so there has to be a
+    /// way to turn it off — a caller running faces purely to populate the
+    /// review UI may not want disk writes at all.
+    pub skip_auto_tagging: bool,
 }
 
 /// The face orchestrator.
@@ -338,6 +371,11 @@ impl FaceEngine {
         &self.cache
     }
 
+    /// The filesystem this engine reads photos and writes sidecars through.
+    pub fn vfs(&self) -> &dyn Vfs {
+        self.vfs.as_ref()
+    }
+
     /// Process the queue with default options.
     pub fn run(
         &self,
@@ -437,9 +475,25 @@ impl FaceEngine {
         // A cancelled run still assigns what it detected: those faces are in
         // the database either way, and leaving them unclustered would show the
         // user a library with faces and no people in it.
-        let (created, assigned) = self.assign_new_faces()?;
+        let assignment = self.assign_new_faces()?;
+        let (created, assigned) = (assignment.created, assignment.assigned);
         summary.clusters_created = created;
         summary.faces_assigned = assigned;
+        summary.faces_auto_tagged = assignment.faces_auto_tagged;
+
+        // Auto-tagging comes before the (expensive, advisory) proposal refresh
+        // so that a cancelled-at-the-last-moment run has still published what
+        // it recognised. It runs even for a cancelled run for the same reason
+        // the assignment does: the faces are in the database either way, and
+        // the sidecar is the only place a match becomes visible to the app.
+        if !opts.skip_auto_tagging && !assignment.auto_hashes.is_empty() {
+            let plan = self.sync_sidecars(&assignment.auto_hashes, opts.tagged_at.as_deref())?;
+            summary.sidecars_written = plan.written.len();
+            summary.sidecars_failed = plan.failed.len();
+            if !plan.written.is_empty() {
+                progress.on_sidecars_written(&plan.written);
+            }
+        }
 
         if opts.full_recluster && !summary.cancelled {
             self.recluster()?;
@@ -611,22 +665,34 @@ impl FaceEngine {
     }
 
     /// Place every face that no cluster claims, in a fixed order.
-    ///
-    /// Returns `(clusters created, faces assigned)`.
-    fn assign_new_faces(&self) -> MlResult<(usize, usize)> {
+    fn assign_new_faces(&self) -> MlResult<AssignOutcome> {
+        let mut outcome = AssignOutcome::default();
         let pending = self.cache.unassigned_faces()?;
         if pending.is_empty() {
-            return Ok((0, 0));
+            return Ok(outcome);
         }
         let mut clusters = self.cache.clusters()?;
         let mut sums: std::collections::BTreeMap<i64, RunningSum> =
             std::collections::BTreeMap::new();
-        let mut created = 0usize;
-        let mut assigned = 0usize;
 
         for face in pending {
             match cluster::assign(&face.embedding, &clusters, &self.clustering) {
                 Assignment::Join(id) => {
+                    // A join into a *named* cluster is an auto-tag candidate:
+                    // `assign` already held it to `ClusteringConfig::auto`, the
+                    // higher of the two bars, precisely because this branch
+                    // ends in a write to somebody's photo. The quality floor is
+                    // the second gate — a blurry profile that happens to land
+                    // near a centroid stays in the cache, where a wrong guess
+                    // costs a click rather than a file.
+                    if clusters
+                        .iter()
+                        .any(|c| c.id == id && c.state == ClusterState::Named)
+                        && face.quality >= self.clustering.min_quality
+                    {
+                        outcome.auto_hashes.push(face.content_hash);
+                        outcome.faces_auto_tagged += 1;
+                    }
                     // Seed the running sum from what is on disk **before** this
                     // face joins. Reading it afterwards would count the new face
                     // once from the database and once from `add`, and pull every
@@ -650,7 +716,7 @@ impl FaceEngine {
                             row.size = size;
                         }
                     }
-                    assigned += 1;
+                    outcome.assigned += 1;
                 }
                 Assignment::Seed => {
                     let id = self.cache.create_cluster(&face.embedding)?;
@@ -667,12 +733,14 @@ impl FaceEngine {
                         state: ClusterState::Unlabeled,
                         person_name: None,
                     });
-                    created += 1;
-                    assigned += 1;
+                    outcome.created += 1;
+                    outcome.assigned += 1;
                 }
             }
         }
-        Ok((created, assigned))
+        outcome.auto_hashes.sort_unstable();
+        outcome.auto_hashes.dedup();
+        Ok(outcome)
     }
 
     /// Rebuild the partition of every unlabeled face from scratch.
@@ -746,6 +814,17 @@ impl FaceEngine {
         }
         Ok(proposals.len())
     }
+}
+
+/// What [`FaceEngine::assign_new_faces`] did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct AssignOutcome {
+    created: usize,
+    assigned: usize,
+    faces_auto_tagged: usize,
+    /// Content hashes whose photos the auto-tag pass should write, sorted and
+    /// deduplicated so a photo with three newly-matched faces is one write.
+    auto_hashes: Vec<[u8; 32]>,
 }
 
 /// A cluster's unnormalized member sum plus its member count.

@@ -64,9 +64,51 @@ pub fn root_of(tag: &str) -> &str {
     }
 }
 
-/// The root the core is forbidden to touch — digiKam owns face names
-/// (schema §2.1) and Phase 2 will take that over deliberately, not by accident.
+/// The root the *tagger* is forbidden to touch — face recognition owns it
+/// (schema §2.1). [`normalize_tag`] rejects it so Phase 1 cannot wander in by
+/// accident; the face half reaches it through [`normalize_person`], which is
+/// the deliberate door.
 pub const PEOPLE_ROOT: &str = "People";
+
+/// Normalize a person's name for the `People/<Name>` root.
+///
+/// NFC-composes, trims, and collapses internal whitespace runs. Rejects an
+/// empty name, control characters, and `/` — a slash would silently create a
+/// deeper path (`People/Alice/Smith`), which is a different tag and a different
+/// person as far as every consumer is concerned.
+///
+/// # Why this does not titlecase
+///
+/// [`normalize_tag`] titlecases every segment because taxonomy leaves come out
+/// of a model pack and their casing is the crate's to normalize. A person's
+/// name is *typed by the user*, is matched against their address book by
+/// `ContactLinker`, and has casing the user meant: `bell hooks`, `van Gogh`,
+/// `d'Arcy`. Titlecasing it in English default mode would also uppercase
+/// exactly the particles that carry meaning in other languages (§3 documents
+/// that `del` becomes `Del`). Preservation outranks tidiness here too.
+pub fn normalize_person(name: &str) -> MetaResult<String> {
+    let reject = |reason: &str| MetaError::InvalidTag {
+        tag: name.to_string(),
+        reason: reason.into(),
+    };
+    if name.chars().any(|c| c.is_control()) {
+        return Err(reject("contains control characters"));
+    }
+    if name.contains('/') {
+        return Err(reject("a person name cannot contain '/'"));
+    }
+    let composed = nfc(name);
+    let collapsed = composed.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return Err(reject("empty after normalization"));
+    }
+    Ok(collapsed)
+}
+
+/// `Alice` → `People/Alice`. The name must already be [`normalize_person`]'d.
+pub fn person_tag(name: &str) -> String {
+    format!("{PEOPLE_ROOT}/{name}")
+}
 
 /// Normalize a requested tag: NFC-compose it, trim each segment, collapse
 /// internal runs of whitespace, titlecase every segment (§3), drop empty
@@ -228,6 +270,35 @@ mod tests {
         assert!(normalize_tag("").is_err());
         assert!(normalize_tag("///").is_err());
         assert!(normalize_tag("Objects/\u{0}Dog").is_err());
+    }
+
+    #[test]
+    fn person_names_keep_the_casing_the_user_typed() {
+        assert_eq!(normalize_person("bell hooks").unwrap(), "bell hooks");
+        assert_eq!(
+            normalize_person("  Ada   Lovelace ").unwrap(),
+            "Ada Lovelace"
+        );
+        assert_eq!(
+            normalize_person("Vincent van Gogh").unwrap(),
+            "Vincent van Gogh"
+        );
+        // NFD in, NFC out — the whole crate compares one spelling (see `nfc`).
+        assert_eq!(normalize_person("Cafe\u{301}").unwrap(), "Café");
+    }
+
+    #[test]
+    fn person_names_reject_what_would_change_their_identity() {
+        for bad in ["", "   ", "Alice/Smith", "Ali\u{0}ce"] {
+            assert!(normalize_person(bad).is_err(), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn a_person_tag_lives_under_the_people_root() {
+        assert_eq!(person_tag("Alice"), "People/Alice");
+        assert_eq!(root_of(&person_tag("Alice")), PEOPLE_ROOT);
+        assert_eq!(leaf_of(&person_tag("Ada Lovelace")), "Ada Lovelace");
     }
 
     #[test]

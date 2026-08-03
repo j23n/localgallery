@@ -32,8 +32,29 @@ pub enum MetaError {
         /// Why it was rejected.
         reason: String,
     },
+    /// Somebody else wrote the sidecar between our read and our write.
+    ///
+    /// The whole write path is read-modify-write, so renaming our result into
+    /// place would discard the other writer's changes wholesale. **Retryable**:
+    /// a fresh read-modify-write on the new bytes is the correct response, and
+    /// nothing has been written when this is returned.
+    ConcurrentModification {
+        /// The sidecar that changed underneath us.
+        path: String,
+    },
     /// The underlying filesystem said no.
     Vfs(VfsError),
+}
+
+impl MetaError {
+    /// Whether re-running the same operation could succeed.
+    ///
+    /// Only [`MetaError::ConcurrentModification`] qualifies: every other
+    /// variant describes something about the input that a retry would meet
+    /// again unchanged.
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, MetaError::ConcurrentModification { .. })
+    }
 }
 
 impl From<VfsError> for MetaError {
@@ -52,6 +73,9 @@ impl fmt::Display for MetaError {
             MetaError::NotAnXmpPacket { detail } => write!(f, "not an XMP packet: {detail}"),
             MetaError::InvalidTag { tag, reason } => {
                 write!(f, "invalid tag {tag:?}: {reason}")
+            }
+            MetaError::ConcurrentModification { path } => {
+                write!(f, "sidecar changed underneath us: {path}")
             }
             MetaError::Vfs(e) => write!(f, "{e}"),
         }

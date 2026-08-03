@@ -155,7 +155,7 @@ fn a_non_square_source_is_center_cropped_not_squashed() {
             image::Rgb([0, 0, 0])
         }
     });
-    let t = tensor_from_rgb("wide", &wide, &cfg).unwrap();
+    let t = tensor_from_rgb("wide", wide, &cfg).unwrap();
     // Every pixel of the crop is inside the white band.
     assert!(
         t.data.iter().all(|v| *v > 0.99),

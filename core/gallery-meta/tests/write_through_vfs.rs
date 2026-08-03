@@ -191,3 +191,97 @@ fn a_corrupt_sidecar_is_reported_rather_than_overwritten() {
     );
     assert_eq!(vfs.read("/lib/a.jpg.xmp").unwrap(), b"<html>not xmp</html>");
 }
+
+#[test]
+fn a_truncated_sidecar_is_refused_and_left_exactly_as_it_was() {
+    // A file cut short mid-document must not be "repaired" by closing the open
+    // elements: the rewrite would discard everything past the cut, permanently,
+    // while looking pristine. Fail the row instead.
+    let whole = fixture("phototools.jpg.xmp");
+    let cut = whole[..whole.len() / 2].to_vec();
+
+    let vfs = MemVfs::new();
+    vfs.insert("/lib/a.jpg", b"a".to_vec());
+    vfs.insert("/lib/a.jpg.xmp", cut.clone());
+
+    let err = write_tags(&vfs, "/lib/a.jpg", &request(&["Objects/Animal/Dog"])).unwrap_err();
+    assert!(
+        matches!(err, gallery_meta::MetaError::MalformedXml { .. }),
+        "{err:?}"
+    );
+    assert_eq!(
+        vfs.read("/lib/a.jpg.xmp").unwrap(),
+        cut,
+        "the file was touched"
+    );
+}
+
+/// A `MemVfs` with a third-party writer wired to fire the instant after our
+/// read returns — exactly the window a read-modify-write cannot see.
+struct RacyVfs {
+    inner: MemVfs,
+    /// Bytes to slip into `path` after the first `read`.
+    intruder: std::sync::Mutex<Option<(String, Vec<u8>)>>,
+}
+
+impl RacyVfs {
+    fn new(path: &str, bytes: Vec<u8>) -> Self {
+        RacyVfs {
+            inner: MemVfs::new(),
+            intruder: std::sync::Mutex::new(Some((path.to_string(), bytes))),
+        }
+    }
+}
+
+impl Vfs for RacyVfs {
+    fn open(&self, path: &str) -> gallery_vfs::VfsResult<Box<dyn gallery_vfs::ReadSeek + Send>> {
+        self.inner.open(path)
+    }
+    fn stat(&self, path: &str) -> gallery_vfs::VfsResult<gallery_vfs::Stat> {
+        self.inner.stat(path)
+    }
+    fn write_atomic(&self, path: &str, bytes: &[u8]) -> gallery_vfs::VfsResult<()> {
+        self.inner.write_atomic(path, bytes)
+    }
+    fn exists(&self, path: &str) -> bool {
+        self.inner.exists(path)
+    }
+    fn read(&self, path: &str) -> gallery_vfs::VfsResult<Vec<u8>> {
+        let bytes = self.inner.read(path)?;
+        if let Some((p, b)) = self.intruder.lock().unwrap().take() {
+            self.inner.insert(&p, b);
+        }
+        Ok(bytes)
+    }
+}
+
+#[test]
+fn a_write_that_lands_between_our_read_and_our_rename_is_not_discarded() {
+    // digiKam adds a face tag while a tagging run is mid-flight. Renaming our
+    // merged-from-stale-bytes result over it would delete that tag with no
+    // trace, so the write is refused and the caller retries instead.
+    let theirs = fixture("digikam.jpg.xmp");
+    let vfs = RacyVfs::new("/lib/a.jpg.xmp", theirs.clone());
+    vfs.inner.insert("/lib/a.jpg", b"a".to_vec());
+    vfs.inner
+        .insert("/lib/a.jpg.xmp", fixture("minimal.jpg.xmp"));
+
+    let err = write_tags(&vfs, "/lib/a.jpg", &request(&["Objects/Animal/Dog"])).unwrap_err();
+    assert!(
+        matches!(err, gallery_meta::MetaError::ConcurrentModification { .. }),
+        "{err:?}"
+    );
+    assert!(err.is_retryable());
+    assert_eq!(
+        vfs.inner.read("/lib/a.jpg.xmp").unwrap(),
+        theirs,
+        "the other writer's bytes were clobbered"
+    );
+
+    // The retry sees the new bytes and merges into them.
+    let outcome = write_tags(&vfs, "/lib/a.jpg", &request(&["Objects/Animal/Dog"])).unwrap();
+    assert!(outcome.written);
+    let view = read_view(&vfs.inner.read("/lib/a.jpg.xmp").unwrap()).unwrap();
+    assert_eq!(view.people_tags(), vec!["People/Alice", "People/Bob"]);
+    assert!(view.tags_list.contains(&"Objects/Animal/Dog".to_string()));
+}

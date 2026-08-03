@@ -63,6 +63,32 @@ pub trait Vfs: Send + Sync {
     /// Implementations write to a temporary file **in the same directory** as
     /// `path` and rename it into place; a rename across filesystems is not
     /// atomic, and `/tmp` is frequently a different volume.
+    ///
+    /// # Guarantees when the file already exists
+    ///
+    /// - **Permissions are preserved.** A fresh temp file would otherwise pick
+    ///   up the process umask, so replacing a 0600 sidecar would widen it.
+    /// - **Symlinks are followed, not replaced.** If `path` is a symlink the
+    ///   bytes go to the file it points at; the link survives as a link.
+    ///   Replacing it would leave the real file holding stale metadata while a
+    ///   second, divergent copy appears where nothing looks for it.
+    /// - **The rename is fsync'd**, contents first and then the containing
+    ///   directory, so a crash cannot leave the name pointing at unwritten
+    ///   blocks.
+    ///
+    /// # Known limitations (deliberately not fixed)
+    ///
+    /// - **Extended attributes are lost.** macOS quarantine flags, Finder tags
+    ///   and cloud-provider xattrs live on the *inode*, and the replacement is
+    ///   a new inode. Copying them across needs platform-specific calls
+    ///   (`listxattr`/`getxattr`/`setxattr`) that this crate does not yet make.
+    ///   Nothing in the app reads sidecar xattrs today; a Finder tag on an
+    ///   `.xmp` is the realistic casualty.
+    /// - **A crash mid-write orphans the temp file.** It is named
+    ///   `.gallery-tmp-<pid>-<n>-<nanos>`, so it is hidden and skipped by the
+    ///   scanner like any other dotfile, but nothing sweeps it afterwards.
+    ///   TODO: a startup sweep of `.gallery-tmp-*` older than an hour, once
+    ///   the core owns directory enumeration (Phase 3's `list()`).
     fn write_atomic(&self, path: &str, bytes: &[u8]) -> VfsResult<()>;
 
     /// Whether `path` exists. Never fails — a path that cannot be stat'd for

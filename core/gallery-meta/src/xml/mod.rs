@@ -60,6 +60,15 @@ mod tests {
             "<a>Rome &amp; Lazio &#xE9; &lt;b&gt;</a>",
             "<a\n  b='1'\n  c='2'>x</a>",
             "<?xml version='1.0'?><a/>",
+            // The space after DOCTYPE is mandatory, and the spacing inside is
+            // the author's; both have to come back byte for byte.
+            "<!DOCTYPE x><a/>",
+            "<!DOCTYPE  x  ><a/>",
+            "<?xml version='1.0'?>\n<!DOCTYPE xmpmeta SYSTEM 'xmp.dtd'>\n<a/>\n",
+            "<!DOCTYPE a [<!ENTITY e 'x'>]>\n<a/>",
+            // A UTF-8 BOM is not part of the XML, but it is part of the file.
+            "\u{feff}<a/>",
+            "\u{feff}<?xml version='1.0'?>\n<a>x</a>\n",
         ] {
             assert_eq!(round_trip(src), src, "round trip changed:\n{src}");
         }
@@ -108,11 +117,46 @@ mod tests {
     }
 
     #[test]
-    fn unclosed_elements_are_closed_rather_than_dropped() {
-        let doc = parse(b"<a><b>x").unwrap();
-        let a = doc.nodes[0].as_element().unwrap();
-        assert_eq!(a.name, "a");
-        assert_eq!(a.child_elements().count(), 1);
+    fn unclosed_elements_at_eof_are_a_parse_error() {
+        // Auto-closing would let a truncated file parse clean and then be
+        // rewritten in its amputated form — a permanent, silent loss.
+        let err = parse(b"<a><b>x").unwrap_err();
+        assert!(
+            matches!(err, crate::error::MetaError::MalformedXml { .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_sidecar_truncated_mid_document_is_refused() {
+        let whole = "<?xpacket begin='' id='W5M0Mp'?>\n<x:xmpmeta xmlns:x='adobe:ns:meta/'>\n <rdf:RDF xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'>\n  <rdf:Description rdf:about=''/>\n </rdf:RDF>\n</x:xmpmeta>\n<?xpacket end='w'?>\n";
+        assert!(parse(whole.as_bytes()).is_ok());
+        let cut = &whole[..whole.find("</rdf:RDF>").unwrap()];
+        let err = parse(cut.as_bytes()).unwrap_err();
+        assert!(
+            matches!(err, crate::error::MetaError::MalformedXml { .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn pathologically_deep_nesting_is_refused_instead_of_overflowing_the_stack() {
+        // 20k levels is 140 KB of `<a>`. Every walk over the tree is recursive
+        // — including the derived Drop — so without a cap this aborts the
+        // process rather than failing the row.
+        let depth = 20_000;
+        let mut src = String::with_capacity(depth * 8);
+        src.push_str(&"<a>".repeat(depth));
+        src.push_str(&"</a>".repeat(depth));
+        let err = parse(src.as_bytes()).unwrap_err();
+        assert!(
+            matches!(err, crate::error::MetaError::MalformedXml { .. }),
+            "{err:?}"
+        );
+
+        // Real XMP nests about ten deep; that must keep working.
+        let ok = format!("{}{}", "<a>".repeat(20), "</a>".repeat(20));
+        assert!(parse(ok.as_bytes()).is_ok());
     }
 
     #[test]

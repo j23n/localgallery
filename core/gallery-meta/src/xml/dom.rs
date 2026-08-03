@@ -171,6 +171,14 @@ impl Element {
         }
     }
 
+    /// Remove the attribute with this exact qualified name, returning its
+    /// value. Drops the verbatim attribute source.
+    pub fn remove_attr(&mut self, name: &str) -> Option<String> {
+        let index = self.attrs.iter().position(|a| a.name == name)?;
+        self.attrs_raw = None;
+        Some(self.attrs.remove(index).value)
+    }
+
     /// Append an attribute without checking for duplicates. Parser/authoring
     /// helper.
     pub fn push_attr(&mut self, attr: Attr) {

@@ -19,11 +19,13 @@ import os
 /// the tree (reusing cached `PhotoFile`s, so it costs one stat per file and no
 /// EXIF), emits a fresh sidecar manifest that includes the new `.xmp` files,
 /// and `performScan` then hands that manifest to `SidecarSyncService` →
-/// `onFinished` → `reapplySidecarMerges()` → tags/indexes/widget. See
-/// `refreshTaggedPhotos()`.
+/// `onFinished` → `reapplySidecarMerges()` → tags/indexes/widget.
 ///
 /// Rescans are coalesced (`refreshInterval`) so a 20k-photo run doesn't kick
-/// off a tree walk every 32 photos.
+/// off a tree walk every 32 photos. Coalescing **defers** a refresh, it never
+/// drops one: a request that arrives while a rescan is in flight is remembered
+/// and drained after it (see `scheduleRefresh`), because that in-flight walk
+/// may have listed the tree before the sidecars in question existed.
 @Observable
 @MainActor
 final class TaggingService {
@@ -39,9 +41,11 @@ final class TaggingService {
         var fraction: Double { total > 0 ? Double(done) / Double(total) : 0 }
     }
 
-    /// What a finished run did. A Sendable mirror of the FFI's
-    /// `TaggingRunSummary` — the generated record isn't `Sendable`, and this
-    /// value crosses from a core worker thread to the main actor.
+    /// What a finished run did.
+    ///
+    /// A small app-facing restatement of the FFI's `TaggingRunSummary` (which
+    /// is itself `Sendable`): this one carries `TaggingServiceError` rather
+    /// than `TaggingFailure`, so Settings has a single error type to render.
     struct Summary: Equatable, Sendable {
         var processed = 0
         var tagged = 0
@@ -58,6 +62,22 @@ final class TaggingService {
         var version: String
         var labelCount: Int
         var directory: URL
+    }
+
+    /// Cheap identity of an installed pack: where it is, plus its manifest's
+    /// size and mtime.
+    ///
+    /// Full verification SHA-256s the whole ONNX — 40–150 MB for a real pack,
+    /// seconds of work — and Settings' `.task` fires on *every* appearance of
+    /// the screen. A pack directory is immutable in practice (import replaces
+    /// it wholesale), so a matching fingerprint means the bytes already
+    /// verified are still the bytes on disk. The real guarantee is untouched
+    /// either way: the core re-verifies every declared hash at session open,
+    /// so nothing is ever *used* unverified.
+    private struct PackFingerprint: Equatable {
+        var directory: URL
+        var manifestSize: Int
+        var manifestModified: Date
     }
 
     // MARK: - Observed state
@@ -84,6 +104,13 @@ final class TaggingService {
     /// Supplies the photos a run should consider. Set by `GalleryStore` so the
     /// service never holds a reference back to the Store.
     @ObservationIgnored var eligiblePhotos: (@MainActor () -> [PhotoFile])?
+    /// The library root a run is confined to.
+    ///
+    /// The core's cache DB is one file per app, keyed by absolute path, so it
+    /// outlives any one library root. Without this a run would pick up rows
+    /// enqueued under a folder the user has since switched away from and write
+    /// sidecars outside the library on screen.
+    @ObservationIgnored var libraryRoot: (@MainActor () -> URL?)?
     /// Called when freshly written sidecars need to be pulled into the app.
     /// `GalleryStore` wires this to a light rescan.
     @ObservationIgnored var onSidecarsWritten: (@MainActor () async -> Void)?
@@ -91,8 +118,19 @@ final class TaggingService {
     /// Open session. Held across runs: it owns the ONNX sessions and the
     /// SQLite connection, both of which are expensive to build.
     @ObservationIgnored private var session: TaggingSession?
-    @ObservationIgnored private var lastRefreshAt: Date?
-    @ObservationIgnored private var refreshTask: Task<Void, Never>?
+    /// Which pack `session` was opened against, so a pack change reopens it
+    /// instead of quietly tagging under the old one.
+    @ObservationIgnored private var sessionPackDirectory: URL?
+    /// When a refresh last actually ran. Internal so `TaggingServiceTests`
+    /// can assert that a *suppressed* batch does not move it.
+    @ObservationIgnored private(set) var lastRefreshAt: Date?
+    @ObservationIgnored private(set) var refreshTask: Task<Void, Never>?
+    /// A refresh asked for while one was already in flight. Drained by
+    /// `scheduleRefresh`'s loop rather than dropped.
+    @ObservationIgnored private var refreshPending = false
+    /// `cancel()` arrived before the core had a run to cancel.
+    @ObservationIgnored private var cancelRequested = false
+    @ObservationIgnored private var verifiedPack: PackFingerprint?
 
     init(cacheDatabaseURL: URL, modelPacksDirectory: URL) {
         self.cacheDatabaseURL = cacheDatabaseURL
@@ -101,20 +139,29 @@ final class TaggingService {
 
     // MARK: - Model pack
 
-    /// Look for an installed pack and verify it. Safe to call repeatedly; the
-    /// hash verification is the same one the core does at session open, so a
-    /// pack that passes here will not fail later for a different reason.
-    func refreshAvailability() async {
+    /// Look for an installed pack and verify it.
+    ///
+    /// Safe (and cheap) to call repeatedly: a pack whose manifest has not
+    /// changed since the last successful verification is taken at its word
+    /// rather than re-hashed. Pass `force` to re-verify regardless.
+    func refreshAvailability(force: Bool = false) async {
         defer { hasCheckedForPack = true }
         guard let dir = Self.newestPackDirectory(in: modelPacksDirectory) else {
             pack = nil
+            verifiedPack = nil
+            return
+        }
+        let fingerprint = Self.fingerprint(of: dir)
+        if !force, pack != nil, let verifiedPack, let fingerprint, verifiedPack == fingerprint {
             return
         }
         do {
             pack = try await Self.inspect(dir)
+            verifiedPack = fingerprint
             Log.ml.info("Model pack \(self.pack?.version ?? "?") ready (\(self.pack?.labelCount ?? 0) labels)")
         } catch {
             pack = nil
+            verifiedPack = nil
             lastError = TaggingServiceError(error)
             Log.ml.error("Model pack at \(Log.r.path(dir)) rejected: \(Log.r.error(error))")
         }
@@ -132,7 +179,8 @@ final class TaggingService {
 
         // Tear the session down first — it holds the old pack's files open,
         // and a replaced pack must not keep tagging under the old version.
-        session = nil
+        // Off the main actor: releasing a session joins the core's run thread.
+        await releaseSession()
 
         let destination = modelPacksDirectory
             .appendingPathComponent(source.lastPathComponent, isDirectory: true)
@@ -150,8 +198,10 @@ final class TaggingService {
             return
         }
 
+        verifiedPack = nil
         do {
             pack = try await Self.inspect(destination)
+            verifiedPack = Self.fingerprint(of: destination)
             lastError = nil
             hasCheckedForPack = true
             Log.ml.info("Imported model pack \(self.pack?.version ?? "?")")
@@ -164,12 +214,14 @@ final class TaggingService {
         }
     }
 
-    /// Newest (by name, descending) subdirectory that looks like a pack.
+    /// Newest (by version-aware name, descending) subdirectory that looks like
+    /// a pack.
     ///
     /// Name order rather than mtime: pack directories are named for their
     /// version, and a copy's mtime says when it was installed, not which
-    /// version it is.
-    private nonisolated static func newestPackDirectory(in root: URL) -> URL? {
+    /// version it is. `.numeric` because plain lexicographic ordering ranks
+    /// `…-1.9` above `…-1.10`.
+    nonisolated static func newestPackDirectory(in root: URL) -> URL? {
         let entries = (try? FileManager.default.contentsOfDirectory(
             at: root,
             includingPropertiesForKeys: [.isDirectoryKey],
@@ -182,15 +234,31 @@ final class TaggingService {
                         atPath: url.appendingPathComponent("manifest.json").path
                     )
             }
-            .sorted { $0.lastPathComponent > $1.lastPathComponent }
+            .sorted { a, b in
+                a.lastPathComponent.compare(b.lastPathComponent, options: [.numeric])
+                    == .orderedDescending
+            }
             .first
+    }
+
+    /// Size + mtime of `dir/manifest.json`, or `nil` when it cannot be read
+    /// (in which case nothing is cached and the next check re-verifies).
+    private nonisolated static func fingerprint(of dir: URL) -> PackFingerprint? {
+        let manifest = dir.appendingPathComponent("manifest.json")
+        guard
+            let values = try? manifest.resourceValues(
+                forKeys: [.fileSizeKey, .contentModificationDateKey]
+            ),
+            let size = values.fileSize,
+            let modified = values.contentModificationDate
+        else { return nil }
+        return PackFingerprint(directory: dir, manifestSize: size, manifestModified: modified)
     }
 
     /// SHA-256-verify a pack directory off the main actor.
     private nonisolated static func inspect(_ dir: URL) async throws -> PackStatus {
         // `Task.detached`: verification reads (and hashes) the whole ONNX file
-        // — tens of MB for a real pack. `PackStatus` is Sendable; the FFI's
-        // `ModelPackInfo` is not, so the conversion happens inside.
+        // — tens of MB for a real pack.
         let result = await Task.detached(priority: .userInitiated) { () -> Result<PackStatus, TaggingServiceError> in
             do {
                 let info = try inspectModelPack(modelPackDir: dir.path)
@@ -210,17 +278,23 @@ final class TaggingService {
 
     /// Enqueue every eligible photo and start a run.
     ///
-    /// No-op when a run is already in flight or no pack is installed.
+    /// No-op when a run is already in flight.
     func startTagging() async {
-        guard !isRunning, let pack else { return }
+        guard !isRunning else { return }
+        guard let pack else {
+            lastError = .noModelPack
+            return
+        }
         let photos = (eligiblePhotos?() ?? []).filter(Self.isEligible)
         guard !photos.isEmpty else {
             lastSummary = Summary()
             return
         }
         let paths = photos.map(\.url.standardizedFileURL.path)
+        let rootPrefix = libraryRoot?()?.standardizedFileURL.path
 
         isRunning = true
+        cancelRequested = false
         progress = Progress(done: 0, total: paths.count)
         lastError = nil
 
@@ -246,6 +320,20 @@ final class TaggingService {
             return
         }
 
+        // Opening the session and enqueueing a 20k-photo library both take
+        // long enough for the user to reach Cancel, and until `start` there is
+        // no run for `session.cancel()` to reach — the core clears its own
+        // cancel flag inside `start` anyway. So the request is honoured here,
+        // by not starting.
+        if cancelRequested {
+            cancelRequested = false
+            isRunning = false
+            progress = nil
+            lastSummary = Summary(cancelled: true)
+            Log.ml.info("Tagging cancelled before the run started")
+            return
+        }
+
         let bridge = ProgressBridge(
             progress: { [weak self] done, total in
                 Task { @MainActor [weak self] in
@@ -265,7 +353,7 @@ final class TaggingService {
         )
 
         do {
-            try session.start(progress: bridge)
+            try session.start(progress: bridge, rootPrefix: rootPrefix)
         } catch {
             isRunning = false
             progress = nil
@@ -275,33 +363,61 @@ final class TaggingService {
     }
 
     /// Ask the core to stop. `onFinished` still fires, with `cancelled` set.
+    ///
+    /// Also covers the window before the run exists — see `startTagging`.
     func cancel() {
+        guard isRunning else { return }
+        cancelRequested = true
         session?.cancel()
     }
 
-    /// Drop every queue row so the next run re-tags the library. Cached
-    /// embeddings survive, so a re-tag after a threshold change is cheap.
-    func resetQueue() {
+    /// Drop every queue row so the next run re-tags the library, and forget
+    /// the last run's summary.
+    ///
+    /// Cached embeddings survive, so a re-tag after a threshold change is
+    /// cheap. This is the recovery action for a queue that has got itself
+    /// stuck: rows failed out of their retry budget, or paths belonging to a
+    /// library root the user has moved away from.
+    ///
+    /// Opens the session if one isn't already open — the recovery case is
+    /// precisely the one where the user has not started a run this launch.
+    func resetQueue() async {
         guard !isRunning else { return }
+        guard let pack else {
+            lastError = .noModelPack
+            return
+        }
         do {
-            try session?.resetQueue()
+            let session = try await openSession(packDirectory: pack.directory)
+            try session.resetQueue()
+            lastSummary = nil
+            lastError = nil
+            Log.ml.info("Tagging queue reset")
         } catch {
             lastError = TaggingServiceError(error)
+            Log.ml.error("Tagging queue reset failed: \(Log.r.error(error))")
         }
     }
 
-    private func noteSidecarsWritten(_ count: Int) {
+    /// One `onPhotosTagged` batch from the core. Internal rather than private
+    /// so `TaggingServiceTests` can drive the coalescing rules without having
+    /// to stage a whole run.
+    func noteSidecarsWritten(_ count: Int) {
         Log.ml.debug("\(count) sidecars written")
-        let now = Date()
-        if let last = lastRefreshAt, now.timeIntervalSince(last) < Self.refreshInterval {
+        if let last = lastRefreshAt, Date().timeIntervalSince(last) < Self.refreshInterval {
+            // Deliberately coalesced: a 20k-photo run must not walk the tree
+            // every 32 photos. Nothing is lost — `finish` refreshes
+            // unconditionally at the end of the run. `lastRefreshAt` is
+            // *not* advanced here: it marks when a refresh actually ran, so a
+            // suppressed batch cannot keep pushing the window out.
             return
         }
-        lastRefreshAt = now
         scheduleRefresh()
     }
 
     private func finish(_ summary: Summary) async {
         isRunning = false
+        cancelRequested = false
         progress = nil
         lastSummary = summary
         if let failure = summary.failure {
@@ -314,18 +430,34 @@ final class TaggingService {
         }
         // Always refresh on finish, even when nothing was written this batch —
         // an earlier batch's rescan may have been coalesced away.
-        lastRefreshAt = Date()
         scheduleRefresh()
         await refreshTask?.value
     }
 
-    /// Coalesce refreshes: a rescan already in flight is left to finish rather
-    /// than queued behind another one.
-    private func scheduleRefresh() {
-        guard refreshTask == nil else { return }
+    /// Run one refresh, plus one more for every request that arrived while it
+    /// was in flight.
+    ///
+    /// The obvious `guard refreshTask == nil else { return }` drops those
+    /// requests, and dropping them loses tags: the in-flight rescan may have
+    /// walked the tree *before* the sidecars that prompted the new request
+    /// existed, so its manifest cannot contain them and no later trigger would
+    /// look again. Draining costs at most one extra tree walk per burst, and
+    /// `refreshInterval` still bounds how often a burst can start one.
+    /// Internal so tests can drive it directly; the end-of-run refresh in
+    /// `finish` takes this same unconditional path.
+    func scheduleRefresh() {
+        lastRefreshAt = Date()
+        guard refreshTask == nil else {
+            refreshPending = true
+            return
+        }
         refreshTask = Task { @MainActor [weak self] in
-            await self?.onSidecarsWritten?()
-            self?.refreshTask = nil
+            guard let self else { return }
+            repeat {
+                self.refreshPending = false
+                await self.onSidecarsWritten?()
+            } while self.refreshPending
+            self.refreshTask = nil
         }
     }
 
@@ -333,10 +465,12 @@ final class TaggingService {
 
     /// The photos a run should consider.
     ///
-    /// Mirrors the enrichment rule — a file-provider placeholder has no bytes
-    /// to hash, decode, or write a sidecar next to, and asking the core to try
-    /// would burn a retry per photo. Videos are out of scope for v1 (the core
-    /// has no frame sampler on iOS).
+    /// Mirrors the enrichment rule on placeholders — a file-provider
+    /// placeholder has no bytes to hash, decode, or write a sidecar next to,
+    /// and asking the core to try would burn a retry per photo. It *diverges*
+    /// from enrichment on videos: enrichment reads a video's creation date
+    /// happily, but the core has no frame sampler on iOS, so videos are out of
+    /// scope for v1.
     nonisolated static func isEligible(_ photo: PhotoFile) -> Bool {
         guard !photo.isVideo else { return false }
         if case .remote(downloaded: false) = photo.locality { return false }
@@ -346,7 +480,12 @@ final class TaggingService {
     // MARK: - Off-actor plumbing
 
     private func openSession(packDirectory: URL) async throws -> TaggingSession {
-        if let session { return session }
+        if let session, sessionPackDirectory == packDirectory { return session }
+        // A different pack than the open session's: that session holds the old
+        // pack's ONNX weights and stamps its version into every sidecar, so
+        // reusing it would tag under a pack the user has replaced.
+        if session != nil { await releaseSession() }
+
         let cacheURL = cacheDatabaseURL
         try FileManager.default.createDirectory(
             at: cacheURL.deletingLastPathComponent(),
@@ -364,7 +503,34 @@ final class TaggingService {
             }
         }.value.get()
         session = opened
+        sessionPackDirectory = packDirectory
         return opened
+    }
+
+    /// Stop any in-flight run and release the session without blocking the
+    /// main actor.
+    ///
+    /// The core's `TaggingSession` joins its run thread on `Drop`, and that
+    /// thread can be a whole inference away from noticing. Dropping the last
+    /// reference from a `@MainActor` method therefore freezes the UI for as
+    /// long as one photo takes. Instead: cancel, wait for the core's own
+    /// `isRunning` to clear **off** the actor, and only then let go — by which
+    /// point the join is instant.
+    private func releaseSession() async {
+        guard let session else { return }
+        session.cancel()
+        await Task.detached(priority: .userInitiated) {
+            // Cancellation is checked per item and once per 256 KiB of a
+            // content hash, so this settles in well under a second.
+            while session.isRunning() {
+                try? await Task.sleep(for: .milliseconds(20))
+            }
+        }.value
+        self.session = nil
+        self.sessionPackDirectory = nil
+        isRunning = false
+        cancelRequested = false
+        progress = nil
     }
 
     private nonisolated static func enqueue(
@@ -430,10 +596,10 @@ private final class ProgressBridge: TaggingProgressListener, Sendable {
 
 /// App-facing tagging failure.
 ///
-/// A `Sendable` restatement of the FFI's `TaggingError` (the generated enum
-/// isn't `Sendable`, and these values cross from core threads to the main
-/// actor). The detail strings are for logs and the Settings error line; the
-/// *case* is what code switches on.
+/// A flattening of the FFI's `TaggingError` down to the cases the UI
+/// distinguishes, plus `noModelPack`, which only this layer can detect. The
+/// detail strings are for logs and the Settings error line; the *case* is what
+/// code switches on.
 enum TaggingServiceError: Error, Sendable, Equatable {
     case noModelPack
     case pack(String)
@@ -445,6 +611,14 @@ enum TaggingServiceError: Error, Sendable, Equatable {
     case cancelled
 
     init(_ error: any Error) {
+        // Already classified. The off-actor helpers hand back
+        // `Result<_, TaggingServiceError>` and their callers re-wrap whatever
+        // `get()` throws, so without this a pack error arrives at Settings as
+        // "File error: The operation couldn't be completed."
+        if let classified = error as? TaggingServiceError {
+            self = classified
+            return
+        }
         guard let e = error as? TaggingError else {
             self = .io(error.localizedDescription)
             return

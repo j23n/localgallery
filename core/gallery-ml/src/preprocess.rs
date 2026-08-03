@@ -56,9 +56,25 @@ pub const PREPROCESS_VERSION: u32 = 1;
 
 /// A decoded image is refused past this many pixels.
 ///
-/// 200 MP is comfortably above any camera and any panorama, and well below the
-/// point where a malformed header can talk us into a multi-gigabyte allocation.
-const MAX_PIXELS: u64 = 200_000_000;
+/// 120 MP is comfortably above any phone camera and any stitched panorama a
+/// phone produces, and well below the point where a malformed header can talk
+/// us into a multi-gigabyte allocation. Four workers each holding a 120 MP RGB
+/// buffer is already 1.4 GB, which is why this is not larger.
+const MAX_PIXELS: u64 = 120_000_000;
+
+/// The *resize destination* is refused past this many pixels.
+///
+/// [`MAX_PIXELS`] bounds the decoded source, and that is not enough on its own:
+/// [`shortest_side_to`] scales the **long** side by `n / min(w, h)`, so an
+/// extreme aspect ratio explodes the destination even though the source is
+/// tiny. A 257-byte 3000×3 PNG decodes to 9 000 pixels and would resize to
+/// 224 000×224 — 0.15 GB — and a 65535×2 header asks for 4.9 GB. Both are
+/// rejected here as [`ErrorCode::BadImage`], so the photo is *failed*, not the
+/// process.
+///
+/// 16 MP of destination allows an aspect ratio of roughly 320:1 at a 224 px
+/// input, which no photograph reaches and no panorama needs.
+const MAX_RESIZE_PIXELS: u64 = 16_000_000;
 
 /// The image formats v1 decodes.
 ///
@@ -229,8 +245,7 @@ pub fn preprocess(path: &str, bytes: &[u8], cfg: &PreprocessConfig) -> MlResult<
     }
 
     let oriented = apply_orientation(decoded, read_exif_orientation(bytes));
-    let rgb = oriented.into_rgb8();
-    tensor_from_rgb(path, &rgb, cfg)
+    tensor_from_rgb(path, oriented.into_rgb8(), cfg)
 }
 
 /// The EXIF `Orientation` value (1–8), or `None` when absent/unreadable.
@@ -257,8 +272,10 @@ fn apply_orientation(mut img: DynamicImage, exif_orientation: Option<u8>) -> Dyn
 /// Resize + center-crop + normalize an already-oriented RGB image.
 ///
 /// Split out from [`preprocess`] so tests can drive the geometry without
-/// producing an encoded fixture for every case.
-pub fn tensor_from_rgb(path: &str, rgb: &RgbImage, cfg: &PreprocessConfig) -> MlResult<Tensor> {
+/// producing an encoded fixture for every case. Takes the image **by value**:
+/// `fast_image_resize` wants an owned buffer, and cloning one first doubled the
+/// peak resident bytes of every decode for nothing.
+pub fn tensor_from_rgb(path: &str, rgb: RgbImage, cfg: &PreprocessConfig) -> MlResult<Tensor> {
     let n = cfg.input_size;
     if n == 0 {
         return Err(MlError::PackInvalid {
@@ -269,7 +286,17 @@ pub fn tensor_from_rgb(path: &str, rgb: &RgbImage, cfg: &PreprocessConfig) -> Ml
     let (w, h) = (rgb.width(), rgb.height());
     let (rw, rh) = shortest_side_to(w, h, n);
 
-    let src = FirImage::from_vec_u8(w, h, rgb.as_raw().clone(), PixelType::U8x3).map_err(|e| {
+    // The destination, not the source, is the allocation an absurd aspect ratio
+    // blows up. See [`MAX_RESIZE_PIXELS`].
+    if u64::from(rw) * u64::from(rh) > MAX_RESIZE_PIXELS {
+        return Err(MlError::Preprocess {
+            path: path.to_string(),
+            code: ErrorCode::BadImage,
+            detail: format!("{w}×{h} would resize to {rw}×{rh}, past the destination cap"),
+        });
+    }
+
+    let src = FirImage::from_vec_u8(w, h, rgb.into_raw(), PixelType::U8x3).map_err(|e| {
         MlError::Preprocess {
             path: path.to_string(),
             code: ErrorCode::BadImage,
@@ -388,7 +415,7 @@ mod tests {
             std: [0.5, 0.5, 0.5],
             filter: ResizeFilter::Bilinear,
         };
-        let t = tensor_from_rgb("x", &solid(16, 16, [255, 0, 128]), &cfg).unwrap();
+        let t = tensor_from_rgb("x", solid(16, 16, [255, 0, 128]), &cfg).unwrap();
         assert_eq!(t.shape, [1, 3, 4, 4]);
         assert_eq!(t.data.len(), 48);
         // (1.0 - 0.5) / 0.5 == 1.0 for the saturated red channel.
@@ -406,7 +433,7 @@ mod tests {
             std: [1.0, 1.0, 1.0],
             filter: ResizeFilter::Box,
         };
-        let t = tensor_from_rgb("x", &solid(8, 8, [255, 0, 0]), &cfg).unwrap();
+        let t = tensor_from_rgb("x", solid(8, 8, [255, 0, 0]), &cfg).unwrap();
         // Plane 0 all 1.0, planes 1 and 2 all 0.0.
         assert!(t.data[0..4].iter().all(|v| (*v - 1.0).abs() < 1e-5));
         assert!(t.data[4..12].iter().all(|v| v.abs() < 1e-5));
@@ -425,6 +452,42 @@ mod tests {
             ),
             "{err:?}"
         );
+    }
+
+    /// A decode bomb: a handful of bytes on disk, a source well inside
+    /// [`MAX_PIXELS`], and a resize destination that would allocate gigabytes.
+    #[test]
+    fn an_absurd_aspect_ratio_is_refused_rather_than_allocated() {
+        // 3000×3 is 9 000 source pixels — 257 bytes as a PNG — but the shortest
+        // side is 3, so scaling it to 224 asks for 224 000×224 ≈ 0.15 GB.
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgb8(solid(3000, 3, [1, 2, 3]))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        assert!(png.len() < 4096, "fixture is {} bytes", png.len());
+
+        let err = preprocess("/a/bomb.png", &png, &PreprocessConfig::default()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                MlError::Preprocess {
+                    code: ErrorCode::BadImage,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_wide_but_sane_panorama_still_passes() {
+        // 20 000×2 000 is a real stitched panorama: 4 480×224 out, well inside
+        // the cap. The bomb guard must not take this with it.
+        let cfg = PreprocessConfig {
+            input_size: 8,
+            ..PreprocessConfig::default()
+        };
+        assert!(tensor_from_rgb("pan", solid(2000, 200, [9, 9, 9]), &cfg).is_ok());
     }
 
     #[test]

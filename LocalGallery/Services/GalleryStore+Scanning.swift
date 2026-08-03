@@ -64,7 +64,17 @@ extension GalleryStore {
 
     // MARK: - Folder Scanning (Iterative)
 
-    func scanFolder(at url: URL, kind: ScanKind = .full, silent: Bool = false) async {
+    /// - Parameter requestedAt: when the *original* request was made. Set only
+    ///   by the recursive re-run below, so a request that has to wait out an
+    ///   in-flight pass keeps its own timestamp instead of gaining a fresh one
+    ///   on every hop — which is what makes the recursion terminate.
+    func scanFolder(
+        at url: URL,
+        kind: ScanKind = .full,
+        silent: Bool = false,
+        requestedAt: Date? = nil
+    ) async {
+        let requestedAt = requestedAt ?? clock.now()
         let resolved = resolvedScanKind(for: kind, now: clock.now())
         if let active = activeScanTask {
             if active.url == url {
@@ -73,12 +83,32 @@ extension GalleryStore {
                 // finished entry ourselves so the re-run below can't loop on
                 // a stale `activeScanTask`.
                 if activeScanTask?.task == active.task { activeScanTask = nil }
-                // A `.full` request must not be silently downgraded by an
-                // in-flight light scan — "Reload Library" during a foreground
-                // auto-scan would otherwise no-op. Re-run with the stronger
-                // kind once the in-flight pass settles.
-                if resolved == .full && active.kind != .full {
-                    await scanFolder(at: url, kind: .full, silent: silent)
+                // Two reasons a completed in-flight pass may not satisfy this
+                // request:
+                //
+                //  - It was weaker. A `.full` request must not be silently
+                //    downgraded by an in-flight light scan — "Reload Library"
+                //    during a foreground auto-scan would otherwise no-op.
+                //  - It was *earlier*. A pass that started before this request
+                //    existed may have walked the tree before the files the
+                //    request is about did: a tagging run's post-write rescan
+                //    coalesced onto a pull-to-refresh that began a second
+                //    earlier would report a manifest with none of the new
+                //    `.xmp` files in it, and nothing would look again.
+                //
+                // Either way, re-run once the in-flight pass settles. This
+                // costs at most one extra walk per request, not a storm: the
+                // re-run carries the original `requestedAt`, so the moment a
+                // pass that started after it completes, the request is done.
+                let tooWeak = resolved == .full && active.kind != .full
+                let tooEarly = active.startedAt < requestedAt
+                if tooWeak || tooEarly {
+                    await scanFolder(
+                        at: url,
+                        kind: tooWeak ? .full : kind,
+                        silent: silent,
+                        requestedAt: requestedAt
+                    )
                 }
                 return
             }
@@ -91,7 +121,7 @@ extension GalleryStore {
             guard let self else { return }
             await self.performScan(at: url, kind: resolved, silent: silent)
         }
-        activeScanTask = (url, resolved, task)
+        activeScanTask = (url, resolved, clock.now(), task)
         await task.value
         if activeScanTask?.task == task { activeScanTask = nil }
     }

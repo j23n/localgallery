@@ -279,13 +279,25 @@ impl ModelPack {
 
     /// The key embeddings are cached under.
     ///
-    /// Includes [`crate::preprocess::PREPROCESS_VERSION`] because a change to
+    /// Keyed on the **encoder's** SHA-256, not on `pack_version`. An embedding
+    /// is a function of exactly two things: the pixels (covered by the content
+    /// hash) and the weights that consumed them. `pack_version` is a function
+    /// of far more — thresholds, the label set, prompts — and keying on it made
+    /// a labels-only pack rebuild re-run inference over the entire library for
+    /// vectors it already had. Two packs that ship the same encoder now share a
+    /// cache, and one that ships a different encoder cannot collide with it.
+    ///
+    /// [`crate::preprocess::PREPROCESS_VERSION`] joins it because a change to
     /// the decode/resize path produces a different vector from the same bytes,
     /// and the content hash cannot see that.
+    ///
+    /// Note that re-*scoring* is still driven by `pack_version`, through
+    /// [`crate::CacheDb::mark_stale_for_pack`] — which is the point: a
+    /// labels-only bump re-scores every photo from cached embeddings.
     pub fn embedding_model_key(&self) -> String {
         format!(
             "{}#p{}",
-            self.manifest.pack_version,
+            self.manifest.model.sha256,
             crate::preprocess::PREPROCESS_VERSION
         )
     }

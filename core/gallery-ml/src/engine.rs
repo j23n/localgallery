@@ -132,6 +132,18 @@ pub struct RunOptions {
     /// a per-photo clock read would make two identical runs produce different
     /// bytes. `None` reads the clock once, here.
     pub tagged_at: Option<String>,
+    /// Only process queue rows under this directory.
+    ///
+    /// The cache DB outlives any one library root — it is one file per app,
+    /// keyed by absolute path — so a user who repoints the app at a different
+    /// folder leaves the previous root's rows sitting `pending`. Without this
+    /// they would be picked up by the next run and tagged, writing sidecars
+    /// outside the library the user is looking at.
+    ///
+    /// A trailing `/` is added if missing, so `/Photos` cannot match
+    /// `/PhotosOld`. `None` means "everything", which is what the crate's own
+    /// tests and CLI examples want.
+    pub root_prefix: Option<String>,
 }
 
 /// The tagging orchestrator.
@@ -251,13 +263,56 @@ impl TaggingEngine {
     }
 
     /// [`TaggingEngine::run`] with explicit knobs.
+    ///
+    /// [`TaggingProgress::on_finished`] fires **exactly once on every path**,
+    /// including the ones that return `Err` before a single worker starts. The
+    /// FFI layer turns that callback into the app's "run is over" signal, and a
+    /// path that skips it leaves the UI spinning forever.
     pub fn run_with_options(
         &self,
         progress: &dyn TaggingProgress,
         cancel: &AtomicBool,
         opts: &RunOptions,
     ) -> MlResult<RunSummary> {
-        let items = self.cache.claimable(opts.limit.unwrap_or(0))?;
+        let mut partial = RunSummary::default();
+        let result = self.run_inner(progress, cancel, opts, &mut partial);
+        let summary = match &result {
+            Ok(s) => *s,
+            // A run that failed still did work worth reporting (a panicking
+            // worker aborts one item, not the twelve before it), and a run that
+            // failed before starting reports the zeroed default.
+            Err(_) => partial,
+        };
+        progress.on_finished(&summary);
+        result
+    }
+
+    /// The body of a run. `partial` receives the totals so far, so the caller
+    /// can report them even when this returns `Err`.
+    fn run_inner(
+        &self,
+        progress: &dyn TaggingProgress,
+        cancel: &AtomicBool,
+        opts: &RunOptions,
+        partial: &mut RunSummary,
+    ) -> MlResult<RunSummary> {
+        // Between-runs housekeeping. All three used to happen only at
+        // `CacheDb::open`, or not at all — which is invisible in a test that
+        // opens a fresh engine per run and load-bearing in an app that holds
+        // one session for its whole lifetime.
+        //
+        // 1. Rows a killed process or a panicking worker left claimed.
+        self.cache.reclaim_abandoned()?;
+        // 2. Rows a *previous build* refused to decode.
+        self.cache
+            .reopen_skipped_for_decoder(crate::preprocess::PREPROCESS_VERSION)?;
+        // 3. Rows whose file changed in place since we tagged it.
+        self.restat_done_rows()?;
+
+        let root_prefix = opts.root_prefix.as_deref().map(normalize_root_prefix);
+        let items = self
+            .cache
+            .claimable(opts.limit.unwrap_or(0), root_prefix.as_deref())?;
         let total = items.len();
         let tagged_at = opts.tagged_at.clone().unwrap_or_else(iso8601_utc_now);
         let workers = default_workers(opts.workers).min(total.max(1));
@@ -269,58 +324,116 @@ impl TaggingEngine {
             reporter: Mutex::new(Reporter::new()),
         };
 
-        std::thread::scope(|scope| {
-            for _ in 0..workers {
-                scope.spawn(|| loop {
-                    if cancel.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    let i = cursor.fetch_add(1, Ordering::Relaxed);
-                    let Some(item) = items.get(i) else { break };
+        // `thread::scope` re-raises a worker panic in *this* thread. Left
+        // unguarded that unwinds through the FFI's run thread, so its cleanup
+        // never runs, `running` stays true, and every subsequent `start` is
+        // `AlreadyRunning` until the app is killed. `process` is written not to
+        // panic, but the encoder is third-party code reachable from it, so
+        // "cannot panic" is not a property this layer gets to assume.
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            std::thread::scope(|scope| {
+                for _ in 0..workers {
+                    scope.spawn(|| loop {
+                        if cancel.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        let i = cursor.fetch_add(1, Ordering::Relaxed);
+                        let Some(item) = items.get(i) else { break };
 
-                    let outcome = self.process(item, &tagged_at, cancel);
-                    // An item abandoned mid-flight by cancellation is not
-                    // "done" — it went back on the queue, and reporting it as
-                    // progress would show a finished bar for a run the user
-                    // will have to resume.
-                    if !shared.absorb(item, outcome) {
-                        continue;
-                    }
-                    let done = shared.done.fetch_add(1, Ordering::Relaxed) + 1;
-                    shared.report(progress, done, total, false);
-                });
-            }
-        });
+                        let outcome = self.process(item, &tagged_at, cancel);
+                        // An item abandoned mid-flight by cancellation is not
+                        // "done" — it went back on the queue, and reporting it
+                        // as progress would show a finished bar for a run the
+                        // user will have to resume.
+                        if !shared.absorb(item, outcome) {
+                            continue;
+                        }
+                        let done = shared.done.fetch_add(1, Ordering::Relaxed) + 1;
+                        shared.report(progress, done, total, false);
+                    });
+                }
+            });
+        }))
+        .is_err();
 
         let mut summary = shared.take_totals();
         summary.cancelled = cancel.load(Ordering::Relaxed);
         shared.flush(progress, shared.done.load(Ordering::Relaxed), total);
-        progress.on_finished(&summary);
+        *partial = summary;
+
+        if panicked {
+            // The row the panicking worker held is still `hashing`; the next
+            // run's `reclaim_abandoned` puts it back in play.
+            return Err(MlError::Inference {
+                detail: "a tagging worker panicked".into(),
+            });
+        }
         Ok(summary)
+    }
+
+    /// Demote `done` rows whose file no longer matches the stat we tagged it
+    /// against.
+    ///
+    /// One `stat` per done row per run, no hashing: an in-place edit was
+    /// otherwise invisible forever, because `done` is not claimable and nothing
+    /// short of a pack change or an explicit reset moves a row off it.
+    ///
+    /// A row whose file cannot be stat'd is left alone — the photo is gone or
+    /// unreadable, and re-queueing it would only produce a failure.
+    fn restat_done_rows(&self) -> MlResult<()> {
+        for row in self.cache.done_rows_with_stat()? {
+            let Ok(stat) = self.vfs.stat(&row.path) else {
+                continue;
+            };
+            if stat.size != row.size || stat.modified_unix != row.modified_unix {
+                self.cache.mark_stale(&row.path)?;
+            }
+        }
+        Ok(())
     }
 
     /// One photo, start to finish. Never panics; every failure mode becomes an
     /// [`Outcome`].
     fn process(&self, item: &WorkItem, tagged_at: &str, cancel: &AtomicBool) -> Outcome {
-        if !extension_supported(&item.path) {
-            let _ = self.cache.finish_skipped(&item.path);
-            return Outcome::Skipped;
+        // Claim first, *then* look at the file. A row this run does not own
+        // must not be decoded and must not have a sidecar written for it — the
+        // realistic loser is a reset-and-re-enqueue landing between
+        // `claimable` and here.
+        match self.cache.begin(&item.path) {
+            Ok(true) => {}
+            Ok(false) => return Outcome::Lost,
+            Err(_) => return Outcome::Failed,
         }
-        if self.cache.begin(&item.path).is_err() {
-            return Outcome::Failed;
+        if !extension_supported(&item.path) {
+            let _ = self
+                .cache
+                .finish_skipped(&item.path, crate::preprocess::PREPROCESS_VERSION);
+            return Outcome::Skipped;
         }
         match self.process_inner(item, tagged_at, cancel) {
             Ok(Some(result)) => {
-                if self
-                    .cache
-                    .finish_done(&item.path, self.pack.version(), result.tag_count)
-                    .is_err()
-                {
-                    return Outcome::Failed;
+                // Stamp the stat this decision was made against, so a later run
+                // can spot an in-place edit. A file that vanished between the
+                // write and here records nothing rather than a wrong baseline.
+                let stat = self
+                    .vfs
+                    .stat(&item.path)
+                    .ok()
+                    .map(|s| (s.size, s.modified_unix));
+                match self.cache.finish_done(
+                    &item.path,
+                    self.pack.version(),
+                    result.tag_count,
+                    stat,
+                ) {
+                    Ok(true) => Outcome::Done(result),
+                    Ok(false) => Outcome::Lost,
+                    Err(_) => Outcome::Failed,
                 }
-                Outcome::Done(result)
             }
             Ok(None) => {
+                // Cancelled, or the row was taken from under us. `release` only
+                // touches rows still in `hashing`, so it is correct for both.
                 let _ = self.cache.release(&item.path);
                 Outcome::Cancelled
             }
@@ -341,19 +454,30 @@ impl TaggingEngine {
         let cancelled = || cancel.load(Ordering::Relaxed);
         let path = item.path.as_str();
 
-        let Some(hash) = content_hash(self.vfs.as_ref(), path, &cancelled)? else {
+        // The streamed hash is a *probe key* only. It describes the bytes as
+        // they were during the streaming read, and the file may be rewritten
+        // before the decode read below — a cloud provider finishing a
+        // materialization is the everyday case, not a contrived one.
+        let Some(probe) = content_hash(self.vfs.as_ref(), path, &cancelled)? else {
             return Ok(None);
         };
-        self.cache.set_content_hash(path, &hash)?;
 
         let model_key = self.pack.embedding_model_key();
-        let (embedding, cache_hit) = match self.cache.embedding(&hash, &model_key)? {
-            Some(v) if v.len() == self.pack.manifest.model.embedding_dim => (v, true),
+        let (embedding, cache_hit, hash) = match self.cache.embedding(&probe, &model_key)? {
+            // A hit means these exact bytes have been encoded before, and the
+            // pixels are never read, so there is nothing to disagree with.
+            Some(v) if v.len() == self.pack.manifest.model.embedding_dim => (v, true, probe),
             _ => {
                 if cancelled() {
                     return Ok(None);
                 }
                 let bytes = self.vfs.read(path)?;
+                // Hash the buffer that is about to be decoded, not the one that
+                // was streamed. Storing this embedding under `probe` when the
+                // two differ would poison the cache permanently: the old
+                // content's key would forever return the new content's vector,
+                // and nothing invalidates an embedding row.
+                let hash = crate::hash::hash_bytes(&bytes);
                 let tensor = preprocess(path, &bytes, &self.preprocess)?;
                 // Drop the encoded bytes before inference: at four workers,
                 // holding a 30 MB JPEG across the encode call is 120 MB of
@@ -364,9 +488,15 @@ impl TaggingEngine {
                 }
                 let v = self.encoder.embed(&tensor)?;
                 self.cache.put_embedding(&hash, &model_key, &v)?;
-                (v, false)
+                (v, false, hash)
             }
         };
+
+        // Recorded after the fact, so the row names the bytes we actually
+        // tagged. Zero rows affected means the row was reset from under us.
+        if !self.cache.set_content_hash(path, &hash)? {
+            return Ok(None);
+        }
 
         if cancelled() {
             return Ok(None);
@@ -445,6 +575,9 @@ enum Outcome {
     Skipped,
     Failed,
     Cancelled,
+    /// The row was taken from under this worker (a queue reset mid-run). Not
+    /// progress, not a failure — there is simply nothing to report.
+    Lost,
 }
 
 /// Cross-worker accumulators.
@@ -485,7 +618,7 @@ impl Shared {
                 totals.failed += 1;
                 true
             }
-            Outcome::Cancelled => false,
+            Outcome::Cancelled | Outcome::Lost => false,
         }
     }
 
@@ -542,6 +675,15 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
     }
+}
+
+/// A library root as a path *prefix*: exactly one trailing separator.
+///
+/// Without it `/Users/me/Photos` matches `/Users/me/PhotosOld/x.jpg`, which is
+/// the entire point of scoping a run to a root.
+fn normalize_root_prefix(root: &str) -> String {
+    let trimmed = root.trim_end_matches('/');
+    format!("{trimmed}/")
 }
 
 /// Worker count: the request, else `available_parallelism()`, clamped to
@@ -611,6 +753,22 @@ mod tests {
         // 2024-02-29, the leap day the algorithm must not lose.
         assert_eq!(iso8601_utc(1_709_164_800), "2024-02-29T00:00:00Z");
         assert_eq!(iso8601_utc(-5), "1970-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn a_root_prefix_always_ends_in_exactly_one_separator() {
+        assert_eq!(
+            normalize_root_prefix("/Users/me/Photos"),
+            "/Users/me/Photos/"
+        );
+        assert_eq!(
+            normalize_root_prefix("/Users/me/Photos/"),
+            "/Users/me/Photos/"
+        );
+        assert_eq!(
+            normalize_root_prefix("/Users/me/Photos///"),
+            "/Users/me/Photos/"
+        );
     }
 
     #[test]

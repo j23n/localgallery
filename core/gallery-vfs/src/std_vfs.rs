@@ -27,6 +27,43 @@ impl StdVfs {
     }
 }
 
+/// How many symlink hops [`resolve_symlink`] will follow before giving up.
+/// Generous: real sidecars are symlinked at most once, into a synced folder.
+const MAX_SYMLINK_HOPS: usize = 32;
+
+/// Follow a symlinked target to the real file, so a write goes *through* the
+/// link instead of replacing it.
+///
+/// Without this, replacing `IMG.jpg.xmp` (a symlink into a synced folder) with
+/// the temp file turns the link into an ordinary file: the new metadata lands
+/// somewhere the user's other tools do not look, and the real file keeps its
+/// stale contents forever. Both copies then read as plausible.
+///
+/// A path that does not exist — the common case, a sidecar being created — is
+/// returned unchanged. A dangling symlink resolves to what it points at, which
+/// is where the user asked for the bytes to go.
+fn resolve_symlink(path: &Path) -> VfsResult<PathBuf> {
+    let mut current = path.to_path_buf();
+    for _ in 0..MAX_SYMLINK_HOPS {
+        let Ok(md) = fs::symlink_metadata(&current) else {
+            return Ok(current);
+        };
+        if !md.file_type().is_symlink() {
+            return Ok(current);
+        }
+        let link = fs::read_link(&current)
+            .map_err(|e| VfsError::from_io(&current.display().to_string(), &e))?;
+        current = match (link.is_absolute(), current.parent()) {
+            (false, Some(dir)) => dir.join(link),
+            _ => link,
+        };
+    }
+    Err(VfsError::InvalidPath {
+        path: path.display().to_string(),
+        reason: format!("symlink chain longer than {MAX_SYMLINK_HOPS} hops"),
+    })
+}
+
 /// `foo/bar.xmp` → `foo/.gallery-tmp-<pid>-<n>.xmp`.
 ///
 /// The temp file is a sibling so the rename stays within one filesystem, and
@@ -77,14 +114,23 @@ impl Vfs for StdVfs {
     }
 
     fn write_atomic(&self, path: &str, bytes: &[u8]) -> VfsResult<()> {
-        let target = Path::new(path);
-        let temp = temp_sibling(target)?;
+        let target = resolve_symlink(Path::new(path))?;
+        let temp = temp_sibling(&target)?;
         let temp_str = temp.display().to_string();
+
+        // Permissions of the file we are about to replace. A fresh temp file
+        // gets 0666 & !umask — usually 0644 — so replacing a deliberately
+        // private 0600 sidecar would quietly publish it to every other user on
+        // the machine. Copy the mode across instead.
+        let existing_perms = fs::metadata(&target).ok().map(|md| md.permissions());
 
         // Scoped so the handle is closed (and flushed) before the rename.
         let write_result = (|| -> std::io::Result<()> {
             let mut f = fs::File::create(&temp)?;
             f.write_all(bytes)?;
+            if let Some(perms) = existing_perms {
+                f.set_permissions(perms)?;
+            }
             // fsync: a rename is atomic w.r.t. other readers, but without the
             // sync a crash can leave the renamed entry pointing at unwritten
             // blocks. Sidecars are the portable truth (overview §4); pay it.
@@ -97,9 +143,21 @@ impl Vfs for StdVfs {
             return Err(VfsError::from_io(&temp_str, &e));
         }
 
-        if let Err(e) = fs::rename(&temp, target) {
+        if let Err(e) = fs::rename(&temp, &target) {
             let _ = fs::remove_file(&temp);
             return Err(VfsError::from_io(path, &e));
+        }
+
+        // fsync the directory too. `f.sync_all()` made the *contents* durable;
+        // the directory entry the rename created is a separate write, and a
+        // crash between the two can leave the old name pointing at nothing.
+        // Best-effort: opening a directory for this is not portable, and a
+        // failure here does not make the write any less correct than it was
+        // before this line existed.
+        if let Some(parent) = target.parent().filter(|p| !p.as_os_str().is_empty()) {
+            if let Ok(dir) = fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
         }
         Ok(())
     }
@@ -161,6 +219,61 @@ mod tests {
             panic!("expected an error opening a missing file");
         };
         assert!(matches!(err, VfsError::NotFound { .. }), "{err:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_preserves_the_mode_of_the_file_it_replaces() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.xmp");
+        fs::write(&p, b"old").unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o600)).unwrap();
+
+        StdVfs.write_atomic(p.to_str().unwrap(), b"new").unwrap();
+
+        let mode = fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the replacement widened the file's mode");
+        assert_eq!(fs::read(&p).unwrap(), b"new");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_writes_through_a_symlink_instead_of_replacing_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.xmp");
+        let link = dir.path().join("link.xmp");
+        fs::write(&real, b"old").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        StdVfs.write_atomic(link.to_str().unwrap(), b"new").unwrap();
+
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the symlink was replaced by a regular file"
+        );
+        assert_eq!(
+            fs::read(&real).unwrap(),
+            b"new",
+            "the real file kept stale contents"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_refuses_a_symlink_loop_rather_than_spinning() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.xmp");
+        let b = dir.path().join("b.xmp");
+        std::os::unix::fs::symlink(&b, &a).unwrap();
+        std::os::unix::fs::symlink(&a, &b).unwrap();
+
+        let err = StdVfs.write_atomic(a.to_str().unwrap(), b"x").unwrap_err();
+        assert!(matches!(err, VfsError::InvalidPath { .. }), "{err:?}");
     }
 
     #[test]

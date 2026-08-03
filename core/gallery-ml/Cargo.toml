@@ -49,3 +49,7 @@ features = ["std", "download-binaries", "tls-native", "copy-dylibs", "api-27"]
 
 [dev-dependencies]
 tempfile = "3"
+# Integration tests do not inherit the crate's own dependencies. `engine_e2e`
+# needs a second, raw connection to the cache DB to stage states `CacheDb`'s
+# API deliberately will not produce (an unusable schema, a stranded claim).
+rusqlite = { version = "0.40", features = ["bundled"] }

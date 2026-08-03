@@ -13,7 +13,9 @@
 //!                          error_code INTEGER NOT NULL DEFAULT 0,
 //!                          retry_count INTEGER NOT NULL DEFAULT 0,
 //!                          tag_count INTEGER NOT NULL DEFAULT 0,
-//!                          updated_at INTEGER NOT NULL);
+//!                          updated_at INTEGER NOT NULL,
+//!                          file_size INTEGER, file_mtime INTEGER,
+//!                          decoder_version INTEGER);
 //! CREATE TABLE embeddings (content_hash BLOB, model TEXT, dim INTEGER,
 //!                          vec BLOB, PRIMARY KEY (content_hash, model));
 //! ```
@@ -42,7 +44,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use crate::error::{ErrorCode, MlResult};
 
 /// Schema version stored in `meta`. Bump when [`MIGRATIONS`] grows.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// `meta` key holding the applied schema version.
 pub const META_SCHEMA_VERSION: &str = "schema_version";
@@ -76,6 +78,21 @@ const MIGRATIONS: &[&str] = &[
         vec          BLOB NOT NULL,
         PRIMARY KEY (content_hash, model)
     );
+    "#,
+    // 1 → 2: remember *what* a terminal row was decided about.
+    //
+    // `file_size`/`file_mtime` are stamped when a row goes `done`, so a later
+    // run can notice an in-place edit with one stat per row and no hashing —
+    // without them a file edited in place was never re-tagged (the row is
+    // `done`, and `done` is not claimable).
+    //
+    // `decoder_version` is stamped when a row is `skipped`, so shipping a
+    // decoder for a format v1 refuses re-opens those rows instead of leaving
+    // them terminal for the life of the cache.
+    r#"
+    ALTER TABLE ml_work ADD COLUMN file_size       INTEGER;
+    ALTER TABLE ml_work ADD COLUMN file_mtime      INTEGER;
+    ALTER TABLE ml_work ADD COLUMN decoder_version INTEGER;
     "#,
 ];
 
@@ -135,6 +152,21 @@ pub struct Stats {
     pub skipped: u64,
     /// Rows that ended up with at least one tag written.
     pub tagged: u64,
+}
+
+/// The file identity a `done` row was decided against.
+///
+/// Recorded by [`CacheDb::finish_done`] and compared by the engine at the start
+/// of every run: one `stat` per row, no hashing, and an in-place edit stops
+/// being invisible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoneRowStat {
+    /// Absolute image path.
+    pub path: String,
+    /// Size in bytes at the time it was tagged.
+    pub size: u64,
+    /// Last-modified time in whole seconds, when the platform reported one.
+    pub modified_unix: Option<i64>,
 }
 
 /// One row of the work queue.
@@ -236,18 +268,84 @@ impl CacheDb {
         Ok(())
     }
 
-    /// `hashing` rows can only exist because a process died holding them.
-    fn reclaim_abandoned(&self) -> MlResult<()> {
+    /// Release every `hashing` row back to `pending`.
+    ///
+    /// A `hashing` row can only exist because something died holding it: a
+    /// killed process, or a worker thread that panicked mid-photo. Called at
+    /// [`CacheDb::open`] **and** at the start of every run — the app holds one
+    /// session for its whole lifetime, so "at open" alone stranded a row for
+    /// the rest of the process.
+    ///
+    /// Safe to call between runs only: a run in flight owns its `hashing` rows.
+    pub fn reclaim_abandoned(&self) -> MlResult<usize> {
         let conn = self.lock();
-        conn.execute(
+        Ok(conn.execute(
             "UPDATE ml_work SET state = ?1, updated_at = ?2 WHERE state = ?3",
             params![
                 WorkState::Pending.as_i64(),
                 now_unix(),
                 WorkState::Hashing.as_i64()
             ],
+        )?)
+    }
+
+    /// Re-open `skipped` rows decided by a different decoder generation.
+    ///
+    /// "Unsupported format" is a statement about *this build*, not about the
+    /// file. Shipping a HEIC decoder must not require the user to find a
+    /// "reset" button before a single HEIC gets tagged. Rows with no recorded
+    /// version predate the column and are re-opened once, after which they
+    /// carry `current` and settle.
+    ///
+    /// Returns how many rows were re-opened.
+    pub fn reopen_skipped_for_decoder(&self, current: u32) -> MlResult<usize> {
+        let conn = self.lock();
+        Ok(conn.execute(
+            "UPDATE ml_work SET state = ?1, error_code = 0, retry_count = 0, updated_at = ?2
+             WHERE state = ?3 AND (decoder_version IS NULL OR decoder_version <> ?4)",
+            params![
+                WorkState::Pending.as_i64(),
+                now_unix(),
+                WorkState::Skipped.as_i64(),
+                current as i64
+            ],
+        )?)
+    }
+
+    /// Every `done` row that recorded a stat, so a run can spot in-place edits.
+    ///
+    /// Rows written before the stat columns existed are **omitted**: there is
+    /// no baseline to compare against, and re-tagging the whole library on a
+    /// schema upgrade would be a worse answer than leaving them until the next
+    /// real change.
+    pub fn done_rows_with_stat(&self) -> MlResult<Vec<DoneRowStat>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT path, file_size, file_mtime FROM ml_work WHERE state = ?1
+             AND file_size IS NOT NULL",
         )?;
-        Ok(())
+        let rows = stmt.query_map(params![WorkState::Done.as_i64()], |r| {
+            Ok(DoneRowStat {
+                path: r.get(0)?,
+                size: r.get::<_, i64>(1)?.max(0) as u64,
+                modified_unix: r.get(2)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Demote one `done` row to `stale` because its bytes moved under us.
+    pub fn mark_stale(&self, path: &str) -> MlResult<usize> {
+        let conn = self.lock();
+        Ok(conn.execute(
+            "UPDATE ml_work SET state = ?1, updated_at = ?2 WHERE path = ?3 AND state = ?4",
+            params![
+                WorkState::Stale.as_i64(),
+                now_unix(),
+                path,
+                WorkState::Done.as_i64()
+            ],
+        )?)
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
@@ -322,11 +420,23 @@ impl CacheDb {
     ///
     /// Includes `pending`, `stale`, and `failed` rows that have retries left.
     /// `limit` of 0 means "everything".
-    pub fn claimable(&self, limit: usize) -> MlResult<Vec<WorkItem>> {
+    ///
+    /// `root_prefix`, when given, restricts the result to paths under that
+    /// directory. There is one cache DB per app, keyed by absolute path, so
+    /// switching the library root leaves the old root's rows sitting `pending`
+    /// forever — and processing them would tag files outside the library the
+    /// user is looking at. Filtering *here* rather than failing them later is
+    /// deliberate: an out-of-scope row is not a failure and must not burn a
+    /// retry. It simply waits, in case the user switches back.
+    pub fn claimable(&self, limit: usize, root_prefix: Option<&str>) -> MlResult<Vec<WorkItem>> {
         let conn = self.lock();
+        // `substr(path, 1, length(?)) = ?` rather than LIKE/GLOB: both of those
+        // give `%`, `_`, `[` and `*` meaning, and a library folder may contain
+        // any of them.
         let sql = "SELECT path, content_hash, state, model_pack, error_code, retry_count
                    FROM ml_work
-                   WHERE state IN (?1, ?2) OR (state = ?3 AND retry_count < ?4)
+                   WHERE (state IN (?1, ?2) OR (state = ?3 AND retry_count < ?4))
+                     AND (?6 IS NULL OR substr(path, 1, length(?6)) = ?6)
                    ORDER BY updated_at, path
                    LIMIT ?5";
         let mut stmt = conn.prepare(sql)?;
@@ -337,6 +447,7 @@ impl CacheDb {
                 WorkState::Failed.as_i64(),
                 MAX_RETRIES,
                 if limit == 0 { -1i64 } else { limit as i64 },
+                root_prefix,
             ],
             row_to_item,
         )?;
@@ -357,65 +468,112 @@ impl CacheDb {
     }
 
     /// Move a row to `hashing`, claiming it for this worker.
-    pub fn begin(&self, path: &str) -> MlResult<()> {
-        self.lock().execute(
-            "UPDATE ml_work SET state = ?1, updated_at = ?2 WHERE path = ?3",
-            params![WorkState::Hashing.as_i64(), now_unix(), path],
+    ///
+    /// Returns whether the claim succeeded. It fails when the row is no longer
+    /// in a claimable state — the realistic case is
+    /// [`CacheDb::reset_queue`] landing between `claimable` and here, after
+    /// which the row either does not exist or is a *different*, freshly
+    /// enqueued row. A worker that did not win the claim must do nothing at
+    /// all: no decode, and above all no sidecar write on behalf of a row it
+    /// does not own.
+    pub fn begin(&self, path: &str) -> MlResult<bool> {
+        let n = self.lock().execute(
+            "UPDATE ml_work SET state = ?1, updated_at = ?2
+             WHERE path = ?3 AND state IN (?4, ?5, ?6)",
+            params![
+                WorkState::Hashing.as_i64(),
+                now_unix(),
+                path,
+                WorkState::Pending.as_i64(),
+                WorkState::Stale.as_i64(),
+                WorkState::Failed.as_i64()
+            ],
         )?;
-        Ok(())
+        Ok(n > 0)
     }
 
     /// Record the content hash of a row being processed.
-    pub fn set_content_hash(&self, path: &str, hash: &[u8; 32]) -> MlResult<()> {
-        self.lock().execute(
-            "UPDATE ml_work SET content_hash = ?1, updated_at = ?2 WHERE path = ?3",
-            params![hash.as_slice(), now_unix(), path],
+    ///
+    /// Returns whether the row is still ours; see [`CacheDb::begin`].
+    pub fn set_content_hash(&self, path: &str, hash: &[u8; 32]) -> MlResult<bool> {
+        let n = self.lock().execute(
+            "UPDATE ml_work SET content_hash = ?1, updated_at = ?2
+             WHERE path = ?3 AND state = ?4",
+            params![
+                hash.as_slice(),
+                now_unix(),
+                path,
+                WorkState::Hashing.as_i64()
+            ],
         )?;
-        Ok(())
+        Ok(n > 0)
     }
 
     /// Mark a row tagged under `pack` with `tag_count` tags, clearing any
-    /// previous failure.
-    pub fn finish_done(&self, path: &str, pack: &str, tag_count: usize) -> MlResult<()> {
-        self.lock().execute(
+    /// previous failure and stamping the file stat the decision was made
+    /// against (see [`CacheDb::done_rows_with_stat`]).
+    ///
+    /// Only a row this run still holds is written; returns whether one was.
+    pub fn finish_done(
+        &self,
+        path: &str,
+        pack: &str,
+        tag_count: usize,
+        stat: Option<(u64, Option<i64>)>,
+    ) -> MlResult<bool> {
+        let n = self.lock().execute(
             "UPDATE ml_work
              SET state = ?1, model_pack = ?2, tag_count = ?3, error_code = 0,
-                 retry_count = 0, updated_at = ?4
-             WHERE path = ?5",
+                 retry_count = 0, updated_at = ?4, file_size = ?6, file_mtime = ?7
+             WHERE path = ?5 AND state = ?8",
             params![
                 WorkState::Done.as_i64(),
                 pack,
                 tag_count as i64,
                 now_unix(),
-                path
+                path,
+                stat.map(|(size, _)| size as i64),
+                stat.and_then(|(_, mtime)| mtime),
+                WorkState::Hashing.as_i64()
             ],
         )?;
-        Ok(())
+        Ok(n > 0)
     }
 
     /// Mark a row failed, incrementing its retry counter.
-    pub fn finish_failed(&self, path: &str, code: ErrorCode) -> MlResult<()> {
-        self.lock().execute(
+    pub fn finish_failed(&self, path: &str, code: ErrorCode) -> MlResult<bool> {
+        let n = self.lock().execute(
             "UPDATE ml_work
              SET state = ?1, error_code = ?2, retry_count = retry_count + 1, updated_at = ?3
-             WHERE path = ?4",
-            params![WorkState::Failed.as_i64(), code.as_i64(), now_unix(), path],
+             WHERE path = ?4 AND state = ?5",
+            params![
+                WorkState::Failed.as_i64(),
+                code.as_i64(),
+                now_unix(),
+                path,
+                WorkState::Hashing.as_i64()
+            ],
         )?;
-        Ok(())
+        Ok(n > 0)
     }
 
-    /// Mark a row as a format this build does not handle.
-    pub fn finish_skipped(&self, path: &str) -> MlResult<()> {
-        self.lock().execute(
-            "UPDATE ml_work SET state = ?1, error_code = ?2, updated_at = ?3 WHERE path = ?4",
+    /// Mark a row as a format this build does not handle, stamping the decoder
+    /// generation that said so (see [`CacheDb::reopen_skipped_for_decoder`]).
+    pub fn finish_skipped(&self, path: &str, decoder_version: u32) -> MlResult<bool> {
+        let n = self.lock().execute(
+            "UPDATE ml_work SET state = ?1, error_code = ?2, updated_at = ?3,
+                 decoder_version = ?5
+             WHERE path = ?4 AND state = ?6",
             params![
                 WorkState::Skipped.as_i64(),
                 ErrorCode::UnsupportedFormat.as_i64(),
                 now_unix(),
-                path
+                path,
+                decoder_version as i64,
+                WorkState::Hashing.as_i64()
             ],
         )?;
-        Ok(())
+        Ok(n > 0)
     }
 
     /// Release a claimed row back to `pending` without counting a failure.
@@ -555,6 +713,35 @@ mod tests {
         [b; 32]
     }
 
+    /// `begin` + `finish_done`, the transition a run actually performs. The
+    /// terminal writes are state-predicated, so a test cannot jump straight to
+    /// them any more — and should not: an unclaimed row reaching `done` is the
+    /// bug the predicate exists to stop.
+    fn claim_and_finish(db: &CacheDb, path: &str, pack: &str, tags: usize) {
+        assert!(db.begin(path).unwrap(), "{path} was not claimable");
+        assert!(db
+            .finish_done(path, pack, tags, Some((10, Some(20))))
+            .unwrap());
+    }
+
+    fn claim_and_fail(db: &CacheDb, path: &str, code: ErrorCode) {
+        assert!(db.begin(path).unwrap(), "{path} was not claimable");
+        assert!(db.finish_failed(path, code).unwrap());
+    }
+
+    fn claim_and_skip(db: &CacheDb, path: &str, decoder: u32) {
+        assert!(db.begin(path).unwrap(), "{path} was not claimable");
+        assert!(db.finish_skipped(path, decoder).unwrap());
+    }
+
+    fn claimable_paths(db: &CacheDb) -> Vec<String> {
+        db.claimable(0, None)
+            .unwrap()
+            .into_iter()
+            .map(|i| i.path)
+            .collect()
+    }
+
     #[test]
     fn open_records_the_schema_version() {
         let db = db();
@@ -587,11 +774,41 @@ mod tests {
         assert!(CacheDb::open(&path).is_err());
     }
 
+    /// A v1 file must gain the v2 columns and keep its rows.
+    #[test]
+    fn a_v1_cache_migrates_forward_without_losing_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.sqlite");
+        {
+            // Hand-build the 0 → 1 schema, then claim it is at version 1.
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(MIGRATIONS[0]).unwrap();
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?1, '1')",
+                params![META_SCHEMA_VERSION],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO ml_work (path, state, updated_at) VALUES ('/old.jpg', 2, 0)",
+                [],
+            )
+            .unwrap();
+        }
+        let db = CacheDb::open(&path).unwrap();
+        assert_eq!(
+            db.meta(META_SCHEMA_VERSION).unwrap().as_deref(),
+            Some(SCHEMA_VERSION.to_string().as_str())
+        );
+        assert_eq!(db.item("/old.jpg").unwrap().unwrap().state, WorkState::Done);
+        // No recorded stat, so the re-stat pass has no baseline and leaves it.
+        assert!(db.done_rows_with_stat().unwrap().is_empty());
+    }
+
     #[test]
     fn enqueue_is_idempotent_and_preserves_state() {
         let db = db();
         assert_eq!(db.enqueue(&["/a.jpg".into(), "/b.jpg".into()]).unwrap(), 2);
-        db.finish_done("/a.jpg", "pack-1", 3).unwrap();
+        claim_and_finish(&db, "/a.jpg", "pack-1", 3);
         assert_eq!(db.enqueue(&["/a.jpg".into(), "/c.jpg".into()]).unwrap(), 1);
         assert_eq!(db.item("/a.jpg").unwrap().unwrap().state, WorkState::Done);
     }
@@ -608,21 +825,17 @@ mod tests {
             "/skipped.jpg".into(),
         ])
         .unwrap();
-        db.finish_done("/done.jpg", "pack-1", 1).unwrap();
-        db.finish_done("/stale.jpg", "pack-0", 1).unwrap();
+        claim_and_finish(&db, "/done.jpg", "pack-1", 1);
+        claim_and_finish(&db, "/stale.jpg", "pack-0", 1);
         db.mark_stale_for_pack("pack-1").unwrap();
-        db.finish_failed("/failed.jpg", ErrorCode::Decode).unwrap();
-        for _ in 0..MAX_RETRIES {
-            db.finish_failed("/dead.jpg", ErrorCode::Decode).unwrap();
+        claim_and_fail(&db, "/failed.jpg", ErrorCode::Decode);
+        for _ in 1..MAX_RETRIES {
+            claim_and_fail(&db, "/dead.jpg", ErrorCode::Decode);
         }
-        db.finish_skipped("/skipped.jpg").unwrap();
+        claim_and_fail(&db, "/dead.jpg", ErrorCode::Decode);
+        claim_and_skip(&db, "/skipped.jpg", 1);
 
-        let paths: Vec<String> = db
-            .claimable(0)
-            .unwrap()
-            .into_iter()
-            .map(|i| i.path)
-            .collect();
+        let paths = claimable_paths(&db);
         assert!(paths.contains(&"/pending.jpg".to_string()));
         assert!(paths.contains(&"/stale.jpg".to_string()));
         assert!(paths.contains(&"/failed.jpg".to_string()));
@@ -631,12 +844,68 @@ mod tests {
         assert!(!paths.contains(&"/skipped.jpg".to_string()));
     }
 
+    /// One cache DB serves every library the user ever picks. Rows belonging
+    /// to a root that is not the current one must sit out the run — not fail,
+    /// not burn a retry, and above all not get tagged.
+    #[test]
+    fn claimable_can_be_scoped_to_the_current_library_root() {
+        let db = db();
+        db.enqueue(&[
+            "/Users/me/Photos/a.jpg".into(),
+            "/Users/me/Photos/sub/b.jpg".into(),
+            "/Users/me/Other/c.jpg".into(),
+            // A sibling whose name merely *starts* with the root's name.
+            "/Users/me/PhotosOld/d.jpg".into(),
+        ])
+        .unwrap();
+
+        let scoped: Vec<String> = db
+            .claimable(0, Some("/Users/me/Photos/"))
+            .unwrap()
+            .into_iter()
+            .map(|i| i.path)
+            .collect();
+        assert_eq!(
+            scoped,
+            vec![
+                "/Users/me/Photos/a.jpg".to_string(),
+                "/Users/me/Photos/sub/b.jpg".to_string()
+            ]
+        );
+        // Out-of-scope rows are untouched, not failed.
+        for path in ["/Users/me/Other/c.jpg", "/Users/me/PhotosOld/d.jpg"] {
+            let item = db.item(path).unwrap().unwrap();
+            assert_eq!(item.state, WorkState::Pending);
+            assert_eq!(item.retry_count, 0);
+        }
+        assert_eq!(
+            claimable_paths(&db).len(),
+            4,
+            "unscoped still sees them all"
+        );
+    }
+
+    /// Glob and LIKE metacharacters are legal in folder names.
+    #[test]
+    fn root_scoping_treats_the_prefix_as_literal_text() {
+        let db = db();
+        db.enqueue(&["/lib/100%_[a]/x.jpg".into(), "/lib/1000_ab/y.jpg".into()])
+            .unwrap();
+        let scoped: Vec<String> = db
+            .claimable(0, Some("/lib/100%_[a]/"))
+            .unwrap()
+            .into_iter()
+            .map(|i| i.path)
+            .collect();
+        assert_eq!(scoped, vec!["/lib/100%_[a]/x.jpg".to_string()]);
+    }
+
     #[test]
     fn a_pack_change_stales_only_rows_from_other_packs() {
         let db = db();
         db.enqueue(&["/a.jpg".into(), "/b.jpg".into()]).unwrap();
-        db.finish_done("/a.jpg", "pack-1", 1).unwrap();
-        db.finish_done("/b.jpg", "pack-2", 1).unwrap();
+        claim_and_finish(&db, "/a.jpg", "pack-1", 1);
+        claim_and_finish(&db, "/b.jpg", "pack-2", 1);
         assert_eq!(db.mark_stale_for_pack("pack-1").unwrap(), 1);
         assert_eq!(db.item("/a.jpg").unwrap().unwrap().state, WorkState::Done);
         assert_eq!(db.item("/b.jpg").unwrap().unwrap().state, WorkState::Stale);
@@ -660,6 +929,91 @@ mod tests {
             db.item("/a.jpg").unwrap().unwrap().state,
             WorkState::Pending
         );
+    }
+
+    #[test]
+    fn reclaiming_is_available_between_runs_not_only_at_open() {
+        let db = db();
+        db.enqueue(&["/a.jpg".into()]).unwrap();
+        db.begin("/a.jpg").unwrap();
+        assert_eq!(db.reclaim_abandoned().unwrap(), 1);
+        assert_eq!(claimable_paths(&db), vec!["/a.jpg".to_string()]);
+    }
+
+    /// A row this run no longer owns must not be claimable *or* finishable.
+    #[test]
+    fn a_reset_between_claim_and_finish_loses_the_row() {
+        let db = db();
+        db.enqueue(&["/a.jpg".into()]).unwrap();
+        assert!(db.begin("/a.jpg").unwrap());
+
+        // "Reset Tagging Data" mid-run, then the library is re-enqueued.
+        db.reset_queue().unwrap();
+        db.enqueue(&["/a.jpg".into()]).unwrap();
+
+        // The in-flight worker's terminal writes must all miss: the row it
+        // holds is gone, and the row that exists is a fresh, untouched one.
+        assert!(!db.set_content_hash("/a.jpg", &h(3)).unwrap());
+        assert!(!db.finish_done("/a.jpg", "p", 4, None).unwrap());
+        assert!(!db.finish_failed("/a.jpg", ErrorCode::Io).unwrap());
+        assert!(!db.finish_skipped("/a.jpg", 1).unwrap());
+
+        let item = db.item("/a.jpg").unwrap().unwrap();
+        assert_eq!(item.state, WorkState::Pending);
+        assert_eq!(item.retry_count, 0);
+        assert_eq!(item.content_hash, None);
+    }
+
+    #[test]
+    fn a_second_claim_of_a_claimed_row_is_refused() {
+        let db = db();
+        db.enqueue(&["/a.jpg".into()]).unwrap();
+        assert!(db.begin("/a.jpg").unwrap());
+        assert!(!db.begin("/a.jpg").unwrap());
+    }
+
+    #[test]
+    fn a_done_row_records_the_stat_it_was_decided_against() {
+        let db = db();
+        db.enqueue(&["/a.jpg".into(), "/b.jpg".into()]).unwrap();
+        db.begin("/a.jpg").unwrap();
+        db.finish_done("/a.jpg", "p", 1, Some((4096, Some(1_700_000_000))))
+            .unwrap();
+        // A row finished with no stat available (the file vanished) records
+        // nothing and stays out of the re-stat pass.
+        db.begin("/b.jpg").unwrap();
+        db.finish_done("/b.jpg", "p", 1, None).unwrap();
+
+        assert_eq!(
+            db.done_rows_with_stat().unwrap(),
+            vec![DoneRowStat {
+                path: "/a.jpg".to_string(),
+                size: 4096,
+                modified_unix: Some(1_700_000_000),
+            }]
+        );
+
+        assert_eq!(db.mark_stale("/a.jpg").unwrap(), 1);
+        assert_eq!(db.item("/a.jpg").unwrap().unwrap().state, WorkState::Stale);
+        // `mark_stale` only demotes `done` rows.
+        assert_eq!(db.mark_stale("/a.jpg").unwrap(), 0);
+    }
+
+    #[test]
+    fn skipped_rows_reopen_when_the_decoder_generation_changes() {
+        let db = db();
+        db.enqueue(&["/a.heic".into()]).unwrap();
+        claim_and_skip(&db, "/a.heic", 1);
+        assert!(claimable_paths(&db).is_empty());
+
+        // Same decoder: nothing to redo.
+        assert_eq!(db.reopen_skipped_for_decoder(1).unwrap(), 0);
+        assert!(claimable_paths(&db).is_empty());
+
+        // A build that decodes more formats re-opens it, retry budget intact.
+        assert_eq!(db.reopen_skipped_for_decoder(2).unwrap(), 1);
+        assert_eq!(claimable_paths(&db), vec!["/a.heic".to_string()]);
+        assert_eq!(db.item("/a.heic").unwrap().unwrap().retry_count, 0);
     }
 
     #[test]
@@ -688,11 +1042,11 @@ mod tests {
             "/e.jpg".into(),
         ])
         .unwrap();
-        db.finish_done("/a.jpg", "p", 2).unwrap();
-        db.finish_done("/b.jpg", "p", 0).unwrap();
-        db.finish_skipped("/c.jpg").unwrap();
+        claim_and_finish(&db, "/a.jpg", "p", 2);
+        claim_and_finish(&db, "/b.jpg", "p", 0);
+        claim_and_skip(&db, "/c.jpg", 1);
         for _ in 0..MAX_RETRIES {
-            db.finish_failed("/d.jpg", ErrorCode::Decode).unwrap();
+            claim_and_fail(&db, "/d.jpg", ErrorCode::Decode);
         }
         let s = db.stats().unwrap();
         assert_eq!(s.done, 2);
@@ -706,7 +1060,7 @@ mod tests {
     fn a_retryable_failure_counts_as_pending_not_failed() {
         let db = db();
         db.enqueue(&["/a.jpg".into()]).unwrap();
-        db.finish_failed("/a.jpg", ErrorCode::Io).unwrap();
+        claim_and_fail(&db, "/a.jpg", ErrorCode::Io);
         let s = db.stats().unwrap();
         assert_eq!(s.pending, 1);
         assert_eq!(s.failed, 0);
@@ -717,7 +1071,7 @@ mod tests {
         let db = db();
         db.enqueue(&["/a.jpg".into(), "/b.jpg".into()]).unwrap();
         db.begin("/a.jpg").unwrap();
-        db.finish_done("/b.jpg", "p", 1).unwrap();
+        claim_and_finish(&db, "/b.jpg", "p", 1);
         db.release("/a.jpg").unwrap();
         db.release("/b.jpg").unwrap();
         assert_eq!(

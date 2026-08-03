@@ -157,7 +157,7 @@ Errors are one closed `TaggingError` enum flattened from `MlError` +
 | XMP writer breaks another tool's data | Preservation-first DOM design; oracle tests against exiftool + photo-tools; sidecar-only writes are recoverable by deletion |
 | Zero-shot quality ≪ RAM++ | Curated leaf list + per-root thresholds; measure precision on the test library early (task 1 of implementation); acceptable floor: no *wrong* high-confidence tags — sparse is fine for v1 |
 | onnxruntime sim cross-compile | Known-good: `ort` ships prebuilt iOS-sim static libs; else `tract` fallback |
-| Full-file SHA-256 cost on big libraries | Sequential read, one pass, stored forever; throttle to idle QoS; measured in acceptance |
+| Full-file SHA-256 cost on big libraries | Sequential read, one pass, stored forever; measured in acceptance. **Not** throttled to idle QoS as originally planned: the hashing runs on `std::thread`s the core spawns, and Rust's standard library has no portable way to set a Darwin QoS class on one. Scheduling is therefore whatever the OS gives a plain pthread. Changing that means either an `unsafe` `pthread_set_qos_class_self_np` call (this crate is `#![forbid(unsafe_code)]`) or moving the thread pool to the Swift side, which would undo the "long work runs on core-owned threads" FFI rule |
 | Sidecar writes racing SidecarSyncService | Atomic rename + refresh triggered by us after batches, not mid-write |
 
 ## Status (2026-08-03)

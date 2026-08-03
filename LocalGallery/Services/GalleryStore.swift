@@ -103,8 +103,10 @@ final class GalleryStore {
     /// the same URL await the existing task instead of starting a second
     /// traversal (app launch + willEnterForeground + pull-to-refresh can
     /// otherwise overlap). The kind is kept so a `.full` request isn't
-    /// silently satisfied by an in-flight light scan.
-    @ObservationIgnored var activeScanTask: (url: URL, kind: ScanKind, task: Task<Void, Never>)?
+    /// silently satisfied by an in-flight light scan, and `startedAt` so no
+    /// request is satisfied by a pass that began before the request existed —
+    /// see `scanFolder`.
+    @ObservationIgnored var activeScanTask: (url: URL, kind: ScanKind, startedAt: Date, task: Task<Void, Never>)?
     /// Most recent scanner-emitted sidecar manifest. `SidecarSyncService`
     /// diffs it after every scan; `SidecarRefreshService` re-reads it on the
     /// BG sidecar-refresh task.
@@ -200,6 +202,11 @@ final class GalleryStore {
             self?.reapplySidecarMerges()
         }
         self.tagging.eligiblePhotos = { [weak self] in self?.allPhotos ?? [] }
+        // The core's cache DB outlives any one library root, so a run is
+        // confined to the root currently in scope — otherwise rows enqueued
+        // under a folder the user has switched away from would be tagged, and
+        // sidecars written outside the library on screen.
+        self.tagging.libraryRoot = { [weak self] in self?.bookmarks.activeURL }
         // A tagging run creates sidecars the last scan never saw, so the only
         // entry point that picks them up is a fresh scan: the light pass
         // rebuilds the sidecar manifest (reusing cached PhotoFiles, so it is a

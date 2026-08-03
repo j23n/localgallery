@@ -1,0 +1,2124 @@
+{
+  "passes" : [
+    {
+      "addedPaths" : [
+        "B.JPG",
+        "Junk/zero.jpg",
+        "Locked/locked1.jpg",
+        "Locked/locked2.jpg",
+        "Media/Clip.MOV",
+        "Media/IMG_0001.jpg",
+        "Media/IMG_0002.heic",
+        "Nested/Deep/deep1.jpg",
+        "Nested/Deep/deep2.png",
+        "Nested/nested1.jpg",
+        "Unicode/café.jpg",
+        "Unicode/emoji 🌵 cactus.jpg",
+        "Unicode/résumé.jpg",
+        "Unicode/spaces and (parens).jpg",
+        "a.jpg"
+      ],
+      "failedDirectoryPaths" : [
+
+      ],
+      "flatPhotos" : [
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-01T10:00:01.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-01T10:00:01.000Z"
+          },
+          "fileSize" : 1001,
+          "filename" : "B",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "B.JPG",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-07T10:00:03.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-07T10:00:03.000Z"
+          },
+          "fileSize" : 0,
+          "filename" : "zero",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Junk/zero.jpg",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-04T10:00:00.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-04T10:00:00.000Z"
+          },
+          "fileSize" : 1005,
+          "filename" : "locked1",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Locked/locked1.jpg",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-04T10:00:02.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-04T10:00:02.000Z"
+          },
+          "fileSize" : 1006,
+          "filename" : "locked2",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Locked/locked2.jpg",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-05T10:00:04.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-05T10:00:04.000Z"
+          },
+          "fileSize" : 1011,
+          "filename" : "clip",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : true,
+          "locality" : "local",
+          "path" : "Media/Clip.MOV",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-05T10:00:00.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-05T10:00:00.000Z"
+          },
+          "fileSize" : 1007,
+          "filename" : "IMG_0001",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "livePhotoVideoPath" : "Media/IMG_0001.mov",
+          "locality" : "local",
+          "path" : "Media/IMG_0001.jpg",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-05T10:00:02.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-05T10:00:02.000Z"
+          },
+          "fileSize" : 1009,
+          "filename" : "IMG_0002",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "livePhotoVideoPath" : "Media/IMG_0002.heic.mov",
+          "locality" : "local",
+          "path" : "Media/IMG_0002.heic",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-03T10:00:00.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-03T10:00:00.000Z"
+          },
+          "fileSize" : 1003,
+          "filename" : "deep1",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Nested/Deep/deep1.jpg",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-03T10:00:02.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-03T10:00:02.000Z"
+          },
+          "fileSize" : 1004,
+          "filename" : "deep2",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Nested/Deep/deep2.png",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-02T10:00:00.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-02T10:00:00.000Z"
+          },
+          "fileSize" : 1002,
+          "filename" : "nested1",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Nested/nested1.jpg",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-06T10:00:00.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-06T10:00:00.000Z"
+          },
+          "fileSize" : 1012,
+          "filename" : "café",
+          "filenameNormalization" : "NFD",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Unicode/café.jpg",
+          "pathNormalization" : "NFD",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-06T10:00:02.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-06T10:00:02.000Z"
+          },
+          "fileSize" : 1014,
+          "filename" : "emoji 🌵 cactus",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Unicode/emoji 🌵 cactus.jpg",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-06T10:00:01.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-06T10:00:01.000Z"
+          },
+          "fileSize" : 1013,
+          "filename" : "résumé",
+          "filenameNormalization" : "NFC",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Unicode/résumé.jpg",
+          "pathNormalization" : "NFC",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-06T10:00:03.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-06T10:00:03.000Z"
+          },
+          "fileSize" : 1015,
+          "filename" : "spaces and (parens)",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Unicode/spaces and (parens).jpg",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-01T10:00:00.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-01T10:00:00.000Z"
+          },
+          "fileSize" : 1000,
+          "filename" : "a",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "a.jpg",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        }
+      ],
+      "modifiedPaths" : [
+
+      ],
+      "name" : "1-full-cold",
+      "needsEnrichment" : true,
+      "notes" : [
+        "Cold full scan: no cache, so every file takes the slow path and everything lands in addedPaths.",
+        "Traversal is an explicit stack. Subdirectories are sorted DESCENDING by localizedStandardCompare before being pushed, so they pop ASCENDING — root's children come out Empty, Junk, Locked, Media, Nested, Unicode and Nested/Deep is visited before Unicode.",
+        "Within a folder, photo order is whatever contentsOfDirectory returned. That is NOT specified; this fixture sorts flatPhotos and photoPaths by path. The Rust port is free to emit any within-folder order (the app sorts in SearchIndex anyway) but MUST keep the folder order above.",
+        "Classification is by extension only: Junk/readme.txt, Junk/data.xyz and Junk/noext are not media, Junk/.hidden.jpg is filtered by .skipsHiddenFiles, Junk/orphan.xmp is a sidecar with no photo and produces no row.",
+        "Junk/zero.jpg is a zero-byte file and is scanned like any other image.",
+        "dateTaken has no metadata behind it here — the scanner never opens a file. It is min(creationDate, modificationDate); every fixture mtime is older than its birth time, so dateTaken == fileModificationDate.",
+        "dateFromMetadata is false for everything: only EnrichmentService ever sets it.",
+        "enrichedFileDate is nil for every slow-path photo, which is exactly what makes needsEnrichment true.",
+        "Live-photo pairing covers both shapes: IMG_0001.jpg + IMG_0001.mov, and the double-extension IMG_0002.heic + IMG_0002.heic.mov. A paired .mov never becomes a photo of its own — only the standalone Media/Clip.MOV does.",
+        "LANDMINE: a standalone video's `filename` is LOWERCASED. The image branch assigns `url.deletingPathExtension().lastPathComponent` (B.JPG -> \"B\"), the standalone-video branch assigns `videoStem(url)`, which lowercases (Clip.MOV -> \"clip\"). Not a typo in the fixture.",
+        "LANDMINE: Media/Clip.MOV.xmp exists and produces NO sidecar manifest row. The manifest is emitted only inside the image loop, so a video can never carry a sidecar through a scan.",
+        "Junk/orphan.xmp is a sidecar with no photo: no row, no photo, no complaint.",
+        "The sidecar manifest keys on the LOWERCASED full basename, so B.JPG finds B.JPG.xmp.",
+        "totalPhotoCount is recursive (root = 15) while photoCount is the folder's own; Empty/ still becomes a node, with coverPhotoSource \"none\".",
+        "versionHasContentIdentifier is true here: APFS populates fileContentIdentifierKey, so ContentVersion.sameContent compares identifiers rather than (mtime, size). On a provider that leaves it nil the other branch runs — both are live paths.",
+        "PhotoLocality is `local` for everything: FileProviderDetector sees totalFileSize == fileSize on a plain volume, so nothing looks provider-backed."
+      ],
+      "removedPaths" : [
+
+      ],
+      "reuseCached" : false,
+      "rootFolder" : {
+        "coverPhotoSource" : "ownPhotos",
+        "hasDateCreated" : true,
+        "hasDateModified" : true,
+        "name" : "ScannerFixtureLibrary",
+        "path" : "",
+        "photoCount" : 2,
+        "photoPaths" : [
+          "B.JPG",
+          "a.jpg"
+        ],
+        "subfolders" : [
+          {
+            "coverPhotoSource" : "none",
+            "hasDateCreated" : true,
+            "hasDateModified" : true,
+            "name" : "Empty",
+            "path" : "Empty",
+            "photoCount" : 0,
+            "photoPaths" : [
+
+            ],
+            "subfolders" : [
+
+            ],
+            "totalPhotoCount" : 0
+          },
+          {
+            "coverPhotoSource" : "ownPhotos",
+            "hasDateCreated" : true,
+            "hasDateModified" : true,
+            "name" : "Junk",
+            "path" : "Junk",
+            "photoCount" : 1,
+            "photoPaths" : [
+              "Junk/zero.jpg"
+            ],
+            "subfolders" : [
+
+            ],
+            "totalPhotoCount" : 1
+          },
+          {
+            "coverPhotoSource" : "ownPhotos",
+            "hasDateCreated" : true,
+            "hasDateModified" : true,
+            "name" : "Locked",
+            "path" : "Locked",
+            "photoCount" : 2,
+            "photoPaths" : [
+              "Locked/locked1.jpg",
+              "Locked/locked2.jpg"
+            ],
+            "subfolders" : [
+
+            ],
+            "totalPhotoCount" : 2
+          },
+          {
+            "coverPhotoSource" : "ownPhotos",
+            "hasDateCreated" : true,
+            "hasDateModified" : true,
+            "name" : "Media",
+            "path" : "Media",
+            "photoCount" : 3,
+            "photoPaths" : [
+              "Media/Clip.MOV",
+              "Media/IMG_0001.jpg",
+              "Media/IMG_0002.heic"
+            ],
+            "subfolders" : [
+
+            ],
+            "totalPhotoCount" : 3
+          },
+          {
+            "coverPhotoSource" : "ownPhotos",
+            "hasDateCreated" : true,
+            "hasDateModified" : true,
+            "name" : "Nested",
+            "path" : "Nested",
+            "photoCount" : 1,
+            "photoPaths" : [
+              "Nested/nested1.jpg"
+            ],
+            "subfolders" : [
+              {
+                "coverPhotoSource" : "ownPhotos",
+                "hasDateCreated" : true,
+                "hasDateModified" : true,
+                "name" : "Deep",
+                "path" : "Nested/Deep",
+                "photoCount" : 2,
+                "photoPaths" : [
+                  "Nested/Deep/deep1.jpg",
+                  "Nested/Deep/deep2.png"
+                ],
+                "subfolders" : [
+
+                ],
+                "totalPhotoCount" : 2
+              }
+            ],
+            "totalPhotoCount" : 3
+          },
+          {
+            "coverPhotoSource" : "ownPhotos",
+            "hasDateCreated" : true,
+            "hasDateModified" : true,
+            "name" : "Unicode",
+            "path" : "Unicode",
+            "photoCount" : 4,
+            "photoPaths" : [
+              "Unicode/café.jpg",
+              "Unicode/emoji 🌵 cactus.jpg",
+              "Unicode/résumé.jpg",
+              "Unicode/spaces and (parens).jpg"
+            ],
+            "subfolders" : [
+
+            ],
+            "totalPhotoCount" : 4
+          }
+        ],
+        "totalPhotoCount" : 15
+      },
+      "sidecarManifest" : [
+        {
+          "downloadStatus" : "local",
+          "photoPath" : "B.JPG",
+          "sidecarPath" : "B.JPG.xmp",
+          "versionHasContentIdentifier" : true,
+          "versionModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-01T10:00:02.000Z"
+          },
+          "versionSize" : 200
+        },
+        {
+          "downloadStatus" : "local",
+          "photoPath" : "Locked/locked1.jpg",
+          "sidecarPath" : "Locked/locked1.jpg.xmp",
+          "versionHasContentIdentifier" : true,
+          "versionModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-04T10:00:01.000Z"
+          },
+          "versionSize" : 202
+        },
+        {
+          "downloadStatus" : "local",
+          "photoPath" : "Nested/Deep/deep1.jpg",
+          "sidecarPath" : "Nested/Deep/deep1.jpg.xmp",
+          "versionHasContentIdentifier" : true,
+          "versionModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-03T10:00:01.000Z"
+          },
+          "versionSize" : 201
+        }
+      ],
+      "treeState" : "initial"
+    },
+    {
+      "addedPaths" : [
+        "Added/added1.jpg",
+        "Media/IMG_0003.jpg"
+      ],
+      "cacheFrom" : "1-full-cold",
+      "failedDirectoryPaths" : [
+        "Locked"
+      ],
+      "flatPhotos" : [
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-04-01T10:00:02.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-04-01T10:00:02.000Z"
+          },
+          "fileSize" : 1101,
+          "filename" : "added1",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Added/added1.jpg",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-01T10:00:01.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-01T10:00:01.000Z"
+          },
+          "fileSize" : 1001,
+          "filename" : "B",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "B.JPG",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-07T10:00:03.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-07T10:00:03.000Z"
+          },
+          "fileSize" : 0,
+          "filename" : "zero",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Junk/zero.jpg",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-05T10:00:04.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-05T10:00:04.000Z"
+          },
+          "fileSize" : 1011,
+          "filename" : "clip",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : true,
+          "locality" : "local",
+          "path" : "Media/Clip.MOV",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-05T10:00:00.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-05T10:00:00.000Z"
+          },
+          "fileSize" : 1007,
+          "filename" : "IMG_0001",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "livePhotoVideoPath" : "Media/IMG_0001.mov",
+          "locality" : "local",
+          "path" : "Media/IMG_0001.jpg",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-05T10:00:02.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-05T10:00:02.000Z"
+          },
+          "fileSize" : 1009,
+          "filename" : "IMG_0002",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "livePhotoVideoPath" : "Media/IMG_0002.heic.mov",
+          "locality" : "local",
+          "path" : "Media/IMG_0002.heic",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-04-01T10:00:00.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-04-01T10:00:00.000Z"
+          },
+          "fileSize" : 1100,
+          "filename" : "IMG_0003",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Media/IMG_0003.jpg",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-03T10:00:00.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-03T10:00:00.000Z"
+          },
+          "fileSize" : 1003,
+          "filename" : "deep1",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Nested/Deep/deep1.jpg",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-03T10:00:02.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-03T10:00:02.000Z"
+          },
+          "fileSize" : 1004,
+          "filename" : "deep2",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Nested/Deep/deep2.png",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-06T10:00:00.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-06T10:00:00.000Z"
+          },
+          "fileSize" : 1012,
+          "filename" : "café",
+          "filenameNormalization" : "NFD",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Unicode/café.jpg",
+          "pathNormalization" : "NFD",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-06T10:00:02.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-06T10:00:02.000Z"
+          },
+          "fileSize" : 1014,
+          "filename" : "emoji 🌵 cactus",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Unicode/emoji 🌵 cactus.jpg",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-06T10:00:01.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-06T10:00:01.000Z"
+          },
+          "fileSize" : 1013,
+          "filename" : "résumé",
+          "filenameNormalization" : "NFC",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Unicode/résumé.jpg",
+          "pathNormalization" : "NFC",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-06T10:00:03.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-06T10:00:03.000Z"
+          },
+          "fileSize" : 1015,
+          "filename" : "spaces and (parens)",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Unicode/spaces and (parens).jpg",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-01T10:00:00.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-01T10:00:00.000Z"
+          },
+          "fileSize" : 1000,
+          "filename" : "a",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "a.jpg",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        }
+      ],
+      "modifiedPaths" : [
+
+      ],
+      "name" : "2-light-after-mutations",
+      "needsEnrichment" : true,
+      "notes" : [
+        "Light scan (reuseCached = true) against the pass-1 cache.",
+        "LANDMINE — the light-scan blind spot: for a URL already in the cache the classify pass reuses the CACHED size and mtime and never stats the file. `a.jpg` was rewritten with a different size AND a different mtime and still does not appear in modifiedPaths. A light scan can never detect a change to a file it already knows.",
+        "Unicode/emoji cactus.jpg was rewritten with the SAME size and mtime; it is invisible to light and full alike, because the only change signal is (fileSize, fileModificationDate).",
+        "Locked/ is chmod 000: its listing throws, so it contributes a failedDirectoryPaths entry, its photos are absent from flatPhotos, and — critically — they are EXCLUDED from removedPaths. A transient I/O error must not look like a deletion.",
+        "The Locked/ folder node still exists in the tree (with zero photos): the directory is stat-able even when it is not listable.",
+        "Nested/nested1.jpg was deleted and does appear in removedPaths.",
+        "New files (Media/IMG_0003.jpg, Added/added1.jpg) take the slow path even in a light scan, because a cache miss is the one branch that stats.",
+        "Cached photos keep their cached PhotoFile verbatim; only `filename` and `livePhotoVideoURL` are refreshed, since live-photo pairing can change without the photo's own bytes changing.",
+        "Sidecar rows for unchanged photos are reused from the cached manifest, which is what skips the 7-key FileProviderDetector probe.",
+        "Nested/Deep/deep1.jpg.xmp was deleted, so its row disappears — a removed sidecar drops out of the manifest via the directory listing, never via the cache.",
+        "Locked/locked1.jpg's row disappears too, but only because its directory could not be listed. Compare pass 4."
+      ],
+      "removedPaths" : [
+        "Nested/nested1.jpg"
+      ],
+      "reuseCached" : true,
+      "rootFolder" : {
+        "coverPhotoSource" : "ownPhotos",
+        "hasDateCreated" : true,
+        "hasDateModified" : true,
+        "name" : "ScannerFixtureLibrary",
+        "path" : "",
+        "photoCount" : 2,
+        "photoPaths" : [
+          "B.JPG",
+          "a.jpg"
+        ],
+        "subfolders" : [
+          {
+            "coverPhotoSource" : "ownPhotos",
+            "hasDateCreated" : true,
+            "hasDateModified" : true,
+            "name" : "Added",
+            "path" : "Added",
+            "photoCount" : 1,
+            "photoPaths" : [
+              "Added/added1.jpg"
+            ],
+            "subfolders" : [
+
+            ],
+            "totalPhotoCount" : 1
+          },
+          {
+            "coverPhotoSource" : "none",
+            "hasDateCreated" : true,
+            "hasDateModified" : true,
+            "name" : "Empty",
+            "path" : "Empty",
+            "photoCount" : 0,
+            "photoPaths" : [
+
+            ],
+            "subfolders" : [
+
+            ],
+            "totalPhotoCount" : 0
+          },
+          {
+            "coverPhotoSource" : "ownPhotos",
+            "hasDateCreated" : true,
+            "hasDateModified" : true,
+            "name" : "Junk",
+            "path" : "Junk",
+            "photoCount" : 1,
+            "photoPaths" : [
+              "Junk/zero.jpg"
+            ],
+            "subfolders" : [
+
+            ],
+            "totalPhotoCount" : 1
+          },
+          {
+            "coverPhotoSource" : "none",
+            "hasDateCreated" : true,
+            "hasDateModified" : true,
+            "name" : "Locked",
+            "path" : "Locked",
+            "photoCount" : 0,
+            "photoPaths" : [
+
+            ],
+            "subfolders" : [
+
+            ],
+            "totalPhotoCount" : 0
+          },
+          {
+            "coverPhotoSource" : "ownPhotos",
+            "hasDateCreated" : true,
+            "hasDateModified" : true,
+            "name" : "Media",
+            "path" : "Media",
+            "photoCount" : 4,
+            "photoPaths" : [
+              "Media/Clip.MOV",
+              "Media/IMG_0001.jpg",
+              "Media/IMG_0002.heic",
+              "Media/IMG_0003.jpg"
+            ],
+            "subfolders" : [
+
+            ],
+            "totalPhotoCount" : 4
+          },
+          {
+            "coverPhotoSource" : "subfolder:Deep",
+            "hasDateCreated" : true,
+            "hasDateModified" : true,
+            "name" : "Nested",
+            "path" : "Nested",
+            "photoCount" : 0,
+            "photoPaths" : [
+
+            ],
+            "subfolders" : [
+              {
+                "coverPhotoSource" : "ownPhotos",
+                "hasDateCreated" : true,
+                "hasDateModified" : true,
+                "name" : "Deep",
+                "path" : "Nested/Deep",
+                "photoCount" : 2,
+                "photoPaths" : [
+                  "Nested/Deep/deep1.jpg",
+                  "Nested/Deep/deep2.png"
+                ],
+                "subfolders" : [
+
+                ],
+                "totalPhotoCount" : 2
+              }
+            ],
+            "totalPhotoCount" : 2
+          },
+          {
+            "coverPhotoSource" : "ownPhotos",
+            "hasDateCreated" : true,
+            "hasDateModified" : true,
+            "name" : "Unicode",
+            "path" : "Unicode",
+            "photoCount" : 4,
+            "photoPaths" : [
+              "Unicode/café.jpg",
+              "Unicode/emoji 🌵 cactus.jpg",
+              "Unicode/résumé.jpg",
+              "Unicode/spaces and (parens).jpg"
+            ],
+            "subfolders" : [
+
+            ],
+            "totalPhotoCount" : 4
+          }
+        ],
+        "totalPhotoCount" : 14
+      },
+      "sidecarManifest" : [
+        {
+          "downloadStatus" : "local",
+          "photoPath" : "B.JPG",
+          "sidecarPath" : "B.JPG.xmp",
+          "versionHasContentIdentifier" : true,
+          "versionModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-01T10:00:02.000Z"
+          },
+          "versionSize" : 200
+        },
+        {
+          "downloadStatus" : "local",
+          "photoPath" : "Media/IMG_0003.jpg",
+          "sidecarPath" : "Media/IMG_0003.jpg.xmp",
+          "versionHasContentIdentifier" : true,
+          "versionModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-04-01T10:00:01.000Z"
+          },
+          "versionSize" : 210
+        }
+      ],
+      "treeState" : "mutated, Locked/ unreadable"
+    },
+    {
+      "addedPaths" : [
+        "Added/added1.jpg",
+        "Media/IMG_0003.jpg"
+      ],
+      "cacheFrom" : "1-full-cold",
+      "failedDirectoryPaths" : [
+        "Locked"
+      ],
+      "flatPhotos" : [
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-04-01T10:00:02.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-04-01T10:00:02.000Z"
+          },
+          "fileSize" : 1101,
+          "filename" : "added1",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Added/added1.jpg",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-01T10:00:01.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-01T10:00:01.000Z"
+          },
+          "fileSize" : 1001,
+          "filename" : "B",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "B.JPG",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-07T10:00:03.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-07T10:00:03.000Z"
+          },
+          "fileSize" : 0,
+          "filename" : "zero",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Junk/zero.jpg",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-05T10:00:04.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-05T10:00:04.000Z"
+          },
+          "fileSize" : 1011,
+          "filename" : "clip",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : true,
+          "locality" : "local",
+          "path" : "Media/Clip.MOV",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-05T10:00:00.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-05T10:00:00.000Z"
+          },
+          "fileSize" : 1007,
+          "filename" : "IMG_0001",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "livePhotoVideoPath" : "Media/IMG_0001.mov",
+          "locality" : "local",
+          "path" : "Media/IMG_0001.jpg",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-05T10:00:02.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-05T10:00:02.000Z"
+          },
+          "fileSize" : 1009,
+          "filename" : "IMG_0002",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "livePhotoVideoPath" : "Media/IMG_0002.heic.mov",
+          "locality" : "local",
+          "path" : "Media/IMG_0002.heic",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-04-01T10:00:00.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-04-01T10:00:00.000Z"
+          },
+          "fileSize" : 1100,
+          "filename" : "IMG_0003",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Media/IMG_0003.jpg",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-03T10:00:00.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-03T10:00:00.000Z"
+          },
+          "fileSize" : 1003,
+          "filename" : "deep1",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Nested/Deep/deep1.jpg",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-03T10:00:02.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-03T10:00:02.000Z"
+          },
+          "fileSize" : 1004,
+          "filename" : "deep2",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Nested/Deep/deep2.png",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-06T10:00:00.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-06T10:00:00.000Z"
+          },
+          "fileSize" : 1012,
+          "filename" : "café",
+          "filenameNormalization" : "NFD",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Unicode/café.jpg",
+          "pathNormalization" : "NFD",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-06T10:00:02.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-06T10:00:02.000Z"
+          },
+          "fileSize" : 1014,
+          "filename" : "emoji 🌵 cactus",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Unicode/emoji 🌵 cactus.jpg",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-06T10:00:01.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-06T10:00:01.000Z"
+          },
+          "fileSize" : 1013,
+          "filename" : "résumé",
+          "filenameNormalization" : "NFC",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Unicode/résumé.jpg",
+          "pathNormalization" : "NFC",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-06T10:00:03.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-06T10:00:03.000Z"
+          },
+          "fileSize" : 1015,
+          "filename" : "spaces and (parens)",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Unicode/spaces and (parens).jpg",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-01T10:00:00.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-04-02T10:00:00.000Z"
+          },
+          "fileSize" : 2000,
+          "filename" : "a",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "a.jpg",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        }
+      ],
+      "modifiedPaths" : [
+        "a.jpg"
+      ],
+      "name" : "3-full-after-mutations",
+      "needsEnrichment" : true,
+      "notes" : [
+        "Full scan (reuseCached = false) against the same pass-1 cache and the same mutated tree — the direct comparison with pass 2.",
+        "`a.jpg` IS in modifiedPaths here: the full pass stats every file, so the new size and mtime are visible.",
+        "Unicode/emoji cactus.jpg is still invisible: same size, same mtime, different bytes. Neither scan kind hashes content.",
+        "Everything else matches pass 2 — full vs light changes WHAT is detected, not the tree shape or the removal accounting.",
+        "A full scan re-probes and rebuilds every PhotoFile, but for an unchanged file it still carries the cached dateTaken / tags / GPS / country forward and keeps enrichedFileDate, so it does not force a re-enrichment."
+      ],
+      "removedPaths" : [
+        "Nested/nested1.jpg"
+      ],
+      "reuseCached" : false,
+      "rootFolder" : {
+        "coverPhotoSource" : "ownPhotos",
+        "hasDateCreated" : true,
+        "hasDateModified" : true,
+        "name" : "ScannerFixtureLibrary",
+        "path" : "",
+        "photoCount" : 2,
+        "photoPaths" : [
+          "B.JPG",
+          "a.jpg"
+        ],
+        "subfolders" : [
+          {
+            "coverPhotoSource" : "ownPhotos",
+            "hasDateCreated" : true,
+            "hasDateModified" : true,
+            "name" : "Added",
+            "path" : "Added",
+            "photoCount" : 1,
+            "photoPaths" : [
+              "Added/added1.jpg"
+            ],
+            "subfolders" : [
+
+            ],
+            "totalPhotoCount" : 1
+          },
+          {
+            "coverPhotoSource" : "none",
+            "hasDateCreated" : true,
+            "hasDateModified" : true,
+            "name" : "Empty",
+            "path" : "Empty",
+            "photoCount" : 0,
+            "photoPaths" : [
+
+            ],
+            "subfolders" : [
+
+            ],
+            "totalPhotoCount" : 0
+          },
+          {
+            "coverPhotoSource" : "ownPhotos",
+            "hasDateCreated" : true,
+            "hasDateModified" : true,
+            "name" : "Junk",
+            "path" : "Junk",
+            "photoCount" : 1,
+            "photoPaths" : [
+              "Junk/zero.jpg"
+            ],
+            "subfolders" : [
+
+            ],
+            "totalPhotoCount" : 1
+          },
+          {
+            "coverPhotoSource" : "none",
+            "hasDateCreated" : true,
+            "hasDateModified" : true,
+            "name" : "Locked",
+            "path" : "Locked",
+            "photoCount" : 0,
+            "photoPaths" : [
+
+            ],
+            "subfolders" : [
+
+            ],
+            "totalPhotoCount" : 0
+          },
+          {
+            "coverPhotoSource" : "ownPhotos",
+            "hasDateCreated" : true,
+            "hasDateModified" : true,
+            "name" : "Media",
+            "path" : "Media",
+            "photoCount" : 4,
+            "photoPaths" : [
+              "Media/Clip.MOV",
+              "Media/IMG_0001.jpg",
+              "Media/IMG_0002.heic",
+              "Media/IMG_0003.jpg"
+            ],
+            "subfolders" : [
+
+            ],
+            "totalPhotoCount" : 4
+          },
+          {
+            "coverPhotoSource" : "subfolder:Deep",
+            "hasDateCreated" : true,
+            "hasDateModified" : true,
+            "name" : "Nested",
+            "path" : "Nested",
+            "photoCount" : 0,
+            "photoPaths" : [
+
+            ],
+            "subfolders" : [
+              {
+                "coverPhotoSource" : "ownPhotos",
+                "hasDateCreated" : true,
+                "hasDateModified" : true,
+                "name" : "Deep",
+                "path" : "Nested/Deep",
+                "photoCount" : 2,
+                "photoPaths" : [
+                  "Nested/Deep/deep1.jpg",
+                  "Nested/Deep/deep2.png"
+                ],
+                "subfolders" : [
+
+                ],
+                "totalPhotoCount" : 2
+              }
+            ],
+            "totalPhotoCount" : 2
+          },
+          {
+            "coverPhotoSource" : "ownPhotos",
+            "hasDateCreated" : true,
+            "hasDateModified" : true,
+            "name" : "Unicode",
+            "path" : "Unicode",
+            "photoCount" : 4,
+            "photoPaths" : [
+              "Unicode/café.jpg",
+              "Unicode/emoji 🌵 cactus.jpg",
+              "Unicode/résumé.jpg",
+              "Unicode/spaces and (parens).jpg"
+            ],
+            "subfolders" : [
+
+            ],
+            "totalPhotoCount" : 4
+          }
+        ],
+        "totalPhotoCount" : 14
+      },
+      "sidecarManifest" : [
+        {
+          "downloadStatus" : "local",
+          "photoPath" : "B.JPG",
+          "sidecarPath" : "B.JPG.xmp",
+          "versionHasContentIdentifier" : true,
+          "versionModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-01T10:00:02.000Z"
+          },
+          "versionSize" : 200
+        },
+        {
+          "downloadStatus" : "local",
+          "photoPath" : "Media/IMG_0003.jpg",
+          "sidecarPath" : "Media/IMG_0003.jpg.xmp",
+          "versionHasContentIdentifier" : true,
+          "versionModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-04-01T10:00:01.000Z"
+          },
+          "versionSize" : 210
+        }
+      ],
+      "treeState" : "mutated, Locked/ unreadable"
+    },
+    {
+      "addedPaths" : [
+        "Added/added1.jpg",
+        "Media/IMG_0003.jpg"
+      ],
+      "cacheFrom" : "1-full-cold",
+      "failedDirectoryPaths" : [
+
+      ],
+      "flatPhotos" : [
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-04-01T10:00:02.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-04-01T10:00:02.000Z"
+          },
+          "fileSize" : 1101,
+          "filename" : "added1",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Added/added1.jpg",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-01T10:00:01.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-01T10:00:01.000Z"
+          },
+          "fileSize" : 1001,
+          "filename" : "B",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "B.JPG",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-07T10:00:03.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-07T10:00:03.000Z"
+          },
+          "fileSize" : 0,
+          "filename" : "zero",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Junk/zero.jpg",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-04T10:00:00.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-04T10:00:00.000Z"
+          },
+          "fileSize" : 1005,
+          "filename" : "locked1",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Locked/locked1.jpg",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-04T10:00:02.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-04T10:00:02.000Z"
+          },
+          "fileSize" : 1006,
+          "filename" : "locked2",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Locked/locked2.jpg",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-05T10:00:04.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-05T10:00:04.000Z"
+          },
+          "fileSize" : 1011,
+          "filename" : "clip",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : true,
+          "locality" : "local",
+          "path" : "Media/Clip.MOV",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-05T10:00:00.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-05T10:00:00.000Z"
+          },
+          "fileSize" : 1007,
+          "filename" : "IMG_0001",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "livePhotoVideoPath" : "Media/IMG_0001.mov",
+          "locality" : "local",
+          "path" : "Media/IMG_0001.jpg",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-05T10:00:02.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-05T10:00:02.000Z"
+          },
+          "fileSize" : 1009,
+          "filename" : "IMG_0002",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "livePhotoVideoPath" : "Media/IMG_0002.heic.mov",
+          "locality" : "local",
+          "path" : "Media/IMG_0002.heic",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-04-01T10:00:00.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-04-01T10:00:00.000Z"
+          },
+          "fileSize" : 1100,
+          "filename" : "IMG_0003",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Media/IMG_0003.jpg",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-03T10:00:00.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-03T10:00:00.000Z"
+          },
+          "fileSize" : 1003,
+          "filename" : "deep1",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Nested/Deep/deep1.jpg",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-03T10:00:02.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-03T10:00:02.000Z"
+          },
+          "fileSize" : 1004,
+          "filename" : "deep2",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Nested/Deep/deep2.png",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-06T10:00:00.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-06T10:00:00.000Z"
+          },
+          "fileSize" : 1012,
+          "filename" : "café",
+          "filenameNormalization" : "NFD",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Unicode/café.jpg",
+          "pathNormalization" : "NFD",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-06T10:00:02.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-06T10:00:02.000Z"
+          },
+          "fileSize" : 1014,
+          "filename" : "emoji 🌵 cactus",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Unicode/emoji 🌵 cactus.jpg",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-06T10:00:01.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-06T10:00:01.000Z"
+          },
+          "fileSize" : 1013,
+          "filename" : "résumé",
+          "filenameNormalization" : "NFC",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Unicode/résumé.jpg",
+          "pathNormalization" : "NFC",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-06T10:00:03.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-06T10:00:03.000Z"
+          },
+          "fileSize" : 1015,
+          "filename" : "spaces and (parens)",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "Unicode/spaces and (parens).jpg",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        },
+        {
+          "dateFromMetadata" : false,
+          "dateTaken" : {
+            "basis" : "utc",
+            "value" : "2021-03-01T10:00:00.000Z"
+          },
+          "faceRegionCount" : 0,
+          "fileModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-01T10:00:00.000Z"
+          },
+          "fileSize" : 1000,
+          "filename" : "a",
+          "filenameNormalization" : "ascii",
+          "hierarchicalTagCount" : 0,
+          "idMatchesStableUUIDOfPath" : true,
+          "isVideo" : false,
+          "locality" : "local",
+          "path" : "a.jpg",
+          "pathNormalization" : "ascii",
+          "sidecarStatus" : "absent"
+        }
+      ],
+      "modifiedPaths" : [
+
+      ],
+      "name" : "4-light-after-unlock",
+      "needsEnrichment" : true,
+      "notes" : [
+        "Light scan against the pass-1 cache with Locked/ readable again.",
+        "The previously unreadable photos come back as plain cache hits — no removal, no re-enrichment — which is the payoff for excluding them from removedPaths in passes 2 and 3.",
+        "failedDirectoryPaths is empty and removedPaths contains only the genuinely deleted Nested/nested1.jpg.",
+        "Locked/locked1.jpg's sidecar row is back, taken from the cached manifest rather than re-probed.",
+        "Unicode/ pins the normalization contract: café.jpg is stored NFD, résumé.jpg NFC, and both survive the round trip byte-for-byte. `pathNormalization` is the field that proves it — comparing the path strings could not, because Swift's String == is canonical equivalence. See PathNormalizationTests."
+      ],
+      "removedPaths" : [
+        "Nested/nested1.jpg"
+      ],
+      "reuseCached" : true,
+      "rootFolder" : {
+        "coverPhotoSource" : "ownPhotos",
+        "hasDateCreated" : true,
+        "hasDateModified" : true,
+        "name" : "ScannerFixtureLibrary",
+        "path" : "",
+        "photoCount" : 2,
+        "photoPaths" : [
+          "B.JPG",
+          "a.jpg"
+        ],
+        "subfolders" : [
+          {
+            "coverPhotoSource" : "ownPhotos",
+            "hasDateCreated" : true,
+            "hasDateModified" : true,
+            "name" : "Added",
+            "path" : "Added",
+            "photoCount" : 1,
+            "photoPaths" : [
+              "Added/added1.jpg"
+            ],
+            "subfolders" : [
+
+            ],
+            "totalPhotoCount" : 1
+          },
+          {
+            "coverPhotoSource" : "none",
+            "hasDateCreated" : true,
+            "hasDateModified" : true,
+            "name" : "Empty",
+            "path" : "Empty",
+            "photoCount" : 0,
+            "photoPaths" : [
+
+            ],
+            "subfolders" : [
+
+            ],
+            "totalPhotoCount" : 0
+          },
+          {
+            "coverPhotoSource" : "ownPhotos",
+            "hasDateCreated" : true,
+            "hasDateModified" : true,
+            "name" : "Junk",
+            "path" : "Junk",
+            "photoCount" : 1,
+            "photoPaths" : [
+              "Junk/zero.jpg"
+            ],
+            "subfolders" : [
+
+            ],
+            "totalPhotoCount" : 1
+          },
+          {
+            "coverPhotoSource" : "ownPhotos",
+            "hasDateCreated" : true,
+            "hasDateModified" : true,
+            "name" : "Locked",
+            "path" : "Locked",
+            "photoCount" : 2,
+            "photoPaths" : [
+              "Locked/locked1.jpg",
+              "Locked/locked2.jpg"
+            ],
+            "subfolders" : [
+
+            ],
+            "totalPhotoCount" : 2
+          },
+          {
+            "coverPhotoSource" : "ownPhotos",
+            "hasDateCreated" : true,
+            "hasDateModified" : true,
+            "name" : "Media",
+            "path" : "Media",
+            "photoCount" : 4,
+            "photoPaths" : [
+              "Media/Clip.MOV",
+              "Media/IMG_0001.jpg",
+              "Media/IMG_0002.heic",
+              "Media/IMG_0003.jpg"
+            ],
+            "subfolders" : [
+
+            ],
+            "totalPhotoCount" : 4
+          },
+          {
+            "coverPhotoSource" : "subfolder:Deep",
+            "hasDateCreated" : true,
+            "hasDateModified" : true,
+            "name" : "Nested",
+            "path" : "Nested",
+            "photoCount" : 0,
+            "photoPaths" : [
+
+            ],
+            "subfolders" : [
+              {
+                "coverPhotoSource" : "ownPhotos",
+                "hasDateCreated" : true,
+                "hasDateModified" : true,
+                "name" : "Deep",
+                "path" : "Nested/Deep",
+                "photoCount" : 2,
+                "photoPaths" : [
+                  "Nested/Deep/deep1.jpg",
+                  "Nested/Deep/deep2.png"
+                ],
+                "subfolders" : [
+
+                ],
+                "totalPhotoCount" : 2
+              }
+            ],
+            "totalPhotoCount" : 2
+          },
+          {
+            "coverPhotoSource" : "ownPhotos",
+            "hasDateCreated" : true,
+            "hasDateModified" : true,
+            "name" : "Unicode",
+            "path" : "Unicode",
+            "photoCount" : 4,
+            "photoPaths" : [
+              "Unicode/café.jpg",
+              "Unicode/emoji 🌵 cactus.jpg",
+              "Unicode/résumé.jpg",
+              "Unicode/spaces and (parens).jpg"
+            ],
+            "subfolders" : [
+
+            ],
+            "totalPhotoCount" : 4
+          }
+        ],
+        "totalPhotoCount" : 16
+      },
+      "sidecarManifest" : [
+        {
+          "downloadStatus" : "local",
+          "photoPath" : "B.JPG",
+          "sidecarPath" : "B.JPG.xmp",
+          "versionHasContentIdentifier" : true,
+          "versionModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-01T10:00:02.000Z"
+          },
+          "versionSize" : 200
+        },
+        {
+          "downloadStatus" : "local",
+          "photoPath" : "Locked/locked1.jpg",
+          "sidecarPath" : "Locked/locked1.jpg.xmp",
+          "versionHasContentIdentifier" : true,
+          "versionModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-03-04T10:00:01.000Z"
+          },
+          "versionSize" : 202
+        },
+        {
+          "downloadStatus" : "local",
+          "photoPath" : "Media/IMG_0003.jpg",
+          "sidecarPath" : "Media/IMG_0003.jpg.xmp",
+          "versionHasContentIdentifier" : true,
+          "versionModificationDate" : {
+            "basis" : "utc",
+            "value" : "2021-04-01T10:00:01.000Z"
+          },
+          "versionSize" : 210
+        }
+      ],
+      "treeState" : "mutated, Locked/ readable"
+    }
+  ],
+  "schema" : 1
+}

@@ -219,6 +219,14 @@ targets:
       - path: core/gallery-ml/tests/fixtures
         type: folder
         buildPhase: resources
+      # Phase-3 scanner/metadata conformance fixtures: the adversarial asset
+      # tree plus the three committed expectation JSONs. Referenced in place
+      # for the same reason as the packs above — the Rust port reads the very
+      # same files from the repo (core/gallery-meta/tests/conformance_fixtures.rs),
+      # so there is exactly one copy of the spec. ~70 KB.
+      - path: core/fixtures/scan-conformance
+        type: folder
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.j23n.localgallery.app.tests

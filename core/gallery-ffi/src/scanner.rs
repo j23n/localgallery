@@ -45,7 +45,7 @@
 //! Swift rebuilds the tree from the slices in one linear pass.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use gallery_model::date::AppleDate;
@@ -145,6 +145,11 @@ pub struct VfsProviderAttrs {
     /// `fileContentIdentifierKey`, stringified. `None` when the provider
     /// vends none and callers fall back to `(mtime, size)`.
     pub content_version: Option<String>,
+    /// `totalFileSizeKey` — the size the file has once its bytes are here,
+    /// which for a placeholder is not the size a `stat` reports. Feeds the
+    /// sidecar manifest's `ContentVersion.size`, where the Swift baseline wrote
+    /// `totalFileSize ?? fileSize`. `None` falls back to the listing's size.
+    pub intended_size: Option<i64>,
 }
 
 /// The platform's provider-attribute reader.
@@ -163,11 +168,19 @@ pub struct VfsProviderAttrs {
 ///
 /// Implementations are expected to *fan the batch out*. Each of these is a
 /// blocking XPC round trip to `fileproviderd`; run serially they were 99.4% of
-/// a cold scan (`_plans/06` Finding 1). Emission order is the core's problem,
-/// not the implementation's — the answers are re-keyed by path here.
+/// a cold scan (`_plans/06` Finding 1).
+///
+/// **The match is positional and nothing re-keys it.** An implementation that
+/// fans the batch out owes the core answers written back into the slots it was
+/// asked about — `CoreProviderProbe` does exactly that, striping into a
+/// positional array. A reply of the wrong length is a platform bug the core
+/// cannot paper over, so [`Vfs::probe_provider`] turns one into a batch of
+/// defaults rather than silently pairing path `i` with answer `i` for a
+/// prefix and losing the tail.
 #[uniffi::export(with_foreign)]
 pub trait ProviderProbe: Send + Sync {
-    /// Provider attributes for `paths`, positionally.
+    /// Provider attributes for `paths`, positionally — exactly one row per
+    /// input path, in the same order.
     fn probe(&self, paths: Vec<String>) -> Vec<VfsProviderAttrs>;
 }
 
@@ -188,6 +201,10 @@ pub trait ScanProgressListener: Send + Sync {
 struct ProbingVfs {
     inner: StdVfs,
     probe: Arc<dyn ProviderProbe>,
+    /// Batches discarded because the foreign reply was the wrong length. Kept
+    /// here rather than in `ScanStats` because this is where a mis-sized reply
+    /// is caught — the core below never sees one.
+    mismatches: AtomicU64,
 }
 
 impl Vfs for ProbingVfs {
@@ -209,14 +226,30 @@ impl Vfs for ProbingVfs {
     fn exists(&self, path: &str) -> bool {
         self.inner.exists(path)
     }
+    /// The answers are paired with the request **positionally**, so a reply of
+    /// the wrong length is not a partial answer — it is an answer whose
+    /// alignment is unknown. Trusting the prefix would hand file `i`'s
+    /// placeholder flag and content identifier to whatever file happens to sit
+    /// at index `i` of a filtered reply, which is a wrong `.remote` badge and a
+    /// sidecar-cache entry keyed to the wrong bytes.
+    ///
+    /// So a mis-sized batch is discarded whole and every path in it reads as a
+    /// plain local file — the same degradation a failed `resourceValues`
+    /// already produced, applied to the batch instead of to one file. The scan
+    /// still completes; the count surfaces in `ScanTimings.probe_mismatches`.
     fn probe_provider(&self, paths: &[String]) -> Vec<ProviderAttrs> {
-        self.probe
-            .probe(paths.to_vec())
+        let answers = self.probe.probe(paths.to_vec());
+        if answers.len() != paths.len() {
+            self.mismatches.fetch_add(1, Ordering::Relaxed);
+            return vec![ProviderAttrs::default(); paths.len()];
+        }
+        answers
             .into_iter()
             .map(|a| ProviderAttrs {
                 is_file_provider: a.is_file_provider,
                 is_placeholder: a.is_placeholder,
                 content_version: a.content_version,
+                intended_size: a.intended_size,
             })
             .collect()
     }
@@ -376,6 +409,10 @@ pub struct ScanTimings {
     pub probed_paths: u32,
     /// Batched probe calls — i.e. boundary crossings.
     pub probe_batches: u32,
+    /// Probe batches discarded because the reply did not have one row per
+    /// requested path. Always 0 when the platform probe is behaving; anything
+    /// else means those directories were scanned as plain local storage.
+    pub probe_mismatches: u32,
     /// Photos reused verbatim from the cache.
     pub cache_hits: u32,
     /// Photos rebuilt.
@@ -437,10 +474,54 @@ pub struct SnapshotRecord {
 // ---------------------------------------------------------------------------
 
 /// The app's handle on the core scanner.
+///
+/// # Why cancellation is a generation counter and not a flag
+///
+/// A `bool` cannot say *which* run it means, and both ways of getting that
+/// wrong are reachable from the Store's ordinary behaviour:
+///
+/// * `scan` cleared the flag on entry, so a `cancel()` that arrived while no
+///   scan was running — the common shape, because the app's scan `Task` can be
+///   cancelled between the two passes of a two-phase scan — was **swallowed**;
+/// * a `cancel()` that arrived just after a run finished stayed set, and the
+///   **next, unrelated** scan died on its first directory.
+///
+/// So each run takes a generation, `cancel()` names the generation currently in
+/// flight, and the hook compares the two. A `cancel()` while idle is a no-op
+/// rather than an ambush on whatever runs next; the caller not starting a scan
+/// it has already cancelled is the Swift side's job, and `CoreScanner` does it.
 #[derive(uniffi::Object)]
 pub struct ScannerSession {
     probe: Arc<dyn ProviderProbe>,
-    cancel: AtomicBool,
+    /// Generation handed to the next run. Monotonic, never reused.
+    next_generation: AtomicU64,
+    /// Generation of the run in flight; `IDLE` when none is.
+    running_generation: AtomicU64,
+    /// Generation [`ScannerSession::cancel`] last named. `IDLE` until one is.
+    cancelled_generation: AtomicU64,
+}
+
+/// `running_generation` / `cancelled_generation` when there is nothing to name.
+/// Generations start at 1, so zero can never collide with a real run.
+const IDLE: u64 = 0;
+
+/// Clears [`ScannerSession::running_generation`] however `scan` returns —
+/// including the early `?` on a cancelled walk. Leaving it set would make the
+/// *next* `cancel()` name a run that had already finished.
+struct RunGuard<'a> {
+    session: &'a ScannerSession,
+    generation: u64,
+}
+
+impl Drop for RunGuard<'_> {
+    fn drop(&mut self) {
+        let _ = self.session.running_generation.compare_exchange(
+            self.generation,
+            IDLE,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        );
+    }
 }
 
 #[uniffi::export]
@@ -453,7 +534,9 @@ impl ScannerSession {
     pub fn new(probe: Arc<dyn ProviderProbe>) -> Arc<Self> {
         Arc::new(ScannerSession {
             probe,
-            cancel: AtomicBool::new(false),
+            next_generation: AtomicU64::new(IDLE + 1),
+            running_generation: AtomicU64::new(IDLE),
+            cancelled_generation: AtomicU64::new(IDLE),
         })
     }
 
@@ -469,12 +552,18 @@ impl ScannerSession {
         request: ScanRequest,
         progress: Option<Arc<dyn ScanProgressListener>>,
     ) -> Result<ScanOutcomeRecord, ScanError> {
-        self.cancel.store(false, Ordering::Release);
+        let generation = self.next_generation.fetch_add(1, Ordering::AcqRel);
+        self.running_generation.store(generation, Ordering::Release);
+        let _guard = RunGuard {
+            session: self,
+            generation,
+        };
         let started = std::time::Instant::now();
 
         let vfs = ProbingVfs {
             inner: StdVfs::new(),
             probe: Arc::clone(&self.probe),
+            mismatches: AtomicU64::new(0),
         };
         let input = ScanInput {
             reuse_cached: request.reuse_cached,
@@ -501,18 +590,29 @@ impl ScannerSession {
             &root,
             &input,
             report.as_ref().map(|f| f as &dyn Fn(usize)),
-            Some(&|| self.cancel.load(Ordering::Acquire)),
+            Some(&|| self.cancelled_generation.load(Ordering::Acquire) == generation),
         )
         .ok_or(ScanError::Cancelled)?;
 
-        Ok(outcome_to_record(outcome, started.elapsed()))
+        Ok(outcome_to_record(
+            outcome,
+            started.elapsed(),
+            vfs.mismatches.load(Ordering::Acquire),
+        ))
     }
 
     /// Ask the in-flight walk to stop. Returns immediately; the blocked
     /// `scan` call answers [`ScanError::Cancelled`] at its next directory
     /// boundary.
+    ///
+    /// Names the run that is *currently* in flight. With nothing running this
+    /// is a no-op — a stale cancel cannot lie in wait for the next scan, and a
+    /// caller that wants a scan not to happen simply does not start it.
     pub fn cancel(&self) {
-        self.cancel.store(true, Ordering::Release);
+        let running = self.running_generation.load(Ordering::Acquire);
+        if running != IDLE {
+            self.cancelled_generation.store(running, Ordering::Release);
+        }
     }
 }
 
@@ -538,16 +638,41 @@ pub fn probe_snapshot_version(path: String) -> Result<i64, ScanError> {
 }
 
 /// Decode a snapshot file written by `JSONDiskCache<LibrarySnapshot>`.
+///
+/// # Why `all_photos` is rebuilt rather than copied across
+///
+/// The folder nodes address their photos as `(photo_start, photo_count)`
+/// slices of `all_photos`, and those offsets are produced by
+/// [`flatten_folder`] walking the **tree**. The snapshot's own `allPhotos` is a
+/// separate array that only usually agrees with that walk: the Store appends
+/// photos carried forward from unreadable directories to `allPhotos` without
+/// putting them in the tree, and every `apply(_:)` that reorders the flat list
+/// widens the gap further. Handing back the file's array beside the tree's
+/// offsets would let a folder's slice name somebody else's photos, silently.
+///
+/// So the tree's own accumulator *is* the array, and any photo the snapshot
+/// lists but the tree does not hold is appended after it — in file order, so
+/// nothing is lost and nothing is misaddressed.
 #[uniffi::export]
 pub fn load_snapshot(path: String) -> Result<SnapshotRecord, ScanError> {
     let bytes = read_file(&path)?;
     let snapshot = snapshot::load(&bytes)?;
-    let mut photos = Vec::new();
     let mut folders = Vec::new();
-    flatten_folder(&snapshot.root_folder, None, &mut folders, &mut Vec::new());
-    photos.extend(snapshot.all_photos.iter().map(photo_to_record));
+    let mut tree_photos: Vec<PhotoFile> = Vec::new();
+    flatten_folder(&snapshot.root_folder, None, &mut folders, &mut tree_photos);
+
+    let in_tree: std::collections::HashSet<StableId> = tree_photos.iter().map(|p| p.id).collect();
+    let mut all_photos: Vec<ScanPhoto> = tree_photos.iter().map(photo_to_record).collect();
+    all_photos.extend(
+        snapshot
+            .all_photos
+            .iter()
+            .filter(|p| !in_tree.contains(&p.id))
+            .map(photo_to_record),
+    );
+
     Ok(SnapshotRecord {
-        all_photos: photos,
+        all_photos,
         folders,
         sidecar_manifest: snapshot
             .sidecar_manifest
@@ -675,6 +800,31 @@ pub fn read_image_metadata(path: String) -> ImageMetadataRecord {
 #[uniffi::export]
 pub fn read_video_date(path: String) -> Option<i64> {
     gallery_meta::media::video::read_video_date_at(&StdVfs::new(), &path)
+}
+
+/// Every extension the core classifies as an image, lowercased.
+///
+/// Exposed for one reason: `UTType` is the thing this table is a copy of, and
+/// only Swift can ask it. `ExtensionTableDriftTests` diffs the two in both
+/// directions, so an OS that starts declaring a new RAW format — or stops
+/// declaring an old one — shows up as a failing test rather than as photos
+/// quietly reported **removed** on the first scan after an upgrade.
+#[uniffi::export]
+pub fn scanner_image_extensions() -> Vec<String> {
+    gallery_scan::IMAGE_EXTENSIONS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
+}
+
+/// Every extension the core classifies as a video, lowercased. See
+/// [`scanner_image_extensions`].
+#[uniffi::export]
+pub fn scanner_video_extensions() -> Vec<String> {
+    gallery_scan::VIDEO_EXTENSIONS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
 }
 
 /// Parse XMP bytes the caller already holds — the sidecar-sync path, which
@@ -816,9 +966,7 @@ fn sidecar_from_record(row: ScanSidecarRow) -> SidecarCandidate {
         // round-trip. Parse, and fall back to the derivation.
         photo_id: uuid::Uuid::parse_str(&row.photo_id)
             .map(StableId)
-            .unwrap_or_else(|_| {
-                StableId::for_photo(row.sidecar_path.trim_end_matches(".xmp"))
-            }),
+            .unwrap_or_else(|_| StableId::for_photo(row.sidecar_path.trim_end_matches(".xmp"))),
         sidecar_url: FileUrl::new(row.sidecar_path),
         current_version: ContentVersion {
             content_identifier: row.current_version.content_identifier,
@@ -850,7 +998,10 @@ fn flatten_folder(
         parent_index,
         photo_start: photos.len() as u32,
         photo_count: folder.photos.len() as u32,
-        cover_photo_path: folder.cover_photo_url.as_ref().map(|u| u.path().to_string()),
+        cover_photo_path: folder
+            .cover_photo_url
+            .as_ref()
+            .map(|u| u.path().to_string()),
         total_photo_count: folder.total_photo_count,
         date_modified: folder.date_modified.map(|d| d.0),
         date_created: folder.date_created.map(|d| d.0),
@@ -915,6 +1066,7 @@ fn build(
 fn outcome_to_record(
     outcome: gallery_scan::ScanOutcome,
     elapsed: std::time::Duration,
+    boundary_mismatches: u64,
 ) -> ScanOutcomeRecord {
     let stats = outcome.stats;
     let mut folders = Vec::new();
@@ -943,6 +1095,10 @@ fn outcome_to_record(
             probe_millis: stats.probe_micros / 1000,
             probed_paths: stats.probed_paths as u32,
             probe_batches: stats.probe_batches as u32,
+            // Both layers can catch one: the boundary rejects a mis-sized
+            // foreign reply before the core ever sees it, and the core's own
+            // check covers any other `Vfs` implementation.
+            probe_mismatches: (stats.probe_mismatches + boundary_mismatches) as u32,
             cache_hits: stats.cache_hits as u32,
             slow_path: stats.slow_path as u32,
             folders: stats.folders as u32,
@@ -953,6 +1109,7 @@ fn outcome_to_record(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
 
     struct AllLocal;
     impl ProviderProbe for AllLocal {
@@ -970,6 +1127,7 @@ mod tests {
                     is_file_provider: true,
                     is_placeholder: p.ends_with("b.jpg"),
                     content_version: Some(format!("v:{p}")),
+                    intended_size: None,
                 })
                 .collect()
         }
@@ -1145,7 +1303,7 @@ mod tests {
 
         assert_eq!(worker.join().unwrap(), Err(ScanError::Cancelled));
 
-        // …and the flag is cleared by the next `scan`, so one cancel does not
+        // …and the next `scan` takes a new generation, so one cancel does not
         // wedge the session.
         released.store(true, Ordering::Release);
         assert!(session
@@ -1155,6 +1313,88 @@ mod tests {
                 None
             )
             .is_ok());
+    }
+
+    /// Cancellation is scoped to the run it was asked for. A `cancel()` with
+    /// nothing in flight — the shape the app produces when its scan `Task` is
+    /// cancelled between the two passes of a two-phase scan, or just after a
+    /// pass returns — must neither be swallowed into the next run nor kill it.
+    #[test]
+    fn a_cancel_between_scans_does_not_reach_the_next_one() {
+        let dir = library();
+        let root = dir.path().to_str().unwrap().to_string();
+        let session = ScannerSession::new(Arc::new(AllLocal));
+
+        // Before anything has ever run.
+        session.cancel();
+        let first = session.scan(root.clone(), empty_request(), None);
+        assert!(
+            first.is_ok(),
+            "a cancel from before the session ran: {first:?}"
+        );
+
+        // …and after a completed run, which is where the old flag stayed set.
+        session.cancel();
+        session.cancel();
+        let second = session.scan(root.clone(), empty_request(), None);
+        assert_eq!(
+            second.map(|o| o.flat_photos.len()),
+            Ok(3),
+            "a stale cancel killed an unrelated scan"
+        );
+
+        // The run that *is* named still stops — that is
+        // `a_cancel_mid_walk_returns_the_typed_error_and_no_tree`, which shares
+        // this session type and proves the guard is a scope, not an off switch.
+    }
+
+    /// A probe that answers the wrong number of rows has unknown alignment,
+    /// so none of it can be believed — not even the prefix a `zip` would take.
+    #[test]
+    fn a_mis_sized_probe_reply_is_discarded_whole() {
+        /// Drops the first answer, so every remaining row lines up with the
+        /// *wrong* path.
+        struct Misaligned;
+        impl ProviderProbe for Misaligned {
+            fn probe(&self, paths: Vec<String>) -> Vec<VfsProviderAttrs> {
+                paths
+                    .iter()
+                    .skip(1)
+                    .map(|p| VfsProviderAttrs {
+                        is_file_provider: true,
+                        is_placeholder: true,
+                        content_version: Some(format!("v:{p}")),
+                        intended_size: Some(4_096),
+                    })
+                    .collect()
+            }
+        }
+
+        let dir = library();
+        let session = ScannerSession::new(Arc::new(Misaligned));
+        let out = session
+            .scan(
+                dir.path().to_str().unwrap().to_string(),
+                empty_request(),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(out.flat_photos.len(), 3, "the scan still completes");
+        assert!(
+            out.flat_photos
+                .iter()
+                .all(|p| p.locality == ScanLocality::Local),
+            "a mis-aligned reply must not decide any photo's locality"
+        );
+        assert!(out.sidecar_manifest[0]
+            .current_version
+            .content_identifier
+            .is_none());
+        assert!(
+            out.timings.probe_mismatches > 0,
+            "the discard has to be visible in the scan-totals line"
+        );
     }
 
     #[test]
@@ -1191,12 +1431,28 @@ mod tests {
             .iter()
             .all(|p| p.locality == ScanLocality::Local));
         assert_eq!(
-            loaded.folders.iter().map(|f| f.name.clone()).collect::<Vec<_>>(),
-            record.folders.iter().map(|f| f.name.clone()).collect::<Vec<_>>()
+            loaded
+                .folders
+                .iter()
+                .map(|f| f.name.clone())
+                .collect::<Vec<_>>(),
+            record
+                .folders
+                .iter()
+                .map(|f| f.name.clone())
+                .collect::<Vec<_>>()
         );
         assert_eq!(
-            loaded.folders.iter().map(|f| f.photo_start).collect::<Vec<_>>(),
-            record.folders.iter().map(|f| f.photo_start).collect::<Vec<_>>()
+            loaded
+                .folders
+                .iter()
+                .map(|f| f.photo_start)
+                .collect::<Vec<_>>(),
+            record
+                .folders
+                .iter()
+                .map(|f| f.photo_start)
+                .collect::<Vec<_>>()
         );
     }
 

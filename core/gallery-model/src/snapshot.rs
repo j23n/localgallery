@@ -277,6 +277,45 @@ mod tests {
         assert!(matches!(load(bytes), Err(SnapshotError::Payload(_))));
     }
 
+    /// Swift's `JSONEncoder` throws on a non-finite `Double`, and
+    /// `JSONDiskCache.save` logs the throw and carries on — so one NaN
+    /// coordinate in `allPhotos` means the library snapshot is never written
+    /// again, silently, for the life of the install. Nothing the core emits may
+    /// contain one, so a snapshot round-trip is a guarantee that every number in
+    /// it is finite.
+    #[test]
+    fn a_non_finite_coordinate_is_written_as_absent_not_as_a_number() {
+        let mut photo = PhotoFile::new("/lib/a.jpg", "a", 10);
+        photo.gps_latitude = Some(f64::NAN);
+        photo.gps_longitude = Some(f64::INFINITY);
+        let bytes = save(&LibrarySnapshot {
+            all_photos: vec![photo],
+            ..snapshot()
+        })
+        .unwrap();
+
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        assert!(!text.contains("gpsLatitude"), "{text}");
+        assert!(!text.contains("gpsLongitude"), "{text}");
+        assert!(!text.contains("null"), "null is not absent: {text}");
+
+        let back = load(&bytes).unwrap();
+        assert_eq!(back.all_photos[0].gps_latitude, None);
+        assert_eq!(back.all_photos[0].gps_longitude, None);
+        // …and a real coordinate is untouched by the same rule.
+        let mut located = PhotoFile::new("/lib/b.jpg", "b", 10);
+        located.gps_latitude = Some(-0.0);
+        located.gps_longitude = Some(2.2945);
+        let bytes = save(&LibrarySnapshot {
+            all_photos: vec![located],
+            ..snapshot()
+        })
+        .unwrap();
+        let back = load(&bytes).unwrap();
+        assert_eq!(back.all_photos[0].gps_latitude, Some(-0.0));
+        assert_eq!(back.all_photos[0].gps_longitude, Some(2.2945));
+    }
+
     #[test]
     fn unknown_payload_keys_are_ignored() {
         let mut value = serde_json::to_value(Envelope {

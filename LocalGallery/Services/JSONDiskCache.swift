@@ -68,7 +68,23 @@ final class JSONDiskCache<Value: Codable & Sendable> {
                 let data = try JSONEncoder().encode(payload)
                 try data.write(to: url, options: .atomic)
             } catch {
-                Log.cache.error("Failed to save \(label): \(Log.r.error(error))")
+                // Loud on purpose, and specific about the consequence. The
+                // failure mode this line exists for is silent and permanent:
+                // `JSONEncoder` throws on a non-finite `Double`, so a single
+                // NaN GPS coordinate — a `0/0` EXIF rational, which cameras do
+                // write — makes *every* subsequent save of the library
+                // snapshot fail. Nothing else notices. The app keeps running
+                // on in-memory state, the file on disk keeps aging, and every
+                // launch pays a full rescan of the whole library forever.
+                //
+                // The value is sanitised where it enters (`read_gps` in
+                // `gallery-meta` drops non-finite coordinates, and the
+                // snapshot encoder writes them as absent), so reaching here
+                // means something new started producing one.
+                Log.cache.error("""
+                    Failed to save \(label): \(Log.r.error(error)) — the on-disk copy is now \
+                    stale and will stay stale until a save succeeds
+                    """)
             }
         }
     }

@@ -84,6 +84,11 @@ pub struct ScanStats {
     /// Batched probe calls made. One per directory that needed one; zero for
     /// a light scan over an unchanged library.
     pub probe_batches: u64,
+    /// Probe batches whose reply did not have one row per requested path, and
+    /// were therefore discarded whole. Always zero in a healthy app; non-zero
+    /// means the platform probe is broken and every file in those directories
+    /// is being reported as plain local storage.
+    pub probe_mismatches: u64,
     /// Photos reused verbatim from the cache.
     pub cache_hits: u64,
     /// Photos rebuilt.
@@ -376,13 +381,9 @@ impl<'a> Walk<'a> {
             let file_size = entry.size as i64;
             let mod_date = entry.modified.map(apple_date);
             files.push(ScanFile {
-                unchanged: self
-                    .input
-                    .cached_photos
-                    .get(&path)
-                    .is_some_and(|c| {
-                        c.file_size == file_size && c.file_modification_date == mod_date
-                    }),
+                unchanged: self.input.cached_photos.get(&path).is_some_and(|c| {
+                    c.file_size == file_size && c.file_modification_date == mod_date
+                }),
                 path,
                 file_size,
                 mod_date,
@@ -507,6 +508,17 @@ impl<'a> Walk<'a> {
         self.stats.probe_micros += started.elapsed().as_micros() as u64;
         self.stats.probe_batches += 1;
         self.stats.probed_paths += wanted.len() as u64;
+        // `zip` would stop at the shorter side, which is only the right answer
+        // if the reply is a *prefix* of the request. Nothing guarantees that: a
+        // reply of the wrong length is a reply whose alignment is unknown, and
+        // pairing it anyway gives one file another file's placeholder flag and
+        // content identifier. Discard the batch instead — every path in it then
+        // reads as plain local storage, the same degradation a failed
+        // `resourceValues` always produced.
+        if answers.len() != wanted.len() {
+            self.stats.probe_mismatches += 1;
+            return HashMap::new();
+        }
         wanted.into_iter().zip(answers).collect()
     }
 
@@ -655,7 +667,14 @@ impl<'a> Walk<'a> {
             current_version: ContentVersion {
                 content_identifier: attrs.content_version,
                 modification_date: sidecar.modified.map(apple_date),
-                size: Some(sidecar.size as i64),
+                // `totalFileSize ?? fileSize`, which is what the Swift baseline
+                // wrote here. The two differ only for a placeholder, whose
+                // `st_size` is a stub — and this value is compared against the
+                // sidecar cache to decide whether an `.xmp` needs re-fetching,
+                // so recording the stub would make every placeholder sidecar in
+                // the library look changed on the first scan after the upgrade
+                // and re-download the lot.
+                size: attrs.intended_size.or(Some(sidecar.size as i64)),
             },
             download_status: if attrs.is_placeholder {
                 DownloadStatus::Placeholder
@@ -1045,7 +1064,10 @@ mod tests {
     }
 
     impl Vfs for ProbingVfs {
-        fn open(&self, path: &str) -> gallery_vfs::VfsResult<Box<dyn gallery_vfs::ReadSeek + Send>> {
+        fn open(
+            &self,
+            path: &str,
+        ) -> gallery_vfs::VfsResult<Box<dyn gallery_vfs::ReadSeek + Send>> {
             self.inner.open(path)
         }
         fn stat(&self, path: &str) -> gallery_vfs::VfsResult<gallery_vfs::Stat> {
@@ -1071,9 +1093,38 @@ mod tests {
                     is_file_provider: true,
                     is_placeholder: self.placeholders.contains(p),
                     content_version: Some(format!("cv:{p}")),
+                    // A placeholder's bytes are elsewhere: `stat` sees a stub,
+                    // the provider knows the real size.
+                    intended_size: self.placeholders.contains(p).then_some(9_999),
                 })
                 .collect()
         }
+    }
+
+    /// `ContentVersion.size` is the sidecar cache's change signal, and the
+    /// Swift baseline wrote `totalFileSize ?? fileSize` into it. Writing the
+    /// on-disk stub size for a placeholder instead makes every placeholder
+    /// `.xmp` in the library read as changed on the first scan after the
+    /// upgrade — and re-fetch, which is the cost `_plans/06` Finding 2 exists
+    /// to avoid.
+    #[test]
+    fn a_placeholder_sidecar_records_its_intended_size_not_its_stub() {
+        let vfs = ProbingVfs::new(library(), &["/lib/B.JPG.xmp"]);
+        let out = scan(&vfs, "/lib", &ScanInput::default());
+        let row = &out.sidecar_manifest[0];
+        assert_eq!(row.sidecar_url.path(), "/lib/B.JPG.xmp");
+        assert_eq!(
+            row.current_version.size,
+            Some(9_999),
+            "the stub size would churn the sidecar cache"
+        );
+        assert_eq!(row.download_status, DownloadStatus::Placeholder);
+
+        // A local sidecar has no intended size to prefer, so the listing's own
+        // size stands — which is what the two agree on anyway.
+        let local = ProbingVfs::new(library(), &[]);
+        let out = scan(&local, "/lib", &ScanInput::default());
+        assert_eq!(out.sidecar_manifest[0].current_version.size, Some(5));
     }
 
     #[test]
@@ -1161,9 +1212,13 @@ mod tests {
         assert_eq!(light.stats.slow_path, 1);
     }
 
-    /// A short reply is a platform bug, not a reason to lose the tree: the
-    /// unanswered tail reads as a plain local file, which is what a failed
-    /// `resourceValues` already meant.
+    /// A mis-sized reply is a platform bug, not a reason to lose the tree —
+    /// **and not a reason to trust its prefix**. The answers are paired
+    /// positionally, so a reply of the wrong length has unknown alignment;
+    /// zipping it would give one photo another photo's placeholder flag and
+    /// content identifier. The whole batch degrades to plain local storage
+    /// instead, which is what a failed `resourceValues` always meant, and the
+    /// event is counted so the scan-totals line can show it.
     #[test]
     fn a_short_probe_reply_degrades_to_local_instead_of_failing() {
         struct ShortVfs(MemVfs);
@@ -1189,16 +1244,54 @@ mod tests {
             fn exists(&self, path: &str) -> bool {
                 self.0.exists(path)
             }
-            fn probe_provider(&self, _paths: &[String]) -> Vec<ProviderAttrs> {
-                Vec::new()
+            fn probe_provider(&self, paths: &[String]) -> Vec<ProviderAttrs> {
+                // One row short, and the *first* one dropped — so a `zip`
+                // would slide every answer onto the wrong path rather than
+                // merely losing the tail.
+                paths
+                    .iter()
+                    .skip(1)
+                    .map(|p| ProviderAttrs {
+                        is_file_provider: true,
+                        is_placeholder: p.ends_with("a.jpg"),
+                        content_version: Some(format!("cv:{p}")),
+                        intended_size: Some(9_999),
+                    })
+                    .collect()
             }
         }
         let out = scan(&ShortVfs(library()), "/lib", &ScanInput::default());
         assert_eq!(out.flat_photos.len(), 5);
+        assert!(
+            out.flat_photos
+                .iter()
+                .all(|p| p.locality == PhotoLocality::Local),
+            "a mis-aligned reply must not be believed for any path"
+        );
+        assert!(
+            out.sidecar_manifest
+                .iter()
+                .all(|r| r.current_version.content_identifier.is_none()),
+            "…including the sidecar rows, which key the sidecar cache"
+        );
+        assert_eq!(
+            out.stats.probe_mismatches, 3,
+            "one per directory that probed"
+        );
+        assert_eq!(out.stats.probe_batches, 3);
+    }
+
+    /// A reply of the *right* length is believed, which is what makes the
+    /// mismatch check a guard rather than a blanket refusal to probe.
+    #[test]
+    fn a_correctly_sized_reply_is_still_used() {
+        let vfs = ProbingVfs::new(library(), &["/lib/a.jpg"]);
+        let out = scan(&vfs, "/lib", &ScanInput::default());
+        assert_eq!(out.stats.probe_mismatches, 0);
         assert!(out
             .flat_photos
             .iter()
-            .all(|p| p.locality == PhotoLocality::Local));
+            .any(|p| p.locality == PhotoLocality::Remote { downloaded: false }));
     }
 
     #[test]

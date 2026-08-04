@@ -133,7 +133,14 @@ impl Vfs for StdVfs {
         let reader = fs::read_dir(dir).map_err(|e| VfsError::from_io(dir, &e))?;
         let mut out = Vec::new();
         for item in reader {
-            let item = item.map_err(|e| VfsError::from_io(dir, &e))?;
+            // One entry that cannot be *produced* is one entry lost, not a
+            // lost directory. `read_dir` yields per-entry errors for things
+            // like a file unlinked between the readdir and the stat, and
+            // failing the whole listing here would report every photo in the
+            // directory as removed — the exact deletion-looks-like-an-error
+            // hazard the failed-directory carry-forward exists to prevent.
+            // `contentsOfDirectory` never had this failure mode at all.
+            let Ok(item) = item else { continue };
             // Non-UTF-8 names are dropped rather than lossily converted: a
             // replacement character would derive a stable id for a path that
             // cannot be reopened. Vanishingly rare on APFS, which stores UTF-8.
@@ -144,12 +151,15 @@ impl Vfs for StdVfs {
                 continue;
             }
             // `DirEntry::metadata` does not traverse symlinks, so a link is
-            // reported as a link and carries the link's own size and times.
-            // Following it here would let a link into a scanned subtree
-            // duplicate every photo under it.
-            let link_md = item
-                .metadata()
-                .map_err(|e| VfsError::from_io(&format!("{dir}/{name}"), &e))?;
+            // reported as a link. Following it to decide the *kind* would let
+            // a link into a scanned subtree duplicate every photo under it.
+            //
+            // Same rule as the entry above: an unstattable file is skipped,
+            // matching the `try?` on `resourceValues` the Swift baseline used
+            // per file.
+            let Ok(link_md) = item.metadata() else {
+                continue;
+            };
             let kind = if link_md.file_type().is_symlink() {
                 EntryKind::Symlink
             } else if link_md.is_dir() {
@@ -157,12 +167,24 @@ impl Vfs for StdVfs {
             } else {
                 EntryKind::File
             };
+            // …but the size and times of a *symlinked media file* must come
+            // from what it points at. `lstat` reports the length of the target
+            // path string (a dozen bytes) and the link's own timestamps, so a
+            // symlinked photo would arrive with a nonsense `fileSize` and a
+            // change signal that never fires. `resourceValues(forKeys:)`
+            // follows links, which is what the whole scanner was written
+            // against. A dangling link keeps the link's own values — there is
+            // nothing else to report.
+            let md = match kind {
+                EntryKind::Symlink => fs::metadata(item.path()).unwrap_or(link_md),
+                _ => link_md,
+            };
             out.push(Entry {
                 name,
                 kind,
-                size: if link_md.is_dir() { 0 } else { link_md.len() },
-                modified: link_md.modified().ok().map(file_time),
-                created: link_md.created().ok().map(file_time),
+                size: if md.is_dir() { 0 } else { md.len() },
+                modified: md.modified().ok().map(file_time),
+                created: md.created().ok().map(file_time),
             });
         }
         Ok(out)
@@ -402,7 +424,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn stat_entry_follows_a_symlink_where_list_does_not() {
+    fn stat_entry_reports_a_symlink_as_a_link_with_its_targets_dates() {
         // A user who picks a symlinked folder should see the folder's dates.
         let dir = tempfile::tempdir().unwrap();
         let real = dir.path().join("real");
@@ -416,6 +438,82 @@ mod tests {
             entry.modified,
             StdVfs.stat_entry(real.to_str().unwrap()).unwrap().modified,
             "…but its times come from what it points at"
+        );
+    }
+
+    /// A symlinked photo is still a photo. `lstat` reports the length of the
+    /// *target path string* — a dozen bytes — and the link's own timestamps,
+    /// so a library that symlinks its originals would get nonsense file sizes
+    /// and a change signal that could never fire. `resourceValues(forKeys:)`,
+    /// which the scanner was written against, follows the link.
+    #[cfg(unix)]
+    #[test]
+    fn list_reports_a_symlinked_files_real_size_and_times() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("original.jpg");
+        fs::write(&real, vec![0u8; 4096]).unwrap();
+        let stamp = UNIX_EPOCH + std::time::Duration::new(1_600_000_000, 250_000_000);
+        fs::File::options()
+            .write(true)
+            .open(&real)
+            .unwrap()
+            .set_modified(stamp)
+            .unwrap();
+        std::os::unix::fs::symlink(&real, dir.path().join("linked.jpg")).unwrap();
+
+        let listing = StdVfs.list(dir.path().to_str().unwrap()).unwrap();
+        let link = listing.iter().find(|e| e.name == "linked.jpg").unwrap();
+        assert_eq!(link.kind, EntryKind::Symlink, "still reported as a link");
+        assert_eq!(link.size, 4096, "the link's own size is the path length");
+        assert_eq!(
+            link.modified,
+            Some(FileTime::new(1_600_000_000, 250_000_000))
+        );
+
+        // A dangling link has nothing to follow, and falls back to itself
+        // rather than dropping out of the listing.
+        std::os::unix::fs::symlink(dir.path().join("gone.jpg"), dir.path().join("dangling.jpg"))
+            .unwrap();
+        let listing = StdVfs.list(dir.path().to_str().unwrap()).unwrap();
+        let dangling = listing.iter().find(|e| e.name == "dangling.jpg").unwrap();
+        assert_eq!(dangling.kind, EntryKind::Symlink);
+        assert!(dangling.modified.is_some());
+    }
+
+    /// One entry that cannot be stat'd is one entry lost — never the whole
+    /// directory. Propagating it reported every photo in the directory as
+    /// *removed*, which is the deletion-looks-like-an-error hazard the
+    /// failed-directory carry-forward exists to prevent, arriving one layer
+    /// below where that carry-forward can see it.
+    ///
+    /// Dropping `+x` while keeping `+r` is the deterministic way to get there:
+    /// `read_dir` needs read permission and succeeds, every `lstat` on a child
+    /// needs search permission and fails.
+    #[cfg(unix)]
+    #[test]
+    fn list_skips_an_unstattable_entry_instead_of_failing_the_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let inner = dir.path().join("locked");
+        fs::create_dir(&inner).unwrap();
+        fs::write(inner.join("a.jpg"), b"aa").unwrap();
+        fs::write(inner.join("b.jpg"), b"bbb").unwrap();
+        fs::set_permissions(&inner, fs::Permissions::from_mode(0o400)).unwrap();
+
+        // Root ignores the permission bits, so the precondition has to be
+        // checked rather than assumed.
+        let stat_fails = fs::metadata(inner.join("a.jpg")).is_err();
+        let listed = StdVfs.list(inner.to_str().unwrap());
+        fs::set_permissions(&inner, fs::Permissions::from_mode(0o700)).unwrap();
+
+        if !stat_fails {
+            return; // running as root; nothing to assert
+        }
+        let listed = listed.expect("an unstattable child must not fail the listing");
+        assert!(
+            listed.is_empty(),
+            "the entries that could not be stat'd are dropped, not guessed at: {listed:?}"
         );
     }
 

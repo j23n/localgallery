@@ -133,6 +133,47 @@ fast needs the placeholder bit to come from `stat` (`st_blocks == 0 &&
 st_size > 0`) rather than from Foundation, which is a real behaviour change and
 is deliberately not in this phase.
 
+### Correction 2 — where the one probe is taken, and what "I could not tell" means
+
+Two details of that once-per-scan probe were wrong on the first pass, and both
+lean the same way: towards being fast at the cost of being right.
+
+It was resolved lazily, from the **parent directory of the first probe batch**.
+Which directory that is depends on traversal order and on which files a light
+scan decided to rebuild — an implementation detail deciding a library-wide
+policy. It is now resolved from the scan **root**, once, before any batch runs
+(`CoreProviderProbe.resolveTreeKind(root:)`).
+
+And a *thrown* `resourceValues` was folded into `false` — the same answer a
+genuinely local folder gives. A read can throw for reasons that are not "this
+is local storage": a permission blip, a provider that has not mounted, a
+security-scoped bookmark whose scope was not started. Any of those switched the
+whole library to the cheap probe, and then every undownloaded photo read as
+`.local` — no cloud badge, `ensureMaterialized` never fires, an empty frame in
+the viewer. It now **fails closed**: a thrown read means read all seven keys.
+Of the two failure modes, being slow is the one that recovers on its own.
+
+**A read that succeeds with the key absent is the opposite case, and the
+distinction is load-bearing.** Measured on the simulator: on iOS,
+`resourceValues(forKeys:)` for the ubiquitous keys *never throws* and reports
+`isUbiquitousItem == nil` for everything outside iCloud Drive — a plain local
+directory answers `nil`, not `false`. That absence is the ordinary case and the
+entire source of the saving above. Folding it into "unknown" as well would send
+every scan down the seven-key path and undo 406 s → 2.3 s completely. The rule
+is one function, `CoreProviderProbe.treeIsUbiquitous(_:)`, with a test on each
+branch, because getting it backwards is invisible in every other observable.
+
+The saving is therefore unaffected by the fix — it comes from local trees,
+where the read succeeds and the key is absent.
+
+**Still open, deliberately:** one answer covers the whole tree, so a *mixed*
+library (local root, iCloud folder inside it) gives the ubiquitous subtree the
+cheap probe. Placeholders there are still found through
+`totalFileSize > fileSize`; the `.downloading` / `.stale` distinction is lost,
+and nothing in the app reads it. The fix is a per-directory answer — one extra
+`resourceValues` per directory, which is cheap but is a change to this section's
+cost model, so it waits for Phase 4.
+
 ## Finding 2 — sidecar manifest is not persisted; every launch re-pays a ~4-min rescan
 
 Light scan skips the sidecar probe only on `cachedSidecarManifest[photo.id]`
@@ -179,6 +220,23 @@ after an upgrade changes the manifest and *nothing else* — so without an
 explicit write the fix would have lived in memory only and every launch would
 have gone on re-probing. `runScanPass` now compares the manifest across the
 pass and calls `persistLibraryCache()` on that branch.
+
+Two further wrinkles came out of the post-port review, both of which put a
+library back on the slow path this finding exists to leave:
+
+- **`[]` was persisted as `nil`.** `saveCache()` folded an empty manifest into
+  the absent case, and `nil` means "written by a build from before this field
+  existed" — worth one legacy re-probe of the whole library. For anyone not
+  using digiKam, `[]` is the *permanent* state, so those libraries re-probed on
+  every launch forever to rediscover a fact they had already written down. The
+  coercion is gone; `[]` round-trips as `[]`.
+- **`ContentVersion.size` recorded the on-disk size.** The Swift baseline wrote
+  `totalFileSize ?? fileSize`, which differ for exactly one kind of file and it
+  is the kind that matters: a placeholder, whose `st_size` is a stub. This
+  field is what the sidecar cache diffs on, so the stub made every placeholder
+  `.xmp` look changed on the first scan after the upgrade — and re-fetch.
+  `ProviderAttrs` now carries `intended_size` across the boundary and the
+  manifest row prefers it.
 
 ## Finding 3 — scheduled-memories widget pass: ~9 s main-thread stall
 

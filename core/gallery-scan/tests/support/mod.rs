@@ -202,6 +202,10 @@ impl Vfs for ApfsLikeVfs {
                 is_file_provider: false,
                 is_placeholder: false,
                 content_version: content_identifier(path),
+                // APFS populates `totalFileSizeKey`, and for a local file it
+                // is the same number `stat` reports — so this vends it, and
+                // the fixture values are unchanged by its existence.
+                intended_size: fs::metadata(path).ok().map(|md| md.len() as i64),
             })
             .collect()
     }

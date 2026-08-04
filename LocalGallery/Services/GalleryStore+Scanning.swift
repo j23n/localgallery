@@ -168,7 +168,10 @@ extension GalleryStore {
 
         isScanning = false
         lastSyncedAt = clock.now()
-        if resolved == .full {
+        // A full pass that never completed has not refreshed anything, so it
+        // must not restart the 48-hour clock — doing that would let one
+        // cancelled scan suppress the backstop for two days.
+        if resolved == .full && !result.didNotComplete {
             lastFullScanAt = lastSyncedAt
             defaults.set(lastFullScanAt, forKey: "lastFullScanAt")
         }
@@ -177,17 +180,23 @@ extension GalleryStore {
         // after the final pass — the light pre-pass deliberately skips all of
         // it so it stays quick.
         //
-        // Hand the manifest to the sidecar sync service; it diffs against
-        // the cache and either fetches silently or surfaces a prompt.
-        let allIDs = Set(allPhotos.map(\.id))
-        sidecarSync.plan(
-            manifest: result.sidecarManifest,
-            allPhotoIDs: allIDs,
-            autoApprove: false
-        )
+        // A pass that produced no outcome is skipped too: its empty manifest
+        // would tell `sidecarSync` every `.xmp` in the library had vanished.
+        // The progress banner is still cleared, because the scan is over
+        // either way.
+        if !result.didNotComplete {
+            // Hand the manifest to the sidecar sync service; it diffs against
+            // the cache and either fetches silently or surfaces a prompt.
+            let allIDs = Set(allPhotos.map(\.id))
+            sidecarSync.plan(
+                manifest: result.sidecarManifest,
+                allPhotoIDs: allIDs,
+                autoApprove: false
+            )
 
-        // Memory generation runs against the just-published `allPhotos`.
-        memories.generateIfNeeded()
+            // Memory generation runs against the just-published `allPhotos`.
+            memories.generateIfNeeded()
+        }
 
         // Scan + enrichment have settled — clear progress so the banner
         // dismisses.
@@ -204,8 +213,13 @@ extension GalleryStore {
     /// scan. Owns `scanProgress` for its scanning/enriching phases but leaves
     /// `isScanning` / `lastFullScanAt` / final progress teardown to
     /// `performScan`, which spans both passes.
+    ///
+    /// Internal rather than private so `ScanBailoutTests` can cancel one pass
+    /// on its own: cancellation is only observable at a suspension point inside
+    /// this function, and racing `performScan`'s two-phase sequencing from
+    /// outside would test the scheduler, not the behaviour.
     @discardableResult
-    private func runScanPass(at url: URL, light: Bool, silent: Bool) async -> CoreScanner.Result {
+    func runScanPass(at url: URL, light: Bool, silent: Bool) async -> CoreScanner.Result {
         let startedAt = clock.now()
         self.scanProgress = ScanProgress(phase: .scanning, processed: 0, total: nil, startedAt: startedAt)
 
@@ -243,6 +257,20 @@ extension GalleryStore {
             reuseCached: light,
             onProgress: progressCallback
         )
+
+        // A pass that never produced an outcome — cancelled, or the core threw
+        // — describes nothing. Publishing it would empty `allPhotos`, empty
+        // `rootFolder`, empty `lastSidecarManifest`, and then `saveCache()`
+        // would write all three to disk: one cancelled scan and the library is
+        // gone until the next successful full pass rebuilds it from the
+        // filesystem, losing every tag and enrichment on the way. An
+        // unreadable *directory* is the opposite case and does not come
+        // through here — it arrives as `failedDirectoryPaths` below, with the
+        // rest of the tree intact.
+        guard !result.didNotComplete else {
+            Log.scan.warning("\(light ? "light" : "full") scan produced no outcome; keeping \(self.allPhotos.count) cached photos")
+            return result
+        }
 
         // Captured before the assignment: the manifest can change while the
         // photo list does not — a new `.xmp` beside an untouched photo, or the

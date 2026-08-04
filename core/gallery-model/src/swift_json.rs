@@ -37,6 +37,24 @@ pub fn serialize_opt_f64<S: Serializer>(value: &Option<f64>, s: S) -> Result<S::
     }
 }
 
+/// `skip_serializing_if` for an optional `Double` field: **absent, or not a
+/// number**.
+///
+/// Swift's `JSONEncoder` refuses to encode a non-finite `Double` — it throws
+/// `invalidValue`, and `JSONDiskCache.save` logs that and moves on, so a single
+/// NaN latitude stops the library snapshot ever reaching disk again. serde_json
+/// is the other way round and quietly writes `null`, which Swift then decodes
+/// as `nil` anyway.
+///
+/// Both readings agree that a non-finite number carries no information, so the
+/// field is treated as **absent** rather than written in either spelling. The
+/// sources are fixed where the values enter (`gallery_meta`'s `read_gps` drops
+/// a `0/0` rational); this is the backstop that keeps a value nothing can use
+/// out of the wire format regardless.
+pub fn is_absent_f64(value: &Option<f64>) -> bool {
+    !matches!(value, Some(v) if v.is_finite())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -61,6 +79,18 @@ mod tests {
         assert_eq!(render(651_234_567.25), "651234567.25");
         assert_eq!(render(41.9028), "41.9028");
         assert_eq!(render(-151.2093), "-151.2093");
+    }
+
+    #[test]
+    fn a_non_finite_optional_is_absent_not_null() {
+        assert!(is_absent_f64(&None));
+        assert!(is_absent_f64(&Some(f64::NAN)));
+        assert!(is_absent_f64(&Some(f64::INFINITY)));
+        assert!(is_absent_f64(&Some(f64::NEG_INFINITY)));
+        // …and a real coordinate, including the equator, is present.
+        assert!(!is_absent_f64(&Some(48.8581)));
+        assert!(!is_absent_f64(&Some(0.0)));
+        assert!(!is_absent_f64(&Some(-0.0)));
     }
 
     #[test]

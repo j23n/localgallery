@@ -248,16 +248,21 @@ pub struct PhotoFile {
     )]
     pub file_modification_date: Option<AppleDate>,
     /// Latitude, sign already applied from the GPS ref.
+    ///
+    /// A non-finite value is written as **absent**, not as `null` — see
+    /// [`crate::swift_json::is_absent_f64`].
     #[serde(
         rename = "gpsLatitude",
-        skip_serializing_if = "Option::is_none",
+        skip_serializing_if = "crate::swift_json::is_absent_f64",
         serialize_with = "crate::swift_json::serialize_opt_f64"
     )]
     pub gps_latitude: Option<f64>,
     /// Longitude, sign already applied from the GPS ref.
+    ///
+    /// A non-finite value is written as **absent**, not as `null`.
     #[serde(
         rename = "gpsLongitude",
-        skip_serializing_if = "Option::is_none",
+        skip_serializing_if = "crate::swift_json::is_absent_f64",
         serialize_with = "crate::swift_json::serialize_opt_f64"
     )]
     pub gps_longitude: Option<f64>,

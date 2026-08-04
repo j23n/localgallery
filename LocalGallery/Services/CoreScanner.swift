@@ -37,10 +37,35 @@ final class CoreScanner: Sendable {
         /// the cached entries forward so a transient I/O error doesn't wipe a
         /// subtree's tags and enrichment.
         let failedDirectoryPaths: [String]
+        /// The pass produced no outcome at all: the core threw instead of
+        /// answering — a cancelled walk, or an unreadable snapshot.
+        ///
+        /// **This is not "the scan found nothing".** The two have the same
+        /// shape — empty photos, no tree — and opposite meanings, and the Store
+        /// publishes one of them. An unreadable *directory* is data and arrives
+        /// through `failedDirectoryPaths` with the rest of the library intact;
+        /// this flag says the value carries no information about the library,
+        /// so `runScanPass` returns before it can reach `apply(_:)`.
+        let didNotComplete: Bool
+
+        /// A pass that never produced an answer. Every field is empty *and*
+        /// `didNotComplete` is set, so a caller that ignores the flag still
+        /// cannot mistake it for a scan of an empty folder — it will publish
+        /// an empty library, which is exactly what the flag exists to stop.
+        static let incomplete = Result(
+            rootFolder: nil, flatPhotos: [], needsEnrichment: false,
+            sidecarManifest: [], addedURLs: [], removedURLs: [],
+            modifiedURLs: [], failedDirectoryPaths: [], didNotComplete: true
+        )
     }
 
     private let session: ScannerSession
     private let providerProbe = CoreProviderProbe()
+
+    /// The probe this scanner resolved the tree kind on. Exposed so
+    /// `CoreScannerBridgeTests` can assert *which URL* the answer came from —
+    /// the thing that was wrong before and that no other observable shows.
+    var providerProbeForTesting: CoreProviderProbe { providerProbe }
 
     init() {
         session = ScannerSession(probe: providerProbe)
@@ -67,11 +92,51 @@ final class CoreScanner: Sendable {
         reuseCached: Bool = false,
         onProgress: (@Sendable (Int) -> Void)? = nil
     ) async -> Result {
-        // Re-resolved per scan rather than per process: the user can pick a
-        // new folder mid-session, and a local answer cached from the old one
-        // would make the new one's placeholders invisible.
-        providerProbe.forgetTreeKind()
+        // Resolved from the root, once per scan, before any batch runs. Per
+        // scan rather than per process because the user can pick a new folder
+        // mid-session and an answer cached from the old one would make the new
+        // one's placeholders invisible; from the *root* rather than from
+        // whichever directory the first batch happens to land in, because that
+        // directory is an implementation detail of the traversal order.
+        providerProbe.resolveTreeKind(root: rootURL)
         let session = self.session
+
+        // A scan whose Task was cancelled before the FFI call started must not
+        // start: `cancel()` names the run in flight, and with none in flight it
+        // is deliberately a no-op rather than an ambush on the next run.
+        if Task.isCancelled { return .incomplete }
+
+        // The detached task below does not inherit cancellation — that is the
+        // point of detaching, and it is why the flag has to be reachable from
+        // another thread. `onCancel` hands it to the core, which stops the walk
+        // at its next directory boundary and answers `.cancelled`.
+        let result = await withTaskCancellationHandler {
+            await Self.run(
+                session: session, rootURL: rootURL, cachedPhotos: cachedPhotos,
+                cachedSidecarManifest: cachedSidecarManifest, reuseCached: reuseCached,
+                onProgress: onProgress
+            )
+        } onCancel: {
+            session.cancel()
+        }
+
+        // A cancel that lands between the core's last directory boundary and
+        // its return produces a *complete* outcome for a scan the caller no
+        // longer wants. Discard it: the caller cancelled because the state it
+        // scanned against is gone, and publishing a result it did not ask for
+        // is the failure mode this whole flag exists to prevent. Losing a
+        // finished scan is the cheap direction.
+        return Task.isCancelled ? .incomplete : result
+    }
+
+    private static func run(
+        session: ScannerSession,
+        rootURL: URL,
+        cachedPhotos: [URL: PhotoFile],
+        cachedSidecarManifest: [UUID: SidecarCandidate],
+        reuseCached: Bool,
+        onProgress: (@Sendable (Int) -> Void)?
+    ) async -> Result {
         return await Task.detached(priority: .userInitiated) {
             let startedAt = CFAbsoluteTimeGetCurrent()
             let request = ScanRequest(
@@ -89,20 +154,41 @@ final class CoreScanner: Sendable {
                     progress: onProgress.map(ProgressBridge.init)
                 )
             } catch {
-                // The only reachable error is `.cancelled`, and nothing cancels
-                // a scan today. An unreadable root is data, not an error: it
-                // comes back as a `failedDirectoryPaths` entry with an empty
-                // tree, which the Store already handles.
+                // An unreadable *root* is data, not an error: it comes back as
+                // a `failedDirectoryPaths` entry with an empty tree, which the
+                // Store already handles. Reaching here means the core produced
+                // no answer at all — a cancelled walk today — and an empty
+                // answer is indistinguishable from "the library is now empty".
+                // `.incomplete` is how the Store tells them apart.
                 Log.scan.error("core scan failed: \(Log.r.error(error))")
-                return Result(
-                    rootFolder: nil, flatPhotos: [], needsEnrichment: false,
-                    sidecarManifest: [], addedURLs: [], removedURLs: [],
-                    modifiedURLs: [], failedDirectoryPaths: []
-                )
+                return .incomplete
             }
             let scannedAt = CFAbsoluteTimeGetCurrent()
             let result = Self.bridge(outcome)
             let builtAt = CFAbsoluteTimeGetCurrent()
+
+            // The core does not own logging, so the one place an unreadable
+            // directory becomes visible to a human is here. It matters: every
+            // photo under such a directory is being carried forward on trust,
+            // and a subtree that stays unreadable across scans is a real
+            // problem wearing a "no changes" costume.
+            if !result.failedDirectoryPaths.isEmpty {
+                let listed = result.failedDirectoryPaths.prefix(5)
+                    .map { Log.r.path($0) }
+                    .joined(separator: ", ")
+                Log.scan.warning("""
+                    \(result.failedDirectoryPaths.count) unreadable \
+                    director\(result.failedDirectoryPaths.count == 1 ? "y" : "ies"): \(listed)\
+                    \(result.failedDirectoryPaths.count > 5 ? ", …" : "")
+                    """)
+            }
+            if outcome.timings.probeMismatches > 0 {
+                Log.scan.error("""
+                    \(outcome.timings.probeMismatches) provider probe batches answered the wrong \
+                    number of rows and were discarded — those directories were scanned as plain \
+                    local storage
+                    """)
+            }
 
             // Same shape as the line `_plans/06-performance-baseline.md`
             // measures the acceptance gates from, so the harness keeps working
@@ -123,9 +209,11 @@ final class CoreScanner: Sendable {
         }.value
     }
 
-    /// Ask an in-flight walk to stop. Nothing calls this today — scans are
-    /// deduped rather than cancelled — but the flag has to be reachable from a
-    /// thread that is not the one blocked inside `scan`, so it lives here.
+    /// Ask an in-flight walk to stop.
+    ///
+    /// `scan(at:…)` already wires this to its own `Task`'s cancellation, so
+    /// cancelling the Store's scan task is enough; this stays for a caller that
+    /// holds the scanner but not the task.
     func cancel() {
         session.cancel()
     }
@@ -152,7 +240,8 @@ final class CoreScanner: Sendable {
             addedURLs: outcome.addedPaths.map(fileURL(_:)),
             removedURLs: outcome.removedPaths.map(fileURL(_:)),
             modifiedURLs: outcome.modifiedPaths.map(fileURL(_:)),
-            failedDirectoryPaths: outcome.failedDirectoryPaths
+            failedDirectoryPaths: outcome.failedDirectoryPaths,
+            didNotComplete: false
         )
     }
 
@@ -386,13 +475,23 @@ final class CoreProviderProbe: ProviderProbe {
         }
         func take() -> [VfsProviderAttrs] {
             lock.lock(); defer { lock.unlock() }
-            return values.map { $0 ?? VfsProviderAttrs(isFileProvider: false, isPlaceholder: false, contentVersion: nil) }
+            // An unwritten slot cannot happen — the stripes tile the array —
+            // but the type says it can, and "plain local file" is the same
+            // answer a failed probe gives.
+            return values.map {
+                $0 ?? VfsProviderAttrs(isFileProvider: false, isPlaceholder: false,
+                                       contentVersion: nil, intendedSize: nil)
+            }
         }
     }
 
     func probe(paths: [String]) -> [VfsProviderAttrs] {
-        guard let first = paths.first else { return [] }
-        let ubiquitous = rootIsUbiquitous(near: first)
+        guard !paths.isEmpty else { return [] }
+        // Unresolved reads as ubiquitous: the expensive keys are the ones that
+        // find placeholders, and skipping them on a tree that might be
+        // provider-backed loses photos' `.remote` state silently. See
+        // `resolveTreeKind(root:)`.
+        let ubiquitous = treeIsUbiquitous.withLock { $0 } ?? true
         let urls = paths.map(CoreScanner.fileURL)
 
         guard paths.count >= Self.fanOutThreshold else {
@@ -416,31 +515,102 @@ final class CoreProviderProbe: ProviderProbe {
 
     /// Whether the tree being scanned is an iCloud (ubiquitous) one.
     ///
-    /// Resolved once per scan, from the first batch's parent directory. When it
-    /// is false the per-file probe drops the three ubiquitous keys — the
-    /// expensive ones — and rests on `totalFileSize > fileSize`, which is the
-    /// branch every non-Apple provider already took, so placeholder detection
-    /// on Dropbox / OneDrive / Drive is unaffected. On a genuinely ubiquitous
-    /// tree nothing changes: the full seven-key read happens as before, and the
-    /// scan is as slow as it always was. That is the honest trade — the saving
-    /// is entirely "stop asking a local file 37,000 times whether it is in the
-    /// cloud".
+    /// When it is false the per-file probe drops the three ubiquitous keys —
+    /// the expensive ones — and rests on `totalFileSize > fileSize`, which is
+    /// the branch every non-Apple provider already took, so placeholder
+    /// detection on Dropbox / OneDrive / Drive is unaffected. On a genuinely
+    /// ubiquitous tree nothing changes: the full seven-key read happens as
+    /// before, and the scan is as slow as it always was. That is the honest
+    /// trade — the saving is entirely "stop asking a local file 37,000 times
+    /// whether it is in the cloud".
     private let treeIsUbiquitous = OSAllocatedUnfairLock<Bool?>(initialState: nil)
 
-    /// Drop the cached answer, so the next scan resolves it again.
-    func forgetTreeKind() {
-        treeIsUbiquitous.withLock { $0 = nil }
+    /// The resolved answer, or `nil` before a scan has asked for one.
+    ///
+    /// Exposed only so `CoreScannerBridgeTests` can pin the fail-closed rule:
+    /// the alternative is asserting on a log line, and getting this wrong is
+    /// invisible in every other observable — the scan simply becomes fast and
+    /// stops noticing placeholders.
+    var resolvedTreeIsUbiquitous: Bool? { treeIsUbiquitous.withLock { $0 } }
+
+    /// Decide, once per scan, whether this tree gets the expensive keys.
+    ///
+    /// # Two things here are deliberate and both were wrong before
+    ///
+    /// **The question is asked of the scan root**, not of whatever directory
+    /// the first probe batch happens to land in. Which directory that is
+    /// depends on traversal order and on which files a light scan decided to
+    /// rebuild; letting it decide a library-wide policy made the policy
+    /// effectively random.
+    ///
+    /// **A read that *threw* means "yes"**, not "no" — see
+    /// [`treeIsUbiquitous(_:)`], which is where that rule lives and where both
+    /// of its branches are testable.
+    ///
+    /// # The limitation this does not fix
+    ///
+    /// One answer covers the whole tree. A **mixed** library — a local root
+    /// with an iCloud Drive folder symlinked or nested inside it — resolves to
+    /// its root's kind, and the ubiquitous subtree then gets the cheap probe.
+    /// Its placeholders are still found when the provider populates
+    /// `totalFileSize` (all the third-party ones do, and iCloud does too); what
+    /// is lost is the `.downloading` / `.stale` distinction, which nothing in
+    /// the app reads today. A per-directory answer is the real fix and costs
+    /// one `resourceValues` per directory — cheap, but it is a behaviour change
+    /// to the probe's cost model that belongs with the Phase-4 work, not with a
+    /// bug fix.
+    func resolveTreeKind(root: URL) {
+        let read: UbiquityRead
+        do {
+            read = .answered(
+                try root.resourceValues(forKeys: FileProviderDetector.ubiquitousKeys)
+                    .isUbiquitousItem
+            )
+        } catch {
+            Log.scan.warning("""
+                Provider probe: could not read the root's ubiquity — \
+                \(Log.r.path(root)): \(Log.r.error(error)); reading all seven keys
+                """)
+            read = .unreadable
+        }
+        let resolved = Self.treeIsUbiquitous(read)
+        Log.scan.info("Provider probe: tree is ubiquitous = \(resolved) — \(resolved ? "reading all seven keys" : "skipping the three expensive ones")")
+        treeIsUbiquitous.withLock { $0 = resolved }
     }
 
-    private func rootIsUbiquitous(near path: String) -> Bool {
-        treeIsUbiquitous.withLock { cached in
-            if let cached { return cached }
-            let dir = CoreScanner.fileURL((path as NSString).deletingLastPathComponent)
-            let values = try? dir.resourceValues(forKeys: FileProviderDetector.ubiquitousKeys)
-            let resolved = values?.isUbiquitousItem ?? false
-            Log.scan.info("Provider probe: tree is ubiquitous = \(resolved) — \(resolved ? "reading all seven keys" : "skipping the three expensive ones")")
-            cached = resolved
-            return resolved
+    /// What one `isUbiquitousItem` read said.
+    enum UbiquityRead: Equatable {
+        /// `resourceValues` threw. Nothing was learned.
+        case unreadable
+        /// It answered. `nil` means the key was not populated.
+        case answered(Bool?)
+    }
+
+    /// The rule, isolated so both of its branches can be tested — the failing
+    /// one cannot be provoked through the public entry point at all.
+    ///
+    /// # The two "no answer" cases are not the same, and that is the whole rule
+    ///
+    /// **A read that threw is unknown, and unknown means yes.** A permission
+    /// blip, a provider that has not mounted, a bookmark whose scope was not
+    /// started: none of those are "this is local storage", and answering "not
+    /// ubiquitous" to them drops the only keys that can see an iCloud
+    /// placeholder. Every undownloaded photo would then read as `.local` — no
+    /// cloud badge, `ensureMaterialized` never fires, an empty frame in the
+    /// viewer. Being slow is the recoverable failure of the two.
+    ///
+    /// **A read that succeeded with the key absent is a no.** On iOS
+    /// `isUbiquitousItem` is simply *not populated* for anything outside iCloud
+    /// Drive — measured on the simulator, a plain local directory answers `nil`,
+    /// never `false`. Treating that absence as "unknown" too would send every
+    /// scan down the seven-key path and undo the whole 406 s → 2.3 s win
+    /// (`_plans/06` Finding 1). It is the ordinary case, not a failure.
+    static func treeIsUbiquitous(_ read: UbiquityRead) -> Bool {
+        switch read {
+        case .unreadable:
+            return true
+        case .answered(let isUbiquitous):
+            return isUbiquitous ?? false
         }
     }
 
@@ -452,7 +622,11 @@ final class CoreProviderProbe: ProviderProbe {
         return VfsProviderAttrs(
             isFileProvider: result.isFileProvider,
             isPlaceholder: result.status != .local,
-            contentVersion: result.version.contentIdentifier
+            contentVersion: result.version.contentIdentifier,
+            // `totalFileSize ?? fileSize`, which is exactly what the baseline
+            // wrote into `ContentVersion.size`. A placeholder's `stat` size is
+            // a stub, and the sidecar cache compares on this field.
+            intendedSize: result.version.size
         )
     }
 }

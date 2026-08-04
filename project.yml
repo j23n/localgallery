@@ -227,6 +227,14 @@ targets:
       - path: core/fixtures/scan-conformance
         type: folder
         buildPhase: resources
+      # Phase-4 memories/indexes conformance fixtures: SeededRNG vectors, the
+      # MemoryEngine scenario set, the widget's scheduled-days horizon, and the
+      # SearchIndex/TagIndex expectations. Same folder-reference arrangement —
+      # one copy of the spec, read here and by
+      # core/gallery-model/tests/memories_conformance_fixtures.rs.
+      - path: core/fixtures/memories-conformance
+        type: folder
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.j23n.localgallery.app.tests

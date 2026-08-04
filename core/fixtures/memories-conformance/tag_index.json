@@ -1,0 +1,415 @@
+{
+  "buckets" : [
+    {
+      "canonicalPath" : "Objects/Cup",
+      "key" : "objects/cup",
+      "photoIDs" : [
+        "46D5D0E0-4173-508F-8E94-CBCA7C31325D"
+      ]
+    },
+    {
+      "canonicalPath" : "People/Alice Anderson",
+      "key" : "people/alice anderson",
+      "photoIDs" : [
+        "3F4BE058-4622-599E-837B-F05897ACD718",
+        "EB203AE9-B15A-509D-B10E-630F980D9ADC"
+      ]
+    },
+    {
+      "canonicalPath" : "People/Bob Brown",
+      "key" : "people/bob brown",
+      "photoIDs" : [
+        "264133B3-0235-5E5B-9DB5-00D54C4C5BA1"
+      ]
+    },
+    {
+      "canonicalPath" : "Places/France",
+      "key" : "places/france",
+      "photoIDs" : [
+        "41713963-DE1B-5599-BFC5-B207F5008CF6"
+      ]
+    },
+    {
+      "canonicalPath" : "Places/France/Île-de-France",
+      "key" : "places/france/île-de-france",
+      "photoIDs" : [
+        "41713963-DE1B-5599-BFC5-B207F5008CF6"
+      ]
+    },
+    {
+      "canonicalPath" : "Places/France/Île-de-France/Paris",
+      "key" : "places/france/île-de-france/paris",
+      "photoIDs" : [
+        "41713963-DE1B-5599-BFC5-B207F5008CF6"
+      ]
+    },
+    {
+      "canonicalPath" : "Places/Italy",
+      "key" : "places/italy",
+      "photoIDs" : [
+        "0D6EAA7C-321B-53FD-9F66-CEBAABC98531",
+        "52906CA2-2C92-57FD-B476-DA357C2316C1",
+        "2FE05266-1B18-575D-9A92-39B634E01E21",
+        "4C8C1958-A151-5C89-BF5D-53A2A852A8E8"
+      ]
+    },
+    {
+      "canonicalPath" : "Places/Italy/Lazio",
+      "key" : "places/italy/lazio",
+      "photoIDs" : [
+        "0D6EAA7C-321B-53FD-9F66-CEBAABC98531",
+        "52906CA2-2C92-57FD-B476-DA357C2316C1",
+        "4C8C1958-A151-5C89-BF5D-53A2A852A8E8"
+      ]
+    },
+    {
+      "canonicalPath" : "Places/Italy/Lazio/Rome",
+      "key" : "places/italy/lazio/rome",
+      "photoIDs" : [
+        "0D6EAA7C-321B-53FD-9F66-CEBAABC98531",
+        "52906CA2-2C92-57FD-B476-DA357C2316C1",
+        "4C8C1958-A151-5C89-BF5D-53A2A852A8E8"
+      ]
+    },
+    {
+      "canonicalPath" : "Places/Italy/Lombardy",
+      "key" : "places/italy/lombardy",
+      "photoIDs" : [
+        "2FE05266-1B18-575D-9A92-39B634E01E21"
+      ]
+    },
+    {
+      "canonicalPath" : "Places/Italy/Lombardy/Milan",
+      "key" : "places/italy/lombardy/milan",
+      "photoIDs" : [
+        "2FE05266-1B18-575D-9A92-39B634E01E21"
+      ]
+    },
+    {
+      "canonicalPath" : "Places/Türkiye",
+      "key" : "places/türkiye",
+      "photoIDs" : [
+        "D61B2BB5-4A23-534C-915C-D3A881B184EE"
+      ]
+    },
+    {
+      "canonicalPath" : "Places/Türkiye/Istanbul",
+      "key" : "places/türkiye/istanbul",
+      "photoIDs" : [
+        "D61B2BB5-4A23-534C-915C-D3A881B184EE"
+      ]
+    },
+    {
+      "canonicalPath" : "Scenes/Beach",
+      "key" : "scenes/beach",
+      "photoIDs" : [
+        "0D6EAA7C-321B-53FD-9F66-CEBAABC98531",
+        "EB203AE9-B15A-509D-B10E-630F980D9ADC"
+      ]
+    },
+    {
+      "canonicalPath" : "Vacation",
+      "key" : "vacation",
+      "photoIDs" : [
+        "94A408C6-074E-5AC2-BACE-47883453F072"
+      ]
+    }
+  ],
+  "notes" : [
+    "Produced by LocalGalleryTests/Unit/IndexConformanceTests.swift from the shipping Swift TagIndex, BEFORE the Rust port.",
+    "Bucket keys are lowercased full paths. `canonicalPath` keeps the original casing; for a virtual prefix key it is the first spelling encountered, and the FIRST write wins (unlike the leaf key, where the LAST write wins).",
+    "Prefix expansion applies only to namespaces where TagNamespace.matchesByPrefix is true — places, objects, scenes — and only from depth 2 up, so the bare namespace ('places') is never a bucket.",
+    "A photo carrying both a parent and a leaf tag is credited to each key ONCE: `both-levels.jpg` appears a single time in the places/italy bucket even though two of its tags map there.",
+    "Bucket photo order is `allPhotos` order and is deterministic. Bucket KEY order is not — the live index is a Dictionary; this list is sorted for the fixture.",
+    "NONDETERMINISM, pinned as a canonical form rather than as observed output: aggregateTagsAndPeople sorts by `count` descending only, with Swift's non-stable `sorted`, over a Dictionary walk. Equal-count entries come out in an unspecified order that varies between processes. `tagSuggestions` and `peopleSuggestions` below are re-sorted by (count desc, id asc); the port must reproduce the COUNTS and the grouping, and is free in the tie order — as the Swift is.",
+    "`latestPhotoDate` is set for people suggestions only; the general tag list always has it nil."
+  ],
+  "peopleSuggestions" : [
+    {
+      "count" : 2,
+      "displayName" : "Alice Anderson",
+      "fullPath" : "People/Alice Anderson",
+      "id" : "people/alice anderson",
+      "latestPhotoDate" : "2024-02-01T12:00:00.000Z",
+      "namespace" : "People"
+    },
+    {
+      "count" : 1,
+      "displayName" : "Bob Brown",
+      "fullPath" : "People/Bob Brown",
+      "id" : "people/bob brown",
+      "latestPhotoDate" : "2023-01-01T12:00:00.000Z",
+      "namespace" : "People"
+    }
+  ],
+  "photos" : [
+    {
+      "dateTaken" : "2024-03-01T12:00:00.000Z",
+      "filename" : "b-equal",
+      "id" : "4F866783-3B7D-566E-ACD2-22D16465BEF7",
+      "isVideo" : false,
+      "path" : "/fixtures/idx/b-equal.jpg",
+      "tags" : [
+
+      ]
+    },
+    {
+      "dateTaken" : "2024-03-01T12:00:00.000Z",
+      "filename" : "a-equal",
+      "id" : "46B40097-8960-5520-B773-C9C3107B729E",
+      "isVideo" : false,
+      "path" : "/fixtures/idx/a-equal.jpg",
+      "tags" : [
+
+      ]
+    },
+    {
+      "dateTaken" : "2024-05-01T12:00:00.000Z",
+      "filename" : "c-later",
+      "id" : "8737BEC4-D823-5086-8568-82628E923CF4",
+      "isVideo" : false,
+      "path" : "/fixtures/idx/c-later.jpg",
+      "tags" : [
+
+      ]
+    },
+    {
+      "filename" : "undated-b",
+      "id" : "EF0749F1-B493-52C6-825B-4FB94682AE17",
+      "isVideo" : false,
+      "path" : "/fixtures/idx/undated-b.jpg",
+      "tags" : [
+
+      ]
+    },
+    {
+      "filename" : "undated-a",
+      "id" : "F0C2A980-C63A-5189-921C-6909B9061CCE",
+      "isVideo" : false,
+      "path" : "/fixtures/idx/undated-a.jpg",
+      "tags" : [
+
+      ]
+    },
+    {
+      "dateTaken" : "2023-08-01T12:00:00.000Z",
+      "filename" : "Beach Italy",
+      "id" : "0D6EAA7C-321B-53FD-9F66-CEBAABC98531",
+      "isVideo" : false,
+      "path" : "/fixtures/idx/Beach Italy.jpg",
+      "tags" : [
+        "Places/Italy/Lazio/Rome",
+        "Scenes/Beach"
+      ]
+    },
+    {
+      "dateTaken" : "2023-08-02T12:00:00.000Z",
+      "filename" : "rome2",
+      "id" : "52906CA2-2C92-57FD-B476-DA357C2316C1",
+      "isVideo" : false,
+      "path" : "/fixtures/idx/rome2.jpg",
+      "tags" : [
+        "Places/Italy/Lazio/Rome"
+      ]
+    },
+    {
+      "dateTaken" : "2023-09-01T12:00:00.000Z",
+      "filename" : "milan",
+      "id" : "2FE05266-1B18-575D-9A92-39B634E01E21",
+      "isVideo" : false,
+      "path" : "/fixtures/idx/milan.jpg",
+      "tags" : [
+        "Places/Italy/Lombardy/Milan"
+      ]
+    },
+    {
+      "dateTaken" : "2023-10-01T12:00:00.000Z",
+      "filename" : "paris",
+      "id" : "41713963-DE1B-5599-BFC5-B207F5008CF6",
+      "isVideo" : false,
+      "path" : "/fixtures/idx/paris.jpg",
+      "tags" : [
+        "Places/France/Île-de-France/Paris"
+      ]
+    },
+    {
+      "dateTaken" : "2023-11-01T12:00:00.000Z",
+      "filename" : "café",
+      "id" : "46D5D0E0-4173-508F-8E94-CBCA7C31325D",
+      "isVideo" : false,
+      "path" : "/fixtures/idx/café.jpg",
+      "tags" : [
+        "Objects/Cup"
+      ]
+    },
+    {
+      "dateTaken" : "2023-12-01T12:00:00.000Z",
+      "filename" : "İstanbul",
+      "id" : "D61B2BB5-4A23-534C-915C-D3A881B184EE",
+      "isVideo" : false,
+      "path" : "/fixtures/idx/İstanbul.jpg",
+      "tags" : [
+        "Places/Türkiye/Istanbul"
+      ]
+    },
+    {
+      "dateTaken" : "2024-01-01T12:00:00.000Z",
+      "filename" : "alice1",
+      "id" : "3F4BE058-4622-599E-837B-F05897ACD718",
+      "isVideo" : false,
+      "path" : "/fixtures/idx/alice1.jpg",
+      "tags" : [
+        "People/Alice Anderson"
+      ]
+    },
+    {
+      "dateTaken" : "2024-02-01T12:00:00.000Z",
+      "filename" : "alice2",
+      "id" : "EB203AE9-B15A-509D-B10E-630F980D9ADC",
+      "isVideo" : false,
+      "path" : "/fixtures/idx/alice2.jpg",
+      "tags" : [
+        "People/Alice Anderson",
+        "Scenes/Beach"
+      ]
+    },
+    {
+      "dateTaken" : "2023-01-01T12:00:00.000Z",
+      "filename" : "bob",
+      "id" : "264133B3-0235-5E5B-9DB5-00D54C4C5BA1",
+      "isVideo" : false,
+      "path" : "/fixtures/idx/bob.jpg",
+      "tags" : [
+        "People/Bob Brown"
+      ]
+    },
+    {
+      "dateTaken" : "2022-01-01T12:00:00.000Z",
+      "filename" : "flat",
+      "id" : "94A408C6-074E-5AC2-BACE-47883453F072",
+      "isVideo" : false,
+      "path" : "/fixtures/idx/flat.jpg",
+      "tags" : [
+        "Vacation"
+      ]
+    },
+    {
+      "dateTaken" : "2022-02-01T12:00:00.000Z",
+      "filename" : "both-levels",
+      "id" : "4C8C1958-A151-5C89-BF5D-53A2A852A8E8",
+      "isVideo" : false,
+      "path" : "/fixtures/idx/both-levels.jpg",
+      "tags" : [
+        "Places/Italy",
+        "Places/Italy/Lazio/Rome"
+      ]
+    }
+  ],
+  "schema" : 1,
+  "tagSuggestions" : [
+    {
+      "count" : 4,
+      "displayName" : "Italy",
+      "fullPath" : "Places/Italy",
+      "id" : "places/italy",
+      "namespace" : "Places"
+    },
+    {
+      "count" : 3,
+      "displayName" : "Lazio",
+      "fullPath" : "Places/Italy/Lazio",
+      "id" : "places/italy/lazio",
+      "namespace" : "Places"
+    },
+    {
+      "count" : 3,
+      "displayName" : "Rome",
+      "fullPath" : "Places/Italy/Lazio/Rome",
+      "id" : "places/italy/lazio/rome",
+      "namespace" : "Places"
+    },
+    {
+      "count" : 2,
+      "displayName" : "Alice Anderson",
+      "fullPath" : "People/Alice Anderson",
+      "id" : "people/alice anderson",
+      "namespace" : "People"
+    },
+    {
+      "count" : 2,
+      "displayName" : "Beach",
+      "fullPath" : "Scenes/Beach",
+      "id" : "scenes/beach",
+      "namespace" : "Scenes"
+    },
+    {
+      "count" : 1,
+      "displayName" : "Cup",
+      "fullPath" : "Objects/Cup",
+      "id" : "objects/cup",
+      "namespace" : "Objects"
+    },
+    {
+      "count" : 1,
+      "displayName" : "Bob Brown",
+      "fullPath" : "People/Bob Brown",
+      "id" : "people/bob brown",
+      "namespace" : "People"
+    },
+    {
+      "count" : 1,
+      "displayName" : "France",
+      "fullPath" : "Places/France",
+      "id" : "places/france",
+      "namespace" : "Places"
+    },
+    {
+      "count" : 1,
+      "displayName" : "Île-de-France",
+      "fullPath" : "Places/France/Île-de-France",
+      "id" : "places/france/île-de-france",
+      "namespace" : "Places"
+    },
+    {
+      "count" : 1,
+      "displayName" : "Paris",
+      "fullPath" : "Places/France/Île-de-France/Paris",
+      "id" : "places/france/île-de-france/paris",
+      "namespace" : "Places"
+    },
+    {
+      "count" : 1,
+      "displayName" : "Lombardy",
+      "fullPath" : "Places/Italy/Lombardy",
+      "id" : "places/italy/lombardy",
+      "namespace" : "Places"
+    },
+    {
+      "count" : 1,
+      "displayName" : "Milan",
+      "fullPath" : "Places/Italy/Lombardy/Milan",
+      "id" : "places/italy/lombardy/milan",
+      "namespace" : "Places"
+    },
+    {
+      "count" : 1,
+      "displayName" : "Türkiye",
+      "fullPath" : "Places/Türkiye",
+      "id" : "places/türkiye",
+      "namespace" : "Places"
+    },
+    {
+      "count" : 1,
+      "displayName" : "Istanbul",
+      "fullPath" : "Places/Türkiye/Istanbul",
+      "id" : "places/türkiye/istanbul",
+      "namespace" : "Places"
+    },
+    {
+      "count" : 1,
+      "displayName" : "Vacation",
+      "fullPath" : "Vacation",
+      "id" : "vacation"
+    }
+  ]
+}

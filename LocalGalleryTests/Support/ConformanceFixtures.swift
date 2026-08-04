@@ -25,14 +25,22 @@ enum ConformanceFixtures {
 
     static let directoryName = "scan-conformance"
 
+    /// Phase-4 memories/indexes fixtures. Same mechanism, second directory —
+    /// every entry point below takes the directory so the two sets of
+    /// harnesses share one regeneration story.
+    static let memoriesDirectoryName = "memories-conformance"
+
     // MARK: - Locating the fixtures
 
-    /// The `scan-conformance` folder inside the test bundle.
-    static func root(file: StaticString = #filePath, line: UInt = #line) throws -> URL {
+    /// The named fixture folder inside the test bundle.
+    static func root(
+        _ directory: String = directoryName,
+        file: StaticString = #filePath, line: UInt = #line
+    ) throws -> URL {
         let bundle = Bundle(for: BundleToken.self)
         return try XCTUnwrap(
-            bundle.url(forResource: directoryName, withExtension: nil),
-            "\(directoryName)/ is missing from the test bundle — check the folder reference in project.yml",
+            bundle.url(forResource: directory, withExtension: nil),
+            "\(directory)/ is missing from the test bundle — check the folder reference in project.yml",
             file: file, line: line
         )
     }
@@ -44,12 +52,12 @@ enum ConformanceFixtures {
     /// The repo-side copy of the fixture directory, derived from `#filePath`
     /// at compile time (`LocalGalleryTests/Support/…` → repo root). Only used
     /// for regeneration; reads always go through the bundle.
-    static var repoDirectory: URL {
+    static func repoDirectory(_ directory: String = directoryName) -> URL {
         URL(fileURLWithPath: #filePath)          // …/LocalGalleryTests/Support/ConformanceFixtures.swift
             .deletingLastPathComponent()          // …/LocalGalleryTests/Support
             .deletingLastPathComponent()          // …/LocalGalleryTests
             .deletingLastPathComponent()          // repo root
-            .appendingPathComponent("core/fixtures/\(directoryName)", isDirectory: true)
+            .appendingPathComponent("core/fixtures/\(directory)", isDirectory: true)
     }
 
     static var isRegenerating: Bool {
@@ -84,24 +92,25 @@ enum ConformanceFixtures {
     static func assertMatches<T: Codable & Equatable>(
         _ observed: T,
         fixture name: String,
+        in directory: String = directoryName,
         file: StaticString = #filePath,
         line: UInt = #line
     ) throws {
         let data = try encode(observed)
-        let url = try root(file: file, line: line).appendingPathComponent(name)
+        let url = try root(directory, file: file, line: line).appendingPathComponent(name)
 
         guard FileManager.default.fileExists(atPath: url.path) else {
-            dump(data, name: name, writeToRepo: true)
+            dump(data, name: name, writeToRepo: true, in: directory)
             XCTFail(
                 "\(name) is not committed yet — the observed output was dumped "
                 + "(see the ===BEGIN \(name)=== block above). "
-                + "Copy it to core/fixtures/\(directoryName)/\(name).",
+                + "Copy it to core/fixtures/\(directory)/\(name).",
                 file: file, line: line
             )
             return
         }
 
-        if isRegenerating { dump(data, name: name, writeToRepo: true) }
+        if isRegenerating { dump(data, name: name, writeToRepo: true, in: directory) }
 
         let committed: T
         do {
@@ -110,7 +119,7 @@ enum ConformanceFixtures {
             // The *shape* changed, not just a value — typically a new field on
             // the record type. Regenerating is the right move, and the run
             // above already did it if it was asked to.
-            if !isRegenerating { dump(data, name: name, writeToRepo: false) }
+            if !isRegenerating { dump(data, name: name, writeToRepo: false, in: directory) }
             XCTFail(
                 "\(name) no longer decodes into the current fixture type (\(error)). "
                 + "Rerun with TEST_RUNNER_CONFORMANCE_REGEN=1 to rewrite it.",
@@ -122,7 +131,7 @@ enum ConformanceFixtures {
             // Deliberately NOT written into the repo: a mismatch that silently
             // rewrote the fixture would go red once and green forever after,
             // which is the exact failure mode this suite exists to prevent.
-            dump(data, name: name, writeToRepo: false)
+            dump(data, name: name, writeToRepo: false, in: directory)
             XCTFail(
                 "\(name) no longer matches the current implementation. Either the "
                 + "behaviour changed (fix the code) or the change is intended "
@@ -187,10 +196,11 @@ enum ConformanceFixtures {
     static func assertCommittedBytesAreCanonical<T: Codable>(
         _ type: T.Type,
         fixture name: String,
+        in directory: String = directoryName,
         file: StaticString = #filePath,
         line: UInt = #line
     ) throws {
-        let url = try root(file: file, line: line).appendingPathComponent(name)
+        let url = try root(directory, file: file, line: line).appendingPathComponent(name)
         let raw = try Data(contentsOf: url)
         let reencoded = try encode(JSONDecoder().decode(T.self, from: raw))
         XCTAssertEqual(
@@ -206,8 +216,8 @@ enum ConformanceFixtures {
     /// sandbox may refuse) and onto stdout between markers, with a temp-dir
     /// copy as a third chance. Deliberately not an `XCTAttachment`:
     /// `XCTContext.runActivity` traps when called from an async test body.
-    static func dump(_ data: Data, name: String, writeToRepo: Bool) {
-        let repo = repoDirectory.appendingPathComponent(name)
+    static func dump(_ data: Data, name: String, writeToRepo: Bool, in directory: String = directoryName) {
+        let repo = repoDirectory(directory).appendingPathComponent(name)
         let wroteRepo = writeToRepo && (try? data.write(to: repo, options: .atomic)) != nil
 
         let temp = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(name)

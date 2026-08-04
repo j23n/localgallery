@@ -19,7 +19,8 @@ final class TaggingServiceTests: XCTestCase {
     private func makeService(_ temp: TempDir) -> TaggingService {
         TaggingService(
             cacheDatabaseURL: temp.appending("gallery-cache.sqlite"),
-            modelPacksDirectory: temp.appending("ModelPacks", isDirectory: true)
+            modelPacksDirectory: temp.appending("ModelPacks", isDirectory: true),
+            refresh: SidecarRefreshCoalescer(interval: TaggingService.refreshInterval)
         )
     }
 

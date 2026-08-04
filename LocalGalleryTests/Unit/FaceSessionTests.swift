@@ -203,7 +203,7 @@ final class FaceSessionTests: XCTestCase {
         let touched = Set(try session.clusterFaces(clusterId: cluster.id).map(\.path))
         XCTAssertFalse(touched.isEmpty)
 
-        let report = try session.nameCluster(clusterId: cluster.id, name: "Ada Lovelace")
+        let report = try session.nameCluster(clusterId: cluster.id, name: "Ada Lovelace", rootPrefix: nil)
         XCTAssertEqual(Int(report.written), touched.count, "\(report)")
         XCTAssertEqual(report.failed, 0)
         XCTAssertTrue(report.failedPaths.isEmpty)
@@ -275,13 +275,13 @@ final class FaceSessionTests: XCTestCase {
         <?xpacket end='w'?>
         """.utf8).write(to: sidecar(target))
 
-        _ = try session.nameCluster(clusterId: cluster.id, name: "Ada")
+        _ = try session.nameCluster(clusterId: cluster.id, name: "Ada", rootPrefix: nil)
         let named = try parsed(target)
         XCTAssertTrue(named.rawTags.contains("People/Ada"))
         XCTAssertTrue(named.rawTags.contains("People/Zoe"))
         XCTAssertEqual(named.countryCode, "IT")
 
-        let report = try session.unnameCluster(clusterId: cluster.id)
+        let report = try session.unnameCluster(clusterId: cluster.id, rootPrefix: nil)
         XCTAssertGreaterThan(report.written, 0, "\(report)")
 
         let cleared = try parsed(target)
@@ -307,7 +307,7 @@ final class FaceSessionTests: XCTestCase {
         try await scan(session)
         let cluster = try biggestCluster(session)
 
-        _ = try session.ignoreCluster(clusterId: cluster.id)
+        _ = try session.ignoreCluster(clusterId: cluster.id, rootPrefix: nil)
         let dismissed = try XCTUnwrap(try session.clusters().first { $0.id == cluster.id })
         XCTAssertEqual(dismissed.state, .ignored)
         XCTAssertNil(dismissed.name)
@@ -324,7 +324,7 @@ final class FaceSessionTests: XCTestCase {
 
         for bad in ["", "   ", "People/Ada"] {
             XCTAssertThrowsError(
-                try session.nameCluster(clusterId: cluster.id, name: bad), bad
+                try session.nameCluster(clusterId: cluster.id, name: bad, rootPrefix: nil), bad
             ) { error in
                 guard case FaceError.InvalidName = error else {
                     return XCTFail("expected InvalidName for \(bad.debugDescription), got \(error)")
@@ -340,7 +340,7 @@ final class FaceSessionTests: XCTestCase {
         let session = try makeSession()
         try await scan(session)
 
-        XCTAssertThrowsError(try session.nameCluster(clusterId: 9_999, name: "Ada")) { error in
+        XCTAssertThrowsError(try session.nameCluster(clusterId: 9_999, name: "Ada", rootPrefix: nil)) { error in
             guard case FaceError.ClusterNotFound(let id) = error else {
                 return XCTFail("expected ClusterNotFound, got \(error)")
             }
@@ -374,10 +374,10 @@ final class FaceSessionTests: XCTestCase {
         // Everything that writes is refused for the duration rather than
         // racing the run's own auto-tag pass over the same cluster table.
         let refusals: [(String, () throws -> Void)] = [
-            ("nameCluster", { _ = try session.nameCluster(clusterId: 1, name: "Ada") }),
-            ("unnameCluster", { _ = try session.unnameCluster(clusterId: 1) }),
-            ("ignoreCluster", { _ = try session.ignoreCluster(clusterId: 1) }),
-            ("renamePerson", { _ = try session.renamePerson(old: "Ada", new: "Grace") }),
+            ("nameCluster", { _ = try session.nameCluster(clusterId: 1, name: "Ada", rootPrefix: nil) }),
+            ("unnameCluster", { _ = try session.unnameCluster(clusterId: 1, rootPrefix: nil) }),
+            ("ignoreCluster", { _ = try session.ignoreCluster(clusterId: 1, rootPrefix: nil) }),
+            ("renamePerson", { _ = try session.renamePerson(old: "Ada", new: "Grace", rootPrefix: nil) }),
             ("recluster", { _ = try session.recluster() }),
             ("resetQueue", { try session.resetQueue() }),
         ]

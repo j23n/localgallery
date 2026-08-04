@@ -42,10 +42,10 @@ pub mod write;
 pub mod xml;
 
 pub use error::{MetaError, MetaResult};
-pub use faces::{apply_faces, write_faces, AppliedFaces, FaceWriteRequest};
+pub use faces::{apply_faces, write_faces, AppliedFaces, Authority, FaceWriteRequest};
 pub use model::{AppliedDimensions, CoreSentinel, FaceRegion, PhotoToolsFields, SidecarView};
 pub use read::read_view;
-pub use regions::{Area, FaceRegionWrite, REGION_MATCH_IOU};
+pub use regions::{bind_claims, Area, FaceRegionWrite, RegionClaim, REGION_MATCH_IOU};
 pub use schema::CORE_AGENT;
 pub use sidecar::{alt_sidecar_path, sidecar_path};
 pub use tags::{normalize_person, person_tag};

@@ -29,9 +29,14 @@ final class FaceServiceTests: XCTestCase {
     /// `TaggingService`, so a test can supply either kind of pack without
     /// staging one on disk.
     private func makeService(
-        _ temp: TempDir, pack: TaggingService.PackStatus?
+        _ temp: TempDir,
+        pack: TaggingService.PackStatus?,
+        refresh: SidecarRefreshCoalescer? = nil
     ) -> FaceService {
-        let service = FaceService(cacheDatabaseURL: temp.appending("gallery-cache.sqlite"))
+        let service = FaceService(
+            cacheDatabaseURL: temp.appending("gallery-cache.sqlite"),
+            refresh: refresh ?? SidecarRefreshCoalescer(interval: FaceService.refreshInterval)
+        )
         service.installedPack = { pack }
         return service
     }
@@ -69,6 +74,12 @@ final class FaceServiceTests: XCTestCase {
 
     /// Wait for an in-flight run to settle. `startScan` returns as soon as the
     /// core-owned thread is spawned; the finish arrives through `onFinished`.
+    ///
+    /// The final `refreshClusters()` is not redundant: `finish()` clears
+    /// `isRunning` *before* it re-reads the cluster list (the flag is what the
+    /// UI gates its buttons on, and holding it through a rescan would be
+    /// wrong), so this loop can return while that read is still in flight.
+    /// Re-reading is idempotent and is exactly the call the run itself makes.
     private func waitForRun(_ service: FaceService) async throws {
         var waited = 0
         while service.isRunning && waited < 6_000 {
@@ -77,6 +88,7 @@ final class FaceServiceTests: XCTestCase {
         }
         XCTAssertFalse(service.isRunning, "the run never finished")
         await service.refreshTask?.value
+        await service.refreshClusters()
     }
 
     // MARK: - Availability
@@ -169,7 +181,7 @@ final class FaceServiceTests: XCTestCase {
         XCTAssertNil(summary.failure)
         XCTAssertEqual(summary.processed, photos.count)
         XCTAssertGreaterThan(summary.facesFound, 0)
-        XCTAssertFalse(service.allClusters.isEmpty, "the run published no clusters")
+        XCTAssertFalse(service.allClusters.isEmpty, "the run produced no clusters")
         // The run itself names nobody, so nothing reached disk.
         XCTAssertEqual(summary.sidecarsWritten, 0)
         let refreshesAfterScan = refreshes
@@ -301,6 +313,185 @@ final class FaceServiceTests: XCTestCase {
         try await waitForRun(service)
         XCTAssertEqual(service.lastSummary?.cancelled, false)
         XCTAssertEqual(service.lastSummary?.processed, photos.count)
+    }
+
+    // MARK: - Availability on a cold launch
+
+    /// `installedPack` reads `TaggingService.pack`, which is nil until somebody
+    /// calls `refreshAvailability()` — and until this fix the only caller was
+    /// Settings' `.task`. A user who never opened Settings had no faces UI at
+    /// all, because the People screen asked and was told "no pack".
+    func testRefreshingClustersAsksForThePackToBeCheckedFirst() async throws {
+        let temp = makeTemp()
+        var pack: TaggingService.PackStatus?
+        let service = FaceService(
+            cacheDatabaseURL: temp.appending("gallery-cache.sqlite"),
+            refresh: SidecarRefreshCoalescer(interval: FaceService.refreshInterval)
+        )
+        service.installedPack = { pack }
+
+        var checks = 0
+        let facePack = try facePack()
+        service.ensurePackChecked = {
+            checks += 1
+            // What `TaggingService.refreshAvailability()` does: find the pack.
+            pack = facePack
+        }
+
+        XCTAssertFalse(service.isAvailable, "nothing has looked for a pack yet")
+        await service.refreshClusters()
+        XCTAssertEqual(checks, 1, "refreshClusters never asked")
+        XCTAssertTrue(service.isAvailable, "the pack was found but faces stayed hidden")
+    }
+
+    // MARK: - Cross-engine exclusion
+
+    /// The core refuses a naming during a *face* run, but it cannot see the
+    /// tagging run — that belongs to a different session over the same cache
+    /// file and the same sidecars. This is the app-side half.
+    func testNamingIsRefusedWhileTheTaggingEngineIsRunning() async throws {
+        let temp = makeTemp()
+        let service = makeService(temp, pack: try facePack())
+        service.otherEngineIsRunning = { true }
+
+        XCTAssertTrue(service.isCoreBusy)
+        let named = await service.name(cluster: 1, as: "Ada")
+        XCTAssertFalse(named)
+        XCTAssertEqual(service.lastError, .alreadyRunning)
+
+        service.otherEngineIsRunning = { false }
+        XCTAssertFalse(service.isCoreBusy)
+    }
+
+    // MARK: - Sessions
+
+    /// Two callers reaching `openSession` at once used to build two sessions:
+    /// two ONNX loads, two SQLite connections, and — the part that breaks — two
+    /// run locks, so `cancel()` reached whichever one `self.session` ended up
+    /// holding rather than the one owning the run.
+    func testConcurrentCallersShareOneSession() async throws {
+        let temp = makeTemp()
+        try stageLibrary(in: temp)
+        let service = makeService(temp, pack: try facePack())
+
+        // Two callers that both need a session and neither of which has one —
+        // the People screen's `.task` and Settings' faces block, in the real
+        // app. `async let` gives them separate child tasks, so the second
+        // reaches `openSession` while the first is suspended inside it.
+        async let first: Void = service.refreshClusters()
+        async let second: Void = service.refreshClusters()
+        _ = await (first, second)
+
+        XCTAssertEqual(service.sessionsOpened, 1, "the open was not shared")
+        XCTAssertNil(service.lastError)
+    }
+
+    /// A pack import replaces the models the open session holds, so the session
+    /// has to be dropped and the next call has to open a fresh one.
+    func testInvalidatingTheSessionReopensOnTheNextCall() async throws {
+        let temp = makeTemp()
+        try stageLibrary(in: temp)
+        let service = makeService(temp, pack: try facePack())
+
+        await service.refreshClusters()
+        XCTAssertEqual(service.sessionsOpened, 1)
+        await service.refreshClusters()
+        XCTAssertEqual(service.sessionsOpened, 1, "the session was not reused")
+
+        await service.invalidateSession()
+        XCTAssertTrue(service.allClusters.isEmpty, "stale clusters survived the invalidation")
+
+        await service.refreshClusters()
+        XCTAssertEqual(service.sessionsOpened, 2, "the session was not reopened")
+        XCTAssertNil(service.lastError)
+    }
+
+    /// A different pack directory is a different set of models: reusing the
+    /// open session would keep detecting under the version the user replaced.
+    func testAPackChangeReopensTheSession() async throws {
+        let temp = makeTemp()
+        try stageLibrary(in: temp)
+        var directory = try facePack().directory
+        let service = FaceService(
+            cacheDatabaseURL: temp.appending("gallery-cache.sqlite"),
+            refresh: SidecarRefreshCoalescer(interval: FaceService.refreshInterval)
+        )
+        service.installedPack = {
+            TaggingService.PackStatus(
+                version: "gallery-ml-facepack-1",
+                labelCount: 6,
+                hasFaces: true,
+                directory: directory
+            )
+        }
+
+        await service.refreshClusters()
+        XCTAssertEqual(service.sessionsOpened, 1)
+
+        // The same pack, copied somewhere else: a new directory is all the
+        // service can see, and all it needs to see.
+        let moved = temp.appending("facepack-2", isDirectory: true)
+        try FileManager.default.copyItem(at: directory, to: moved)
+        directory = moved
+
+        await service.refreshClusters()
+        XCTAssertEqual(service.sessionsOpened, 2, "the session kept the old pack's models")
+        XCTAssertNil(service.lastError)
+    }
+
+    // MARK: - Partial failures
+
+    /// The core reports a failed sidecar write in a *count*, not by throwing.
+    /// Clearing `lastError` unconditionally swallowed that whole: the review
+    /// screen showed nothing and stayed open with no explanation.
+    func testAPartlyFailedNamingSurfacesAnError() async throws {
+        let temp = makeTemp()
+        let photos = try stageLibrary(in: temp)
+        let service = makeService(temp, pack: try facePack())
+        service.eligiblePhotos = { photos }
+        service.libraryRoot = { temp.url }
+
+        await service.startScan()
+        try await waitForRun(service)
+        let cluster = try XCTUnwrap(
+            service.allClusters.filter { $0.state == .unlabeled }.max { $0.size < $1.size }
+        )
+
+        // Every sidecar this cluster would write is blocked by a directory
+        // standing where the file has to go.
+        let faces = await service.faces(inCluster: cluster.id)
+        XCTAssertFalse(faces.isEmpty)
+        for url in Set(faces.map(\.url)) {
+            try FileManager.default.createDirectory(
+                at: url.appendingPathExtension("xmp"), withIntermediateDirectories: true
+            )
+        }
+
+        let ok = await service.name(cluster: cluster.id, as: "Ada")
+        XCTAssertFalse(ok, "a naming that wrote nothing reported success")
+        guard case .sidecarWritesFailed(let count)? = service.lastError else {
+            return XCTFail("expected sidecarWritesFailed, got \(String(describing: service.lastError))")
+        }
+        XCTAssertGreaterThan(count, 0)
+        XCTAssertFalse(service.lastError?.message.isEmpty ?? true)
+    }
+
+    // MARK: - Ordering
+
+    /// Equal-sized clusters must not swap places between two reads of the same
+    /// list — `sorted(by:)` is not stable, so size alone shuffles the screen.
+    func testEqualSizedClustersAreOrderedByIdNotByLuck() {
+        let a = FaceService.Cluster(id: 7, size: 4, state: .named, name: "Ada", exemplars: [])
+        let b = FaceService.Cluster(id: 3, size: 4, state: .named, name: "Bob", exemplars: [])
+        let c = FaceService.Cluster(id: 9, size: 9, state: .named, name: "Cy", exemplars: [])
+
+        for input in [[a, b, c], [c, b, a], [b, c, a]] {
+            XCTAssertEqual(
+                input.sorted(by: FaceService.biggestFirst).map(\.id),
+                [9, 3, 7],
+                "\(input.map(\.id))"
+            )
+        }
     }
 
     // MARK: - Refresh coalescing

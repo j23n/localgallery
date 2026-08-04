@@ -199,11 +199,20 @@ final class GalleryStore {
             searchIndex: searchService,
             people: people
         )
+        // One coalescer for both core engines. The interval is a budget for
+        // interrupting the user with a library rescan; two engines each holding
+        // their own instance spent it twice, which is exactly what the window
+        // exists to prevent.
+        let sidecarRefresh = SidecarRefreshCoalescer(interval: TaggingService.refreshInterval)
         self.tagging = TaggingService(
             cacheDatabaseURL: paths.mlCacheDatabaseURL,
-            modelPacksDirectory: paths.modelPacksDirectoryURL
+            modelPacksDirectory: paths.modelPacksDirectoryURL,
+            refresh: sidecarRefresh
         )
-        self.faces = FaceService(cacheDatabaseURL: paths.mlCacheDatabaseURL)
+        self.faces = FaceService(
+            cacheDatabaseURL: paths.mlCacheDatabaseURL,
+            refresh: sidecarRefresh
+        )
         self.sidecarSync.onFinished = { @MainActor [weak self] in
             self?.reapplySidecarMerges()
         }
@@ -213,26 +222,32 @@ final class GalleryStore {
         // under a folder the user has switched away from would be tagged, and
         // sidecars written outside the library on screen.
         self.tagging.libraryRoot = { [weak self] in self?.bookmarks.activeURL }
-        // A tagging run creates sidecars the last scan never saw, so the only
-        // entry point that picks them up is a fresh scan: the light pass
+        // Both core engines create sidecars the last scan never saw, so the
+        // only entry point that picks them up is a fresh scan: the light pass
         // rebuilds the sidecar manifest (reusing cached PhotoFiles, so it is a
         // stat per file and no EXIF), which feeds SidecarSyncService →
         // reapplySidecarMerges → indexes/widget. See TaggingService's docs.
-        self.tagging.onSidecarsWritten = { [weak self] in
+        //
+        // Set on the shared coalescer rather than through each service's
+        // `onSidecarsWritten` passthrough: those write to the same stored
+        // property, so assigning both would silently be one assignment.
+        sidecarRefresh.onRefresh = { [weak self] in
             await self?.rescan(kind: .light, silent: true)
         }
         // Faces read the pack `TaggingService` already found and verified,
         // rather than discovering (and re-hashing) the same directory twice.
         self.faces.installedPack = { [weak self] in self?.tagging.pack }
+        // `tagging.pack` is nil until somebody looks for one, and until now the
+        // only caller was Settings. A cold launch that never opened Settings
+        // therefore had no faces UI at all.
+        self.faces.ensurePackChecked = { [weak self] in
+            await self?.tagging.refreshAvailability()
+        }
+        // The two engines share a cache file and a sidecar per photo, and each
+        // core session only guards its own run. This is the other half.
+        self.faces.otherEngineIsRunning = { [weak self] in self?.tagging.isRunning ?? false }
         self.faces.eligiblePhotos = { [weak self] in self?.allPhotos ?? [] }
         self.faces.libraryRoot = { [weak self] in self?.bookmarks.activeURL }
-        // Naming a cluster writes `People/*` keywords and MWG regions into
-        // sidecars the last scan never saw — the same situation tagging is in,
-        // and the same fix: a light rescan feeds SidecarSyncService →
-        // reapplySidecarMerges → PeopleStore.
-        self.faces.onSidecarsWritten = { [weak self] in
-            await self?.rescan(kind: .light, silent: true)
-        }
         // An imported pack replaces the face models the open FaceSession holds.
         self.tagging.onPackWillChange = { [weak self] in
             await self?.faces.invalidateSession()

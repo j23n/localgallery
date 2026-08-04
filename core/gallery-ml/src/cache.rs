@@ -468,6 +468,16 @@ pub struct ClusterRow {
 /// bad file stops costing a full decode on every "Tag now".
 pub const MAX_RETRIES: u32 = 3;
 
+/// How long a statement waits for the other engine's write lock before it gives
+/// up with `SQLITE_BUSY`.
+///
+/// Five seconds. Every write this crate makes is a few small rows inside one
+/// transaction — microseconds of lock — so the only way to wait this long is
+/// for something to be genuinely wedged, and reporting that is more useful than
+/// waiting longer. The number is deliberately far above the real contention and
+/// far below anything a user would sit through.
+pub const BUSY_TIMEOUT_MS: u64 = 5_000;
+
 /// The cache database.
 #[derive(Debug)]
 pub struct CacheDb {
@@ -501,13 +511,25 @@ impl CacheDb {
         let _: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // Two engines share this file — a tagging run and a face run are
+        // independently startable, and naming writes from the main actor. WAL
+        // lets readers and one writer coexist, but two writers still collide,
+        // and the default behaviour is to fail the statement instantly with
+        // SQLITE_BUSY. Every write here is a handful of small rows, so waiting
+        // is always the better answer than failing a photo.
+        conn.busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS))?;
 
         let db = CacheDb {
             conn: Mutex::new(conn),
         };
         db.migrate()?;
-        db.reclaim_abandoned()?;
-        db.face_reclaim_abandoned()?;
+        // Deliberately **no** reclaim here. `running` rows belong to whichever
+        // engine is processing them, and this connection cannot tell an
+        // abandoned row from one the *other* engine is holding right now —
+        // opening a second `CacheDb` (a face session opening beside a live
+        // tagging run) would put its in-flight rows back in the queue and have
+        // them processed twice. Both engines reclaim at the start of their own
+        // run, which is the only moment the answer is knowable.
         Ok(db)
     }
 
@@ -1702,10 +1724,13 @@ impl CacheDb {
         ] {
             tx.execute(&format!("DELETE FROM {table}"), [])?;
         }
-        // `clusters` is AUTOINCREMENT: without this a fresh cluster would reuse
-        // ids the UI may still be holding from before the reset.
-        tx.execute("DELETE FROM sqlite_sequence WHERE name = 'clusters'", [])
-            .ok();
+        // `clusters` is AUTOINCREMENT and its `sqlite_sequence` row is left
+        // alone **on purpose**: it is the high-water mark, and deleting it is
+        // what would make the next cluster reuse id 1. The UI holds ids across
+        // this call (a review screen, a queued deep link, a pending
+        // `name_cluster`), and a reused id means naming a different group of
+        // strangers. Keeping the counter makes every stale id a
+        // `ClusterNotFound`, which is a correct answer.
         tx.commit()?;
         Ok(())
     }
@@ -2041,20 +2066,55 @@ mod tests {
         assert_eq!(db.item("/b.jpg").unwrap().unwrap().state, WorkState::Stale);
     }
 
+    /// Opening a second handle must not reclaim: two engines share this file,
+    /// and a face session opening beside a live tagging run cannot tell that
+    /// run's in-flight rows from rows a crash abandoned. Putting them back in
+    /// the queue would have them processed twice, by two engines at once.
+    ///
+    /// Both queues, because both engines open the same `CacheDb`.
     #[test]
-    fn abandoned_hashing_rows_are_reclaimed_on_open() {
+    fn opening_a_second_handle_leaves_the_other_engines_in_flight_rows_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.sqlite");
+        let first = CacheDb::open(&path).unwrap();
+        first.enqueue(&["/a.jpg".into()]).unwrap();
+        first.face_enqueue(&["/b.jpg".into()]).unwrap();
+        first.begin("/a.jpg").unwrap();
+        first.face_begin("/b.jpg").unwrap();
+
+        let second = CacheDb::open(&path).unwrap();
+        assert_eq!(
+            second.item("/a.jpg").unwrap().unwrap().state,
+            WorkState::Hashing,
+            "the tagging row was reclaimed out from under a live run"
+        );
+        assert_eq!(
+            second.face_item("/b.jpg").unwrap().unwrap().state,
+            WorkState::Hashing,
+            "the face row was reclaimed out from under a live run"
+        );
+        // And neither handle will hand the row to a worker.
+        assert!(claimable_paths(&second).is_empty());
+    }
+
+    /// A row genuinely abandoned by a crash is still recovered — at the start
+    /// of the next run, which is the only moment the answer is knowable.
+    #[test]
+    fn an_abandoned_row_is_reclaimed_at_the_next_run_start() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("c.sqlite");
         {
             let db = CacheDb::open(&path).unwrap();
             db.enqueue(&["/a.jpg".into()]).unwrap();
             db.begin("/a.jpg").unwrap();
-            assert_eq!(
-                db.item("/a.jpg").unwrap().unwrap().state,
-                WorkState::Hashing
-            );
         }
         let db = CacheDb::open(&path).unwrap();
+        assert_eq!(
+            db.item("/a.jpg").unwrap().unwrap().state,
+            WorkState::Hashing,
+            "the open reclaimed, which is what this change removed"
+        );
+        assert_eq!(db.reclaim_abandoned().unwrap(), 1);
         assert_eq!(
             db.item("/a.jpg").unwrap().unwrap().state,
             WorkState::Pending
@@ -2468,15 +2528,18 @@ mod tests {
     }
 
     /// A face-model swap invalidates the embedding space, so everything derived
-    /// from it goes — including the cluster id sequence, which the UI holds.
+    /// from it goes. The cluster **id sequence** does not: it is the high-water
+    /// mark that keeps a stale id the UI is still holding from naming a
+    /// different group of strangers.
     #[test]
-    fn resetting_face_results_clears_everything_derived() {
+    fn resetting_face_results_clears_everything_derived_but_not_the_id_sequence() {
         let db = db();
         db.put_faces(&h(1), "m", 1, 1, &[face(h(1), 0, vec![1.0])])
             .unwrap();
         let a = db.create_cluster(&[1.0]).unwrap();
+        let b = db.create_cluster(&[1.0]).unwrap();
         db.set_cluster_member(a, &h(1), 0).unwrap();
-        db.put_merge_proposal(a, a + 1, 0.9).unwrap();
+        db.put_merge_proposal(a, b, 0.9).unwrap();
         db.face_enqueue(&["/a.jpg".into()]).unwrap();
 
         db.reset_face_results().unwrap();
@@ -2487,8 +2550,13 @@ mod tests {
         assert_eq!(db.face_scan(&h(1), "m").unwrap(), None);
         // The queue is untouched — it is the thing that will refill the tables.
         assert_eq!(db.face_stats().unwrap().pending, 1);
-        // Ids start over rather than colliding with what the UI last saw.
-        assert_eq!(db.create_cluster(&[1.0]).unwrap(), a);
+
+        // Ids continue from where they stopped, so nothing the UI is holding
+        // resolves to somebody new.
+        let next = db.create_cluster(&[1.0]).unwrap();
+        assert!(next > b, "id {next} was reused after {b}");
+        assert!(db.cluster(a).unwrap().is_none(), "the old id came back");
+        assert!(db.cluster(b).unwrap().is_none());
     }
 
     #[test]

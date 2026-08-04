@@ -17,7 +17,9 @@ use std::sync::{Arc, Mutex};
 use common::{face_pack_dir, fixture};
 use gallery_meta::read_view;
 use gallery_ml::cache::ClusterState;
-use gallery_ml::face::{FaceEngine, FaceProgress, FaceRunOptions, FaceRunSummary, NoFaceProgress};
+use gallery_ml::face::{
+    FaceEngine, FaceProgress, FaceRunOptions, FaceRunSummary, NoFaceProgress, SyncScope,
+};
 use gallery_ml::{CacheDb, MlError, ModelPack};
 use gallery_vfs::StdVfs;
 
@@ -154,7 +156,7 @@ fn naming_a_cluster_writes_people_and_regions_to_every_photo_it_reaches() {
 
     let plan = f
         .engine
-        .name_cluster(id, "Ada Lovelace", Some(STAMP))
+        .name_cluster(id, "Ada Lovelace", Some(STAMP), None)
         .unwrap();
     assert_eq!(plan.written.len(), expected.len(), "{plan:?}");
     assert!(plan.failed.is_empty(), "{:?}", plan.failed);
@@ -206,13 +208,13 @@ fn naming_the_same_cluster_again_writes_nothing() {
     f.run();
     let id = f.biggest_cluster();
 
-    let first = f.engine.name_cluster(id, "Ada", Some(STAMP)).unwrap();
+    let first = f.engine.name_cluster(id, "Ada", Some(STAMP), None).unwrap();
     assert!(first.touched_disk());
     let snapshot: Vec<Option<Vec<u8>>> = PHOTOS.iter().map(|n| f.sidecar(n)).collect();
 
     let second = f
         .engine
-        .name_cluster(id, "Ada", Some("2026-09-09T09:09:09Z"))
+        .name_cluster(id, "Ada", Some("2026-09-09T09:09:09Z"), None)
         .unwrap();
     assert!(!second.touched_disk(), "{second:?}");
     assert_eq!(second.unchanged.len(), first.written.len());
@@ -231,7 +233,10 @@ fn an_unusable_name_is_refused_before_anything_is_written() {
     let id = f.biggest_cluster();
 
     for bad in ["", "   ", "People/Ada"] {
-        let err = f.engine.name_cluster(id, bad, Some(STAMP)).unwrap_err();
+        let err = f
+            .engine
+            .name_cluster(id, bad, Some(STAMP), None)
+            .unwrap_err();
         assert!(
             matches!(
                 err,
@@ -257,7 +262,7 @@ fn naming_a_cluster_that_is_gone_is_an_error_not_a_silent_no_op() {
     f.run();
     let err = f
         .engine
-        .name_cluster(9_999, "Ada", Some(STAMP))
+        .name_cluster(9_999, "Ada", Some(STAMP), None)
         .unwrap_err();
     assert!(
         matches!(err, MlError::ClusterNotFound { id: 9_999 }),
@@ -277,13 +282,16 @@ fn renaming_swaps_the_name_in_every_sidecar_without_duplicating_a_region() {
     let id = f.biggest_cluster();
     let photos = f.photos_of(id);
 
-    f.engine.name_cluster(id, "Ada", Some(STAMP)).unwrap();
+    f.engine.name_cluster(id, "Ada", Some(STAMP), None).unwrap();
     let before_counts: Vec<usize> = photos
         .iter()
         .map(|n| read_view(&f.sidecar(n).unwrap()).unwrap().regions.len())
         .collect();
 
-    let plan = f.engine.rename_person("Ada", "Grace", Some(STAMP)).unwrap();
+    let plan = f
+        .engine
+        .rename_person("Ada", "Grace", Some(STAMP), None)
+        .unwrap();
     assert_eq!(plan.written.len(), photos.len(), "{plan:?}");
 
     for (name, count) in photos.iter().zip(&before_counts) {
@@ -317,7 +325,7 @@ fn renaming_a_person_nobody_carries_is_an_empty_plan_not_an_error() {
     f.run();
     let plan = f
         .engine
-        .rename_person("Nobody", "Somebody", Some(STAMP))
+        .rename_person("Nobody", "Somebody", Some(STAMP), None)
         .unwrap();
     assert_eq!(plan.total(), 0);
     assert!(!plan.touched_disk());
@@ -331,8 +339,8 @@ fn un_naming_takes_the_person_and_their_regions_back_out() {
     let id = f.biggest_cluster();
     let photos = f.photos_of(id);
 
-    f.engine.name_cluster(id, "Ada", Some(STAMP)).unwrap();
-    let plan = f.engine.unname_cluster(id, Some(STAMP)).unwrap();
+    f.engine.name_cluster(id, "Ada", Some(STAMP), None).unwrap();
+    let plan = f.engine.unname_cluster(id, Some(STAMP), None).unwrap();
     assert_eq!(plan.written.len(), photos.len());
 
     for name in &photos {
@@ -357,8 +365,8 @@ fn ignoring_a_named_cluster_retracts_it_and_keeps_it_out_of_the_way() {
     f.run();
     let id = f.biggest_cluster();
 
-    f.engine.name_cluster(id, "Ada", Some(STAMP)).unwrap();
-    f.engine.ignore_cluster(id, Some(STAMP)).unwrap();
+    f.engine.name_cluster(id, "Ada", Some(STAMP), None).unwrap();
+    f.engine.ignore_cluster(id, Some(STAMP), None).unwrap();
 
     for name in f.photos_of(id) {
         let view = read_view(&f.sidecar(&name).unwrap()).unwrap();
@@ -427,17 +435,19 @@ fn a_foreign_sidecar_survives_the_whole_name_rename_unname_cycle() {
         view
     };
 
-    f.engine.name_cluster(id, "Ada", Some(STAMP)).unwrap();
+    f.engine.name_cluster(id, "Ada", Some(STAMP), None).unwrap();
     let named = expect_foreign_intact("named");
     assert!(named.tags_list.contains(&"People/Ada".to_string()));
     assert_eq!(named.person_in_image, vec!["Zoe", "Ada"]);
 
-    f.engine.rename_person("Ada", "Grace", Some(STAMP)).unwrap();
+    f.engine
+        .rename_person("Ada", "Grace", Some(STAMP), None)
+        .unwrap();
     let renamed = expect_foreign_intact("renamed");
     assert!(renamed.tags_list.contains(&"People/Grace".to_string()));
     assert!(!renamed.tags_list.contains(&"People/Ada".to_string()));
 
-    f.engine.unname_cluster(id, Some(STAMP)).unwrap();
+    f.engine.unname_cluster(id, Some(STAMP), None).unwrap();
     let cleared = expect_foreign_intact("un-named");
     assert!(!cleared.tags_list.contains(&"People/Grace".to_string()));
     assert!(cleared.regions.is_empty());
@@ -460,7 +470,7 @@ fn both_copies_of_a_photo_get_their_own_sidecar() {
     assert_eq!(summary.cache_hits, 1, "the second copy must hit the cache");
 
     let id = f.biggest_cluster();
-    let plan = f.engine.name_cluster(id, "Ada", Some(STAMP)).unwrap();
+    let plan = f.engine.name_cluster(id, "Ada", Some(STAMP), None).unwrap();
     assert_eq!(plan.written.len(), 2, "{plan:?}");
 
     let a = f.sidecar("album-a/photo.png").unwrap();
@@ -480,7 +490,7 @@ fn two_independent_libraries_produce_byte_identical_sidecars() {
         f.enqueue(PHOTOS);
         f.run();
         let id = f.biggest_cluster();
-        f.engine.name_cluster(id, "Ada", Some(STAMP)).unwrap();
+        f.engine.name_cluster(id, "Ada", Some(STAMP), None).unwrap();
         let mut out: Vec<(String, Option<Vec<u8>>)> = PHOTOS
             .iter()
             .map(|n| ((*n).to_string(), f.sidecar(n)))
@@ -531,7 +541,7 @@ fn a_face_rejoining_a_named_cluster_is_written_out_without_being_asked() {
     let photos = f.photos_of(id);
     let target = photos.first().unwrap().clone();
 
-    f.engine.name_cluster(id, "Ada", Some(STAMP)).unwrap();
+    f.engine.name_cluster(id, "Ada", Some(STAMP), None).unwrap();
     // Wipe the sidecar and the membership: the next run must put both back.
     std::fs::remove_file(f.dir.path().join(format!("{target}.xmp"))).unwrap();
     detach(&f, &target);
@@ -554,7 +564,7 @@ fn the_auto_path_writes_nothing_when_the_library_has_not_moved() {
     f.enqueue(PHOTOS);
     f.run();
     let id = f.biggest_cluster();
-    f.engine.name_cluster(id, "Ada", Some(STAMP)).unwrap();
+    f.engine.name_cluster(id, "Ada", Some(STAMP), None).unwrap();
 
     let snapshot: Vec<Option<Vec<u8>>> = PHOTOS.iter().map(|n| f.sidecar(n)).collect();
     let summary = f.run();
@@ -575,7 +585,7 @@ fn a_face_below_the_quality_floor_stays_in_the_cache_and_off_the_disk() {
     let photos = f.photos_of(id);
     let target = photos.first().unwrap().clone();
 
-    f.engine.name_cluster(id, "Ada", Some(STAMP)).unwrap();
+    f.engine.name_cluster(id, "Ada", Some(STAMP), None).unwrap();
     std::fs::remove_file(f.dir.path().join(format!("{target}.xmp"))).unwrap();
     detach(&f, &target);
 
@@ -609,7 +619,7 @@ fn a_match_that_misses_the_auto_threshold_does_not_reach_the_disk() {
     let photos = f.photos_of(id);
     let target = photos.first().unwrap().clone();
 
-    f.engine.name_cluster(id, "Ada", Some(STAMP)).unwrap();
+    f.engine.name_cluster(id, "Ada", Some(STAMP), None).unwrap();
     std::fs::remove_file(f.dir.path().join(format!("{target}.xmp"))).unwrap();
     detach(&f, &target);
 
@@ -628,7 +638,7 @@ fn the_auto_pass_can_be_turned_off_entirely() {
     let photos = f.photos_of(id);
     let target = photos.first().unwrap().clone();
 
-    f.engine.name_cluster(id, "Ada", Some(STAMP)).unwrap();
+    f.engine.name_cluster(id, "Ada", Some(STAMP), None).unwrap();
     std::fs::remove_file(f.dir.path().join(format!("{target}.xmp"))).unwrap();
     detach(&f, &target);
 
@@ -663,4 +673,194 @@ fn a_face_joining_an_unlabeled_cluster_is_never_auto_tagged() {
     for name in PHOTOS {
         assert!(f.sidecar(name).is_none());
     }
+}
+
+// ---------------------------------------------------------------------------
+// The quality floor is a property of writing, not of the auto pass
+// ---------------------------------------------------------------------------
+
+/// A below-floor face used to reach disk whenever *any* face in the same photo
+/// triggered a write: the floor gated the auto-tag counter, not the content of
+/// the request. Now it gates the request, on every path.
+#[test]
+fn a_below_floor_face_is_left_out_of_a_user_naming_too() {
+    let f = Fixture::new();
+    f.enqueue(PHOTOS);
+    f.run();
+
+    // Name every cluster, so every face in the crowded fixture carries a name
+    // and the region count is exactly the face count.
+    let clusters = f.engine.clusters().unwrap();
+    for (i, c) in clusters.iter().enumerate() {
+        f.engine
+            .name_cluster(c.id, &format!("Person {i}"), Some(STAMP), None)
+            .unwrap();
+    }
+
+    let hash = gallery_ml::hash::hash_bytes(&fixture(BRIGHT));
+    let faces = f.engine.cache().faces_for_hash(&hash).unwrap();
+    assert!(faces.len() >= 2, "the fixture must be a group shot");
+    let before = read_view(&f.sidecar(BRIGHT).unwrap()).unwrap();
+    assert_eq!(before.regions.len(), faces.len(), "{before:?}");
+
+    // Exactly one of them drops below `min_quality` (0.25 by default).
+    let victim = i64::from(faces[0].face_idx);
+    f.raw()
+        .execute(
+            "UPDATE faces SET quality = 0.01 WHERE content_hash = ?1 AND face_idx = ?2",
+            rusqlite::params![hash.as_slice(), victim],
+        )
+        .unwrap();
+
+    // Any naming re-derives the whole photo, which is how the below-floor face
+    // used to get in.
+    let last = clusters.last().unwrap();
+    f.engine
+        .name_cluster(
+            last.id,
+            &format!("Person {}", clusters.len() - 1),
+            Some(STAMP),
+            None,
+        )
+        .unwrap();
+
+    let after = read_view(&f.sidecar(BRIGHT).unwrap()).unwrap();
+    assert_eq!(
+        after.regions.len(),
+        faces.len() - 1,
+        "the below-floor face still reached disk: {after:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A sync never retracts a name it simply cannot see
+// ---------------------------------------------------------------------------
+
+/// A re-detection that loses a face must not un-name the person it belonged to.
+///
+/// `put_faces` clears the photo's `cluster_members`, so the very next sync sees
+/// a photo with fewer named faces than the sidecar claims. Reading that as "the
+/// others are not here" deletes a human decision because a model changed its
+/// mind.
+#[test]
+fn a_sync_keeps_a_claim_the_cache_can_no_longer_explain() {
+    let f = Fixture::new();
+    f.enqueue(PHOTOS);
+    f.run();
+    let id = f.biggest_cluster();
+    let target = f.photos_of(id).first().unwrap().clone();
+    f.engine.name_cluster(id, "Ada", Some(STAMP), None).unwrap();
+
+    let before = f.sidecar(&target).unwrap();
+    assert_eq!(
+        read_view(&before).unwrap().people_tags(),
+        vec!["People/Ada"]
+    );
+
+    // The cache forgets who is in this photo.
+    detach(&f, &target);
+    let hash = gallery_ml::hash::hash_bytes(&fixture(&target));
+    let plan = f
+        .engine
+        .sync_sidecars(&[hash], Some(STAMP), &SyncScope::default())
+        .unwrap();
+    assert!(plan.failed.is_empty(), "{:?}", plan.failed);
+    assert!(
+        plan.written.is_empty(),
+        "a keep-everything sync rewrote a file"
+    );
+
+    let after = f.sidecar(&target).unwrap();
+    assert_eq!(after, before, "the sidecar changed");
+    let view = read_view(&after).unwrap();
+    assert_eq!(view.people_tags(), vec!["People/Ada"]);
+    assert!(!view.regions.is_empty(), "Ada's region was retracted");
+}
+
+/// The pack-swap case: `reset_face_results` empties the cluster table, so the
+/// first naming afterwards knows about exactly one person. The people the
+/// sidecars already carry are not that person's to retract.
+#[test]
+fn naming_after_a_pack_swap_preserves_the_names_already_on_disk() {
+    let f = Fixture::new();
+    f.enqueue(PHOTOS);
+    f.run();
+    let id = f.biggest_cluster();
+    let target = f.photos_of(id).first().unwrap().clone();
+    f.engine.name_cluster(id, "Ada", Some(STAMP), None).unwrap();
+
+    // A face-pack swap: every detection, cluster and membership goes.
+    f.engine.cache().reset_face_results().unwrap();
+    f.engine.reset_queue().unwrap();
+    f.enqueue(PHOTOS);
+    f.run();
+
+    let fresh = f.biggest_cluster();
+    assert!(
+        f.engine.cache().cluster(id).unwrap().is_none(),
+        "the old id must not have been handed out again"
+    );
+    f.engine
+        .name_cluster(fresh, "Zoe", Some(STAMP), None)
+        .unwrap();
+
+    let view = read_view(&f.sidecar(&target).unwrap()).unwrap();
+    assert!(
+        view.people_tags().contains(&"People/Ada"),
+        "the pre-swap name was retracted: {:?}",
+        view.people_tags()
+    );
+    assert!(view.people_tags().contains(&"People/Zoe"));
+}
+
+// ---------------------------------------------------------------------------
+// Root scoping
+// ---------------------------------------------------------------------------
+
+/// The cache DB outlives any one library root, so a naming can reach rows under
+/// a folder the app is no longer inside — outside its security scope, where the
+/// write fails and burns a retry. Those paths are skipped instead.
+#[test]
+fn naming_scoped_to_one_root_skips_the_other_roots_copies() {
+    let f = Fixture::with_copies(&[(BRIGHT, "root-a/photo.png"), (BRIGHT, "root-b/photo.png")]);
+    f.enqueue(&["root-a/photo.png", "root-b/photo.png"]);
+    f.run();
+
+    let root_a = f.dir.path().join("root-a").to_string_lossy().into_owned();
+    let id = f.biggest_cluster();
+    let plan = f
+        .engine
+        .name_cluster(id, "Ada", Some(STAMP), Some(&root_a))
+        .unwrap();
+
+    assert!(plan.failed.is_empty(), "{:?}", plan.failed);
+    assert_eq!(plan.written.len(), 1, "{plan:?}");
+    assert!(plan.written[0].contains("root-a"));
+    assert_eq!(plan.skipped.len(), 1, "{plan:?}");
+    assert!(plan.skipped[0].contains("root-b"));
+
+    assert!(f.sidecar("root-a/photo.png").is_some());
+    assert!(
+        f.sidecar("root-b/photo.png").is_none(),
+        "a sidecar was written outside the root in scope"
+    );
+}
+
+/// A trailing separator on the root must not change the answer, and a root that
+/// is a *string* prefix of a sibling directory must not swallow it.
+#[test]
+fn root_scoping_matches_directories_not_string_prefixes() {
+    let f = Fixture::with_copies(&[(BRIGHT, "photos/a.png"), (BRIGHT, "photos-old/a.png")]);
+    f.enqueue(&["photos/a.png", "photos-old/a.png"]);
+    f.run();
+
+    let root = f.dir.path().join("photos").to_string_lossy().into_owned();
+    let id = f.biggest_cluster();
+    let plan = f
+        .engine
+        .name_cluster(id, "Ada", Some(STAMP), Some(&format!("{root}/")))
+        .unwrap();
+    assert_eq!(plan.written.len(), 1, "{plan:?}");
+    assert!(plan.written[0].contains("/photos/"));
+    assert!(f.sidecar("photos-old/a.png").is_none());
 }

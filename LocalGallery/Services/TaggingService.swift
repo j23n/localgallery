@@ -135,8 +135,15 @@ final class TaggingService {
     /// Which pack `session` was opened against, so a pack change reopens it
     /// instead of quietly tagging under the old one.
     @ObservationIgnored private var sessionPackDirectory: URL?
-    /// Coalesces + drains the rescans a run's sidecar writes trigger.
-    @ObservationIgnored private let refresh = SidecarRefreshCoalescer(interval: refreshInterval)
+    /// The in-flight `openSession`, and the pack it is opening, so concurrent
+    /// callers share one. See `openSession` for what two of them cost, and
+    /// `FaceService` for why the slot is keyed by directory.
+    @ObservationIgnored private var opening: (directory: URL, task: Task<TaggingSession, any Error>)?
+    /// Coalesces + drains the rescans a run's sidecar writes trigger. Injected,
+    /// and **shared with `FaceService`**: the interval is a budget for
+    /// interrupting the user with a rescan, and two engines each spending it
+    /// separately is two rescans, which is what the window exists to prevent.
+    @ObservationIgnored private let refresh: SidecarRefreshCoalescer
     /// When a refresh last actually ran. Internal so `TaggingServiceTests`
     /// can assert that a *suppressed* batch does not move it.
     @ObservationIgnored var lastRefreshAt: Date? { refresh.lastRefreshAt }
@@ -146,9 +153,10 @@ final class TaggingService {
     @ObservationIgnored private var cancelRequested = false
     @ObservationIgnored private var verifiedPack: PackFingerprint?
 
-    init(cacheDatabaseURL: URL, modelPacksDirectory: URL) {
+    init(cacheDatabaseURL: URL, modelPacksDirectory: URL, refresh: SidecarRefreshCoalescer) {
         self.cacheDatabaseURL = cacheDatabaseURL
         self.modelPacksDirectory = modelPacksDirectory
+        self.refresh = refresh
     }
 
     // MARK: - Model pack
@@ -471,8 +479,18 @@ final class TaggingService {
 
     // MARK: - Off-actor plumbing
 
+    /// The open session for `packDirectory`, opening one if there is none.
+    ///
+    /// The open is memoized as a `Task` so concurrent callers await the *same*
+    /// one. Without that, two callers both saw `session == nil`, both built a
+    /// session, and the second overwrote `self.session` — leaving the first
+    /// holding the run that `cancel()` could no longer reach, plus a second
+    /// ONNX load and a second connection to one SQLite file.
     private func openSession(packDirectory: URL) async throws -> TaggingSession {
         if let session, sessionPackDirectory == packDirectory { return session }
+        if let opening, opening.directory == packDirectory {
+            return try await opening.task.value
+        }
         // A different pack than the open session's: that session holds the old
         // pack's ONNX weights and stamps its version into every sidecar, so
         // reusing it would tag under a pack the user has replaced.
@@ -483,17 +501,22 @@ final class TaggingService {
             at: cacheURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        let opened = try await Task.detached(priority: .userInitiated) {
-            () -> Result<TaggingSession, TaggingServiceError> in
-            do {
-                return .success(try TaggingSession(
-                    cacheDbPath: cacheURL.path,
-                    modelPackDir: packDirectory.path
-                ))
-            } catch {
-                return .failure(TaggingServiceError(error))
-            }
-        }.value.get()
+        let task = Task { @MainActor () -> TaggingSession in
+            try await Task.detached(priority: .userInitiated) {
+                () -> Result<TaggingSession, TaggingServiceError> in
+                do {
+                    return .success(try TaggingSession(
+                        cacheDbPath: cacheURL.path,
+                        modelPackDir: packDirectory.path
+                    ))
+                } catch {
+                    return .failure(TaggingServiceError(error))
+                }
+            }.value.get()
+        }
+        opening = (packDirectory, task)
+        defer { if opening?.task == task { opening = nil } }
+        let opened = try await task.value
         session = opened
         sessionPackDirectory = packDirectory
         return opened

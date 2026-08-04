@@ -6,8 +6,19 @@ import SwiftUI
 /// Naming writes `People/<Name>` keywords and MWG regions into the `.xmp`
 /// sidecar of every photo the cluster reaches, so both actions are irreversible
 /// from the user's point of view even though the core can retract them — and
-/// both are refused by the core while a face scan is running, which is why the
-/// buttons disable on `faces.isRunning` rather than queueing.
+/// both are refused while *either* core engine is running, which is why the
+/// buttons disable on `faces.isCoreBusy` rather than queueing.
+///
+/// ## Naming somebody who already has a group
+///
+/// `name_cluster` names **this** group; it does not merge it into another one,
+/// and the core has no merge operation yet. Two groups can carry one name, and
+/// that is a supported state — a person photographed across ten years really
+/// does cluster into more than one group, and naming both is how they end up as
+/// one person in the library. What it is *not* is a merge, so this screen says
+/// which of the two it is rather than letting the user infer the wrong one:
+/// the photos join that person everywhere the app shows people, and the groups
+/// stay separate here. `existingGroupNote` is that sentence.
 struct ClusterReviewView: View {
     let clusterID: Int64
 
@@ -34,6 +45,12 @@ struct ClusterReviewView: View {
     /// anyway, and `people.peopleTags` is the existing tag aggregation. No new
     /// permission is asked for; with Contacts denied this quietly falls back to
     /// the library's own names.
+    ///
+    /// Names already carried by another *group* are deliberately **not**
+    /// filtered out. They are the most likely right answer — the same person,
+    /// clustered twice — and hiding them would make the common case harder to
+    /// type. What they are not is a merge, so `existingGroupNote` says so as
+    /// soon as one is chosen.
     private var suggestions: [String] {
         let typed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let pool = store.contacts.map(\.fullName) + store.people.peopleTags.map(\.displayName)
@@ -54,7 +71,20 @@ struct ClusterReviewView: View {
     }
 
     private var canSave: Bool {
-        !trimmedName.isEmpty && !isSaving && !store.faces.isRunning
+        !trimmedName.isEmpty && !isSaving && !store.faces.isCoreBusy
+    }
+
+    /// What the typed name will actually do, when another group already has it.
+    ///
+    /// Not shown for this cluster's own current name — re-saving that is a
+    /// no-op, not a second group.
+    private var existingGroupNote: String? {
+        guard !trimmedName.isEmpty, trimmedName != cluster?.name else { return nil }
+        let match = store.faces.namedClusters.first {
+            $0.id != clusterID && $0.name?.localizedCaseInsensitiveCompare(trimmedName) == .orderedSame
+        }
+        guard let name = match?.name else { return nil }
+        return "Another group is already named “\(name)”. These photos join \(name) everywhere the app shows people — the two groups stay separate here, because merging groups isn’t supported yet."
     }
 
     var body: some View {
@@ -84,6 +114,12 @@ struct ClusterReviewView: View {
                     .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 0))
                 }
 
+                if let note = existingGroupNote {
+                    Text(note)
+                        .font(.footnote)
+                        .foregroundStyle(Design.ink2)
+                }
+
                 Button {
                     save()
                 } label: {
@@ -99,12 +135,12 @@ struct ClusterReviewView: View {
                 } label: {
                     Label("Not a Person", systemImage: "xmark.circle")
                 }
-                .disabled(isSaving || store.faces.isRunning)
+                .disabled(isSaving || store.faces.isCoreBusy)
             } header: {
                 Text("Who is this?")
             } footer: {
-                if store.faces.isRunning {
-                    Text("A face scan is running — naming is paused until it finishes.")
+                if store.faces.isCoreBusy {
+                    Text("A scan is running — naming is paused until it finishes.")
                 } else {
                     Text("Saving writes “People/\(trimmedName.isEmpty ? "Name" : trimmedName)” and a face region into each photo’s `.xmp` sidecar. The photos themselves are never modified.")
                 }

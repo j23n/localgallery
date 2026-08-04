@@ -487,7 +487,17 @@ impl FaceEngine {
         // the assignment does: the faces are in the database either way, and
         // the sidecar is the only place a match becomes visible to the app.
         if !opts.skip_auto_tagging && !assignment.auto_hashes.is_empty() {
-            let plan = self.sync_sidecars(&assignment.auto_hashes, opts.tagged_at.as_deref())?;
+            // The run's own root scope carries into the writes it triggers:
+            // the queue can hold rows from a root the app has left, and an
+            // auto-tag must not reach outside the folder the run stayed inside.
+            // Nothing is retracted — this pass names people, it does not know
+            // that anybody has stopped being in a photo.
+            let scope = super::naming::SyncScope {
+                root_prefix: root_prefix.clone(),
+                retracting: Vec::new(),
+            };
+            let plan =
+                self.sync_sidecars(&assignment.auto_hashes, opts.tagged_at.as_deref(), &scope)?;
             summary.sidecars_written = plan.written.len();
             summary.sidecars_failed = plan.failed.len();
             if !plan.written.is_empty() {
@@ -986,7 +996,12 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 /// A library root as a path *prefix*: exactly one trailing separator.
-fn normalize_root_prefix(root: &str) -> String {
+///
+/// `pub(crate)` because [`super::naming`] confines a sidecar sync with the same
+/// rule the run uses to confine its queue — two spellings of "under this root"
+/// would be a very quiet way for a naming to reach outside the security scope
+/// a run stayed inside.
+pub(crate) fn normalize_root_prefix(root: &str) -> String {
     let trimmed = root.trim_end_matches('/');
     format!("{trimmed}/")
 }

@@ -72,5 +72,5 @@ pub use detect::{Detection, FaceDetector};
 pub use engine::{
     FaceEngine, FaceProgress, FaceRunOptions, FaceRunSummary, NoFaceProgress, ReclusterSummary,
 };
-pub use naming::{FailedWrite, SidecarWritePlan, SIDECAR_RETRIES};
+pub use naming::{FailedWrite, SidecarWritePlan, SyncScope, SIDECAR_RETRIES};
 pub use quality::quality;

@@ -64,12 +64,49 @@ use crate::tags::{leaf_of, nfc, nfc_lower, normalize_person, person_tag, to_lr_p
 use crate::write::WriteOutcome;
 use crate::xml::{parse, serialize, Document};
 
+/// How much of its own past work a [`FaceWriteRequest`] is speaking for.
+///
+/// A replace set is only safe when the caller can still *see* everything it
+/// once wrote. The face pipeline cannot always: the cluster table is derived
+/// data (a face-pack swap throws it away, a re-detection can lose a face), and
+/// a request derived from it would then be a complete-looking statement that
+/// silently omits people the file legitimately still carries. Retracting them
+/// would delete a human decision because a model changed its mind.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Authority {
+    /// The request is the whole truth about this photo: every `People/*`
+    /// keyword and every region this crate previously claimed here and the
+    /// request does not name is retracted.
+    #[default]
+    Complete,
+    /// The request speaks only for the people it names, plus the ones it says
+    /// it is `retracting`. A claim of ours naming anybody else is left exactly
+    /// as it is — keyword, region, and sentinel entry — so it can still be
+    /// retracted later by a caller that *does* know about them.
+    ///
+    /// This leaks a name rather than deleting one, which is the direction this
+    /// crate always errs in (see [`crate::regions`]). The cost is that a person
+    /// who really has left a photo stays named until something explicitly
+    /// un-names them; the alternative cost is a re-detection wiping a name the
+    /// user typed.
+    Partial {
+        /// Names being deliberately taken back. Un-naming a cluster and
+        /// renaming a person both name their *old* value here — that is the
+        /// only thing that distinguishes "I no longer see Ada" (keep) from
+        /// "Ada is not in this photo" (retract).
+        retracting: Vec<String>,
+    },
+}
+
 /// Everything the face agent wants a photo's sidecar to say.
 ///
 /// This is a **replace** set for one photo, not an append set: whatever the
 /// agent claimed here before and does not name now is retracted. Un-naming a
 /// cluster and renaming a person are both expressed by handing over the new
 /// complete set for each affected file.
+///
+/// [`Authority::Partial`] narrows that: see there for when a caller may not
+/// claim to be complete.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FaceWriteRequest {
     /// The face regions to write. Their names supply the `People/*` keywords.
@@ -90,6 +127,8 @@ pub struct FaceWriteRequest {
     /// ISO 8601 UTC timestamp, caller-supplied so the crate stays pure and the
     /// bytes stay reproducible.
     pub tagged_at: String,
+    /// Which of this crate's own claims the request is entitled to retract.
+    pub authority: Authority,
 }
 
 impl FaceWriteRequest {
@@ -106,7 +145,17 @@ impl FaceWriteRequest {
             agent: CORE_AGENT.to_string(),
             face_pack: face_pack.into(),
             tagged_at: tagged_at.into(),
+            authority: Authority::Complete,
         }
+    }
+
+    /// Speak only for the people named here plus `retracting` — see
+    /// [`Authority::Partial`].
+    pub fn speaking_partially(mut self, retracting: impl IntoIterator<Item = String>) -> Self {
+        self.authority = Authority::Partial {
+            retracting: retracting.into_iter().collect(),
+        };
+        self
     }
 
     /// Record the decoded image's pixel size, for `AppliedToDimensions`.
@@ -252,6 +301,9 @@ struct NormalizedRequest {
     regions: Vec<FaceRegionWrite>,
     /// Every person named, sorted and deduplicated.
     people: Vec<String>,
+    /// Names the request may retract *besides* the ones it holds, and whether
+    /// that list is the only limit. `None` = [`Authority::Complete`].
+    retracting: Option<BTreeSet<String>>,
 }
 
 impl NormalizedRequest {
@@ -278,7 +330,36 @@ impl NormalizedRequest {
         regions.dedup_by(|a, b| a.name == b.name && a.area == b.area);
         people.sort();
         people.dedup();
-        Ok(NormalizedRequest { regions, people })
+
+        let retracting = match &request.authority {
+            Authority::Complete => None,
+            Authority::Partial { retracting } => Some(
+                retracting
+                    .iter()
+                    .map(|n| normalize_person(n))
+                    .collect::<MetaResult<BTreeSet<String>>>()?,
+            ),
+        };
+        Ok(NormalizedRequest {
+            regions,
+            people,
+            retracting,
+        })
+    }
+
+    /// Whether this request is entitled to retract a claim of ours naming
+    /// `name`.
+    ///
+    /// Always, under [`Authority::Complete`]. Under `Partial`, only for a
+    /// person the request itself names — it is stating where they are, so a
+    /// stale box or keyword of theirs is its to correct — or one it explicitly
+    /// says it is taking back.
+    fn speaks_for(&self, name: &str) -> bool {
+        let Some(retracting) = &self.retracting else {
+            return true;
+        };
+        let name = nfc(name);
+        retracting.contains(&name) || self.people.contains(&name)
     }
 }
 
@@ -364,10 +445,11 @@ fn plan_people(view: &SidecarView, req: &NormalizedRequest) -> ListPlan {
     let prev: Vec<String> = view.core.people.iter().map(|t| nfc(t)).collect();
     let existing: BTreeSet<String> = view.tags_list.iter().map(|t| nfc(t)).collect();
 
-    // Retract only what we claimed and no longer want.
+    // Retract only what we claimed, no longer want, *and* are entitled to speak
+    // for — see `Authority`.
     let mut to_remove: Vec<String> = prev
         .iter()
-        .filter(|t| !requested_set.contains(*t))
+        .filter(|t| !requested_set.contains(*t) && req.speaks_for(leaf_of(t)))
         .cloned()
         .collect();
     to_remove.sort();
@@ -380,13 +462,19 @@ fn plan_people(view: &SidecarView, req: &NormalizedRequest) -> ListPlan {
         .cloned()
         .collect();
 
-    let prev_set: BTreeSet<&String> = prev.iter().collect();
-    let added_set: BTreeSet<&String> = to_add.iter().collect();
-    let owned: Vec<String> = requested
+    // Everything we still claim: what we claimed before and did not retract,
+    // plus what this call added. A claim we are keeping only because we cannot
+    // see its person any more has to stay in the sentinel — dropping it would
+    // orphan the keyword, and nothing could ever take it back.
+    let doomed: BTreeSet<&String> = to_remove.iter().collect();
+    let mut owned: Vec<String> = prev
         .iter()
-        .filter(|t| prev_set.contains(&nfc(t)) || added_set.contains(t))
+        .filter(|t| !doomed.contains(*t))
         .cloned()
+        .chain(to_add.iter().map(|t| nfc(t)))
         .collect();
+    owned.sort();
+    owned.dedup();
 
     ListPlan {
         to_add,
@@ -564,40 +652,54 @@ struct ExistingRegion {
     area: Area,
     /// Whether it is already exactly what we would write for `name`.
     matches_write: Box<dyn Fn(&FaceRegionWrite) -> bool>,
-    owned: bool,
+    /// Index into the parsed claim list of the claim that owns this region, if
+    /// any — see [`regions::bind_claims`] for why it is one to one.
+    claim: Option<usize>,
 }
 
 /// The region merge. Returns `(to add, to remove, deferred, claims)`.
 ///
-/// See [`crate::regions`] for the policy; this is the bookkeeping. The one
-/// non-obvious rule is that an *owned* region whose name or box has moved is
-/// removed and re-appended rather than edited in place: an `rdf:li` can carry
-/// its fields as elements, as attributes, or inside a nested `rdf:Description`,
-/// and rewriting all three shapes correctly buys nothing — the element is ours,
-/// so replacing it wholesale loses nothing and always produces the same bytes.
+/// See [`crate::regions`] for the policy; this is the bookkeeping. Two
+/// non-obvious rules:
+///
+/// * an *owned* region whose name or box has moved is removed and re-appended
+///   rather than edited in place: an `rdf:li` can carry its fields as elements,
+///   as attributes, or inside a nested `rdf:Description`, and rewriting all
+///   three shapes correctly buys nothing — the element is ours, so replacing it
+///   wholesale loses nothing and always produces the same bytes;
+/// * our own box for a face is looked for **before** a foreign one. A file can
+///   hold both (two tools boxed the same person), and finding the foreign box
+///   first would have us defer to it and retract our own on a re-run, which
+///   moves the region — and its name — every other pass.
 #[allow(clippy::type_complexity)]
 fn plan_regions(
     view: &SidecarView,
     req: &NormalizedRequest,
 ) -> (Vec<FaceRegionWrite>, Vec<Area>, usize, Vec<String>) {
-    let claims: Vec<RegionClaim> = view
-        .core
-        .regions
-        .iter()
-        .filter_map(|c| regions::parse_claim(c))
-        .collect();
+    // Text and parse kept side by side: the sentinel entry we may have to write
+    // back unchanged is the *original* string, not a re-rendering of it.
+    let mut claim_text: Vec<String> = Vec::new();
+    let mut claims: Vec<RegionClaim> = Vec::new();
+    for entry in &view.core.regions {
+        if let Some(parsed) = regions::parse_claim(entry) {
+            claim_text.push(entry.clone());
+            claims.push(parsed);
+        }
+    }
+    let owners = regions::bind_claims(&claims, &view.regions);
 
     let existing: Vec<ExistingRegion> = view
         .regions
         .iter()
-        .map(|r| {
+        .zip(owners)
+        .map(|(r, claim)| {
             let area = Area::of(r);
             let coords = area.to_claim_coords();
             let name = r.name.as_deref().map(nfc);
             let is_face = r.kind.as_deref() == Some(REGION_TYPE_FACE);
             ExistingRegion {
                 area,
-                owned: regions::is_claimed(&claims, r),
+                claim,
                 matches_write: Box::new(move |w: &FaceRegionWrite| {
                     is_face
                         && coords == w.area.to_claim_coords()
@@ -614,43 +716,72 @@ fn plan_regions(
     let mut deferred = 0usize;
 
     for wanted in &req.regions {
-        // Somebody else already boxed this face: theirs stands, and we add no
-        // duplicate. We do not claim it either — it was never ours to retract.
-        if existing
-            .iter()
-            .any(|e| !e.owned && e.area.matches(&wanted.area))
-        {
-            deferred += 1;
-            continue;
-        }
-        owned_claims.push(wanted.claim());
+        // Our own box for this face, if we still have one. Best overlap wins,
+        // and each of our regions answers for one wanted region only.
         let slot = existing
             .iter()
             .enumerate()
-            .find(|(i, e)| e.owned && !paired.contains(i) && e.area.matches(&wanted.area))
+            .filter(|(i, e)| {
+                e.claim.is_some() && !paired.contains(i) && e.area.matches(&wanted.area)
+            })
+            .max_by(|(ia, a), (ib, b)| {
+                a.area
+                    .iou(&wanted.area)
+                    .partial_cmp(&b.area.iou(&wanted.area))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    // Lower index wins a tie, so document order decides.
+                    .then_with(|| ib.cmp(ia))
+            })
             .map(|(i, _)| i);
         match slot {
             Some(i) => {
                 paired.insert(i);
+                owned_claims.push(wanted.claim());
                 if (existing[i].matches_write)(wanted) {
                     keep.insert(i);
                 } else {
                     to_add.push(wanted.clone());
                 }
             }
-            None => to_add.push(wanted.clone()),
+            // Somebody else already boxed this face: theirs stands, and we add
+            // no duplicate. We do not claim it either — it was never ours to
+            // retract.
+            None if existing
+                .iter()
+                .any(|e| e.claim.is_none() && e.area.matches(&wanted.area)) =>
+            {
+                deferred += 1;
+            }
+            None => {
+                owned_claims.push(wanted.claim());
+                to_add.push(wanted.clone());
+            }
         }
     }
 
-    // Every region of ours the request did not keep is retracted. Removal is by
-    // area, so a kept region sharing an area with a doomed one would be swept
-    // up with it: re-append it rather than lose it.
+    // A region of ours goes when a wanted region has superseded it, or when the
+    // request is entitled to speak for the person its claim names. A claim for
+    // somebody the request cannot see is neither rewritten nor retracted — see
+    // `Authority`. Removal is by area, so a kept region sharing an area with a
+    // doomed one would be swept up with it: re-append it rather than lose it.
     let doomed: Vec<Area> = existing
         .iter()
         .enumerate()
-        .filter(|(i, e)| e.owned && !keep.contains(i))
+        .filter(|(i, e)| e.claim.is_some() && !keep.contains(i))
+        .filter(|(i, e)| {
+            paired.contains(i) || req.speaks_for(&claims[e.claim.expect("filtered above")].name)
+        })
         .map(|(_, e)| e.area)
         .collect();
+
+    // Claims we are leaving standing keep their sentinel entry, verbatim.
+    for (i, e) in existing.iter().enumerate() {
+        let Some(ci) = e.claim else { continue };
+        if paired.contains(&i) || doomed.contains(&e.area) {
+            continue;
+        }
+        owned_claims.push(claim_text[ci].clone());
+    }
     for i in keep.iter().copied() {
         if doomed.iter().any(|d| *d == existing[i].area) {
             if let Some(w) = req.regions.iter().find(|w| (existing[i].matches_write)(w)) {
@@ -1046,6 +1177,206 @@ mod tests {
         )
         .unwrap();
         assert!(!face_again.changed);
+    }
+
+    /// Our region for Alice **and** digiKam's own region for the same face,
+    /// overlapping at ~0.9 IoU, with our `CoreRegions` claim naming exactly one
+    /// of them.
+    const TWO_BOXES_ONE_FACE: &str = "<?xpacket begin='' id='W5M0Mp'?>\n\
+<x:xmpmeta xmlns:x='adobe:ns:meta/'>\n\
+<rdf:RDF xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'>\n\
+ <rdf:Description rdf:about=''\n\
+  xmlns:digiKam='http://www.digikam.org/ns/1.0/'\n\
+  xmlns:dc='http://purl.org/dc/elements/1.1/'\n\
+  xmlns:lr='http://ns.adobe.com/lightroom/1.0/'\n\
+  xmlns:Iptc4xmpExt='http://iptc.org/std/Iptc4xmpExt/2008-02-29/'\n\
+  xmlns:phototools='https://github.com/j23n/photo-tools/ns/1.0/'\n\
+  xmlns:mwg-rs='http://www.metadataworkinggroup.com/schemas/regions/'\n\
+  xmlns:stArea='http://ns.adobe.com/xmp/sType/Area#'>\n\
+  <digiKam:TagsList><rdf:Seq><rdf:li>People/Alice</rdf:li></rdf:Seq></digiKam:TagsList>\n\
+  <dc:subject><rdf:Bag><rdf:li>Alice</rdf:li></rdf:Bag></dc:subject>\n\
+  <lr:hierarchicalSubject><rdf:Bag><rdf:li>People|Alice</rdf:li></rdf:Bag></lr:hierarchicalSubject>\n\
+  <Iptc4xmpExt:PersonInImage><rdf:Bag><rdf:li>Alice</rdf:li></rdf:Bag></Iptc4xmpExt:PersonInImage>\n\
+  <phototools:CoreAgent>localgallery-core</phototools:CoreAgent>\n\
+  <phototools:CoreFacePack>buffalo_sc-2026.1</phototools:CoreFacePack>\n\
+  <phototools:CoreTaggedAt>2026-08-03T10:00:00Z</phototools:CoreTaggedAt>\n\
+  <phototools:CorePeople><rdf:Bag><rdf:li>People/Alice</rdf:li></rdf:Bag></phototools:CorePeople>\n\
+  <phototools:CorePeopleSubjects><rdf:Bag><rdf:li>Alice</rdf:li></rdf:Bag></phototools:CorePeopleSubjects>\n\
+  <phototools:CorePeopleHierarchical><rdf:Bag><rdf:li>People|Alice</rdf:li></rdf:Bag></phototools:CorePeopleHierarchical>\n\
+  <phototools:CoreRegions><rdf:Bag>\n\
+   <rdf:li>0.400000,0.350000,0.120000,0.160000 Alice</rdf:li>\n\
+  </rdf:Bag></phototools:CoreRegions>\n\
+  <mwg-rs:Regions rdf:parseType='Resource'>\n\
+   <mwg-rs:RegionList><rdf:Bag>\n\
+    <rdf:li rdf:parseType='Resource'>\n\
+     <mwg-rs:Name>Alice</mwg-rs:Name>\n\
+     <mwg-rs:Type>Face</mwg-rs:Type>\n\
+     <mwg-rs:Area rdf:parseType='Resource'>\n\
+      <stArea:x>0.400000</stArea:x><stArea:y>0.350000</stArea:y>\n\
+      <stArea:w>0.120000</stArea:w><stArea:h>0.160000</stArea:h>\n\
+      <stArea:unit>normalized</stArea:unit>\n\
+     </mwg-rs:Area>\n\
+    </rdf:li>\n\
+    <rdf:li rdf:parseType='Resource'>\n\
+     <mwg-rs:Name>Alice</mwg-rs:Name>\n\
+     <mwg-rs:Type>Face</mwg-rs:Type>\n\
+     <mwg-rs:Area rdf:parseType='Resource'>\n\
+      <stArea:x>0.405000</stArea:x><stArea:y>0.352000</stArea:y>\n\
+      <stArea:w>0.125000</stArea:w><stArea:h>0.163000</stArea:h>\n\
+      <stArea:unit>normalized</stArea:unit>\n\
+     </mwg-rs:Area>\n\
+    </rdf:li>\n\
+   </rdf:Bag></mwg-rs:RegionList>\n\
+  </mwg-rs:Regions>\n\
+ </rdf:Description>\n\
+</rdf:RDF>\n\
+</x:xmpmeta>\n\
+<?xpacket end='w'?>\n";
+
+    /// A foreign region overlapping ours is not ours, however well it matches.
+    ///
+    /// One claim, two boxes: the "does any claim cover this region" test called
+    /// both of them ours, so a no-op re-run deleted digiKam's, and so did
+    /// un-naming. Schema §1.7: never remove a region we did not add.
+    #[test]
+    fn a_second_tools_box_over_our_own_face_survives_a_no_op_re_run() {
+        let before = read_view(TWO_BOXES_ONE_FACE.as_bytes()).unwrap();
+        assert_eq!(before.regions.len(), 2, "the fixture must have both boxes");
+        let overlap = Area::of(&before.regions[0]).iou(&Area::of(&before.regions[1]));
+        assert!(
+            overlap > crate::regions::REGION_MATCH_IOU,
+            "IoU {overlap} tests nothing"
+        );
+
+        let out = apply_faces(
+            Some(TWO_BOXES_ONE_FACE.as_bytes()),
+            &request(vec![region("Alice", 0.4, 0.35, 0.12, 0.16)]),
+        )
+        .unwrap();
+        assert!(!out.changed, "{}", String::from_utf8_lossy(&out.bytes));
+        let after = read_view(&out.bytes).unwrap();
+        assert_eq!(after.regions.len(), 2, "digiKam's box was deleted");
+        assert_eq!(after.core.regions.len(), 1, "we still claim exactly one");
+    }
+
+    /// And un-naming takes back only the one box we authored.
+    #[test]
+    fn un_naming_retracts_our_box_and_leaves_the_other_tools_standing() {
+        let cleared = apply_faces(Some(TWO_BOXES_ONE_FACE.as_bytes()), &request(Vec::new()))
+            .unwrap()
+            .bytes;
+        let after = read_view(&cleared).unwrap();
+        assert_eq!(after.regions.len(), 1, "the foreign box went with ours");
+        let area = Area::of(&after.regions[0]);
+        assert!(
+            (area.x - 0.405).abs() < 1e-9,
+            "the wrong box survived: {area:?}"
+        );
+        assert!(after.core.regions.is_empty());
+        assert!(after.tags_list.is_empty(), "our keyword was ours to remove");
+    }
+
+    // --- Authority ------------------------------------------------------
+
+    /// A request that admits it cannot see everybody leaves the rest alone.
+    ///
+    /// The re-detection case: a photo carries Ada and Bob, the next pass finds
+    /// only Ada's face, and the write it triggers must not un-name Bob.
+    #[test]
+    fn a_partial_request_keeps_a_claim_it_cannot_account_for() {
+        let both = apply_faces(
+            None,
+            &request(vec![
+                region("Ada", 0.3, 0.3, 0.1, 0.12),
+                region("Bob", 0.7, 0.3, 0.1, 0.12),
+            ]),
+        )
+        .unwrap()
+        .bytes;
+
+        let only_ada = apply_faces(
+            Some(&both),
+            &request(vec![region("Ada", 0.3, 0.3, 0.1, 0.12)]).speaking_partially([]),
+        )
+        .unwrap();
+        let view = read_view(&only_ada.bytes).unwrap();
+        assert_eq!(view.tags_list, vec!["People/Ada", "People/Bob"]);
+        assert_eq!(view.regions.len(), 2, "Bob's region was retracted");
+        assert_eq!(view.person_in_image, vec!["Ada", "Bob"]);
+        assert_eq!(view.core.people, vec!["People/Ada", "People/Bob"]);
+        assert_eq!(view.core.regions.len(), 2, "Bob's claim was dropped");
+        assert!(!only_ada.changed, "keeping everything should write nothing");
+    }
+
+    /// A pack swap empties the cluster table, so the first naming afterwards
+    /// knows about exactly one person. It must not retract the others.
+    #[test]
+    fn a_partial_request_for_a_new_person_preserves_the_old_ones() {
+        let old = apply_faces(
+            None,
+            &request(vec![
+                region("Ada", 0.3, 0.3, 0.1, 0.12),
+                region("Bob", 0.7, 0.3, 0.1, 0.12),
+            ]),
+        )
+        .unwrap()
+        .bytes;
+        let out = apply_faces(
+            Some(&old),
+            &request(vec![region("Zoe", 0.5, 0.7, 0.1, 0.12)]).speaking_partially([]),
+        )
+        .unwrap();
+        let view = read_view(&out.bytes).unwrap();
+        assert_eq!(
+            view.tags_list,
+            vec!["People/Ada", "People/Bob", "People/Zoe"]
+        );
+        assert_eq!(view.regions.len(), 3);
+        assert_eq!(view.core.regions.len(), 3);
+    }
+
+    /// Un-naming still works: the name being taken back is stated explicitly,
+    /// which is what separates "I cannot see Ada" from "Ada is not here".
+    #[test]
+    fn a_partial_request_still_retracts_what_it_names_as_retracted() {
+        let both = apply_faces(
+            None,
+            &request(vec![
+                region("Ada", 0.3, 0.3, 0.1, 0.12),
+                region("Bob", 0.7, 0.3, 0.1, 0.12),
+            ]),
+        )
+        .unwrap()
+        .bytes;
+        let out = apply_faces(
+            Some(&both),
+            &request(vec![region("Bob", 0.7, 0.3, 0.1, 0.12)])
+                .speaking_partially(["Ada".to_string()]),
+        )
+        .unwrap();
+        let view = read_view(&out.bytes).unwrap();
+        assert_eq!(view.tags_list, vec!["People/Bob"]);
+        assert_eq!(view.subject, vec!["Bob"]);
+        assert_eq!(view.person_in_image, vec!["Bob"]);
+        assert_eq!(view.regions.len(), 1);
+        assert_eq!(view.core.people, vec!["People/Bob"]);
+    }
+
+    /// A person the request *does* name is still fully spoken for: their box
+    /// moving is a correction, not an addition.
+    #[test]
+    fn a_partial_request_still_moves_a_box_for_somebody_it_names() {
+        let first = apply_faces(None, &request(vec![region("Ada", 0.3, 0.3, 0.1, 0.12)]))
+            .unwrap()
+            .bytes;
+        let moved = apply_faces(
+            Some(&first),
+            &request(vec![region("Ada", 0.62, 0.3, 0.1, 0.12)]).speaking_partially([]),
+        )
+        .unwrap();
+        let view = read_view(&moved.bytes).unwrap();
+        assert_eq!(view.regions.len(), 1, "the old box was left behind");
+        assert!((Area::of(&view.regions[0]).x - 0.62).abs() < 1e-9);
     }
 
     #[test]

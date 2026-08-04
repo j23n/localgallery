@@ -17,6 +17,20 @@
 //! Name/Ignore buttons for the duration, which it has to do anyway because a
 //! run can re-partition the very clusters those buttons refer to.
 //!
+//! What they *do* take is the gate `start` takes ([`RunLock::try_mutate`]),
+//! held for the whole call. Reading `is_running()` and then working would be
+//! check-then-act, and a `start` landing in the gap is precisely the race the
+//! refusal exists to prevent.
+//!
+//! # Naming is root-scoped
+//!
+//! The cache DB outlives any one library root, so a hash can carry queue rows
+//! under a folder the app has since switched away from — outside its
+//! security scope. A run takes its `root_prefix` from `start`; naming has no
+//! run to inherit one from (a user can name a cluster with nothing scanning),
+//! so every mutator takes its own. Paths outside land in
+//! `SidecarWriteReport::skipped`.
+//!
 //! # Exemplars
 //!
 //! A cluster card shows a few face crops, and the pixels for them do *not*
@@ -760,7 +774,7 @@ impl FaceSession {
     /// queue under a live run would have workers finishing rows that no longer
     /// exist.
     pub fn reset_queue(&self) -> Result<(), FaceError> {
-        self.refuse_while_running()?;
+        let _guard = self.mutating()?;
         self.engine.reset_queue()?;
         Ok(())
     }
@@ -795,6 +809,13 @@ impl FaceSession {
     /// in a personal library is thousands of small records — cheaper to hand
     /// over once than to page across the boundary.
     pub fn cluster_faces(&self, cluster_id: i64) -> Result<Vec<FaceRef>, FaceError> {
+        // Existence first. A re-cluster pass rebuilds the unlabeled partition,
+        // so a screen holding an id from before it is holding a dead one — and
+        // "no faces" is indistinguishable from "an empty cluster", which sends
+        // the UI to a blank detail screen instead of back to the list.
+        if self.engine.cache().cluster(cluster_id)?.is_none() {
+            return Err(FaceError::ClusterNotFound { id: cluster_id });
+        }
         Ok(self
             .engine
             .cache()
@@ -811,37 +832,53 @@ impl FaceSession {
     /// name or one containing `/` is [`FaceError::InvalidName`]. Casing is left
     /// exactly as typed.
     ///
-    /// Refused while a run is in flight — see the module docs.
+    /// `root_prefix` confines the writes to the library root currently in
+    /// scope; paths outside it are skipped. Refused while a run is in flight —
+    /// see the module docs.
     pub fn name_cluster(
         &self,
         cluster_id: i64,
         name: String,
+        root_prefix: Option<String>,
     ) -> Result<SidecarWriteReport, FaceError> {
-        self.refuse_while_running()?;
+        let _guard = self.mutating()?;
         Ok(self
             .engine
-            .name_cluster(cluster_id, &name, Some(&iso8601_utc_now()))?
+            .name_cluster(
+                cluster_id,
+                &name,
+                Some(&iso8601_utc_now()),
+                root_prefix.as_deref(),
+            )?
             .into())
     }
 
     /// Take a cluster's name off and retract it from every affected sidecar.
     /// The cluster goes back to unlabeled, so the review queue shows it again.
-    pub fn unname_cluster(&self, cluster_id: i64) -> Result<SidecarWriteReport, FaceError> {
-        self.refuse_while_running()?;
+    pub fn unname_cluster(
+        &self,
+        cluster_id: i64,
+        root_prefix: Option<String>,
+    ) -> Result<SidecarWriteReport, FaceError> {
+        let _guard = self.mutating()?;
         Ok(self
             .engine
-            .unname_cluster(cluster_id, Some(&iso8601_utc_now()))?
+            .unname_cluster(cluster_id, Some(&iso8601_utc_now()), root_prefix.as_deref())?
             .into())
     }
 
     /// Dismiss a cluster ("not a person") and retract anything it had written.
     /// Kept rather than deleted, so its faces do not come back as a fresh
     /// cluster on the next pass.
-    pub fn ignore_cluster(&self, cluster_id: i64) -> Result<SidecarWriteReport, FaceError> {
-        self.refuse_while_running()?;
+    pub fn ignore_cluster(
+        &self,
+        cluster_id: i64,
+        root_prefix: Option<String>,
+    ) -> Result<SidecarWriteReport, FaceError> {
+        let _guard = self.mutating()?;
         Ok(self
             .engine
-            .ignore_cluster(cluster_id, Some(&iso8601_utc_now()))?
+            .ignore_cluster(cluster_id, Some(&iso8601_utc_now()), root_prefix.as_deref())?
             .into())
     }
 
@@ -850,11 +887,16 @@ impl FaceSession {
     ///
     /// More than one cluster can carry a name, so this is not "rename cluster
     /// N". A name nobody carries produces an empty report rather than an error.
-    pub fn rename_person(&self, old: String, new: String) -> Result<SidecarWriteReport, FaceError> {
-        self.refuse_while_running()?;
+    pub fn rename_person(
+        &self,
+        old: String,
+        new: String,
+        root_prefix: Option<String>,
+    ) -> Result<SidecarWriteReport, FaceError> {
+        let _guard = self.mutating()?;
         Ok(self
             .engine
-            .rename_person(&old, &new, Some(&iso8601_utc_now()))?
+            .rename_person(&old, &new, Some(&iso8601_utc_now()), root_prefix.as_deref())?
             .into())
     }
 
@@ -864,18 +906,16 @@ impl FaceSession {
     /// survive this call** — the pass produces a partition, not a diff — so the
     /// app must re-read `clusters()` afterwards.
     pub fn recluster(&self) -> Result<ReclusterSummary, FaceError> {
-        self.refuse_while_running()?;
+        let _guard = self.mutating()?;
         Ok(self.engine.recluster()?.into())
     }
 }
 
 impl FaceSession {
-    /// The guard on every call that writes.
-    fn refuse_while_running(&self) -> Result<(), FaceError> {
-        if self.run.is_running() {
-            return Err(FaceError::AlreadyRunning);
-        }
-        Ok(())
+    /// The guard on every call that writes. Held for the whole call — see the
+    /// module docs on why reading `is_running()` is not enough.
+    fn mutating(&self) -> Result<std::sync::MutexGuard<'_, ()>, FaceError> {
+        self.run.try_mutate().map_err(|_| FaceError::AlreadyRunning)
     }
 }
 

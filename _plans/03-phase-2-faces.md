@@ -32,7 +32,7 @@ cover crop; digiKam opened on the same tree shows the same people/regions.
   `unname_cluster` / `ignore_cluster` / `sync_sidecars`, plus the auto-tag pass
   at the end of a run (gated on `ClusteringConfig::auto` **and**
   `min_quality`, and switchable off via `FaceRunOptions::skip_auto_tagging`).
-- 422 workspace tests green including the exiftool oracle, covering
+- Workspace tests green including the exiftool oracle, covering
   preservation of digiKam-authored regions, `MetadataReader.parseMWGRegions`
   parity (we write digiKam's Name/Type/Area field order, not exiftool's
   alphabetical one — see the note in `regions::append_region`), idempotence,
@@ -64,9 +64,115 @@ cover crop; digiKam opened on the same tree shows the same people/regions.
   face fixtures: full run e2e, exemplar policy, naming → `People/*` + regions
   readable by `MetadataReader.parseXMPBytes`, un-naming removing only ours,
   `AlreadyRunning` for a second start *and* for every write call, root scoping.
-  `FaceServiceTests` (9): availability, eligibility parity with tagging, the
+  `FaceServiceTests`: availability, eligibility parity with tagging, the
   scan → name → refresh cycle, the review threshold, naming refused mid-run,
-  cancel-before-start, refresh coalescing.
+  cancel-before-start, refresh coalescing, plus the review-round regressions
+  below. `SidecarRefreshCoalescerTests` covers the coalescer's two rules and
+  the one-instance-two-engines contract directly.
+
+### Review round: findings fixed
+
+Two independent reviewers reproduced these experimentally. Each fix carries a
+named regression test.
+
+**Preservation (the ones that lost data).**
+
+- **A foreign region overlapping ours was deleted.** `is_claimed` asked "does
+  *any* claim cover this region", so our claim matched both our box and
+  digiKam's box over the same face, and a no-op re-run retracted digiKam's.
+  Replaced by `regions::bind_claims`: one claim binds to one region, greedily
+  by best IoU. `plan_regions` also looks for *our* box before a foreign one, so
+  a file holding both reaches a fixed point instead of alternating.
+  (`a_second_tools_box_over_our_own_face_survives_a_no_op_re_run`,
+  `un_naming_retracts_our_box_and_leaves_the_other_tools_standing`,
+  `one_claim_binds_to_one_region_not_to_every_overlapping_one`.)
+- **A write for one person retracted another's name.** The cluster table is
+  derived data — a pack swap empties it, a re-detection can lose a face — so a
+  request built from it is not the complete truth a replace set claims to be.
+  `FaceWriteRequest` grew `Authority`: `gallery-ml` always speaks
+  `Partial`, naming the people it can see plus the ones it is deliberately
+  retracting (the former name of a cluster being un-named, ignored or renamed).
+  A claim for anybody else is left standing.
+  (`a_sync_keeps_a_claim_the_cache_can_no_longer_explain`,
+  `naming_after_a_pack_swap_preserves_the_names_already_on_disk`, and four
+  `Authority` unit tests in `gallery-meta::faces`.)
+- **Cluster ids were reused after a face-pack swap.** `reset_face_results`
+  deleted the `sqlite_sequence` row for `clusters`; the comment said it
+  prevented reuse, and it caused it. Removed — a stale id the UI still holds is
+  now a `ClusterNotFound`, which is a correct answer.
+  (`resetting_face_results_clears_everything_derived_but_not_the_id_sequence`.)
+- **The quality floor gated the counter, not the content.** A below-floor face
+  reached disk whenever any other face in the same photo triggered a write.
+  Now applied in `build_request`, on every path including a user's
+  `name_cluster` — one rule, so the two paths cannot undo each other.
+  (`a_below_floor_face_is_left_out_of_a_user_naming_too`; the reasoning is in
+  `naming`'s module docs.)
+- **Naming ignored the library root.** `face_paths_for_hash` returns every
+  queued path for a hash, including rows under a root the app has left, so
+  writes were attempted outside the security scope. `SyncScope` threads a root
+  prefix through every naming entry point and the run's auto pass; out-of-scope
+  paths land in `skipped`. FFI: `nameCluster` / `unnameCluster` /
+  `ignoreCluster` / `renamePerson` take `rootPrefix`.
+  (`naming_scoped_to_one_root_skips_the_other_roots_copies`,
+  `root_scoping_matches_directories_not_string_prefixes`.)
+- **`|` was a legal person name.** `Alice|Bob` forged a Lightroom hierarchy
+  through `to_lr_path` — one person to digiKam, another to Lightroom. Rejected,
+  along with names that are only zero-width/bidi characters. CJK, diacritics,
+  RTL and in-word joiners keep working.
+  (`person_names_reject_what_would_change_their_identity`,
+  `person_names_in_every_script_are_still_names`.)
+
+**Concurrency.**
+
+- **`refuse_while_running` was check-then-act.** `RunLock` grew a gate that
+  both `start` and every mutator take (`try_mutate`, non-blocking), so the
+  check and the work are one step. (`a_start_cannot_slip_in_beside_a_mutator`,
+  `a_mutator_is_refused_while_a_run_is_in_flight`.)
+- **Opening a `CacheDb` stomped the other engine's in-flight rows.**
+  `from_connection` reclaimed both queues unconditionally; a face session
+  opening beside a live tagging run put that run's rows back in the queue.
+  Reclaim is now only at run start, where the answer is knowable. A
+  `PRAGMA busy_timeout` (5 s) went in at the same time, so the two engines wait
+  for each other's write lock instead of failing a photo.
+  (`opening_a_second_handle_leaves_the_other_engines_in_flight_rows_alone`,
+  `an_abandoned_row_is_reclaimed_at_the_next_run_start`.)
+- **`openSession` had no in-flight guard**, in *both* services: two concurrent
+  callers each built a session, and the loser's session held the run, so
+  `cancel()` reached the wrong one. The open is memoized as a `Task`.
+  (`testConcurrentCallersShareOneSession`.)
+- **Cross-engine exclusion was cosmetic.** `FaceService.isCoreBusy` is
+  `isRunning || tagging.isRunning`, and gates `mutate`, `recluster` and the
+  review screen's buttons — the core cannot see the other session's run.
+  (`testNamingIsRefusedWhileTheTaggingEngineIsRunning`.)
+
+**App surface.**
+
+- **`clusterFaces` on a dead id returned an empty list**, sending the UI to a
+  blank detail screen instead of back to the list. It checks existence first
+  and returns `ClusterNotFound`.
+- **The review entry point was invisible on a cold launch.** Everything gates
+  on `TaggingService.pack`, which stayed nil until Settings ran
+  `refreshAvailability()`. `FaceService.ensurePackChecked` (wired by the Store)
+  is called from `refreshClusters` and `startScan`.
+  (`testRefreshingClustersAsksForThePackToBeCheckedFirst`.)
+- **A partly failed naming was silent.** `mutate` cleared `lastError` and
+  ignored `report.failed`, so the review screen showed nothing and stayed open.
+  Now `FaceServiceError.sidecarWritesFailed(n)`.
+  (`testAPartlyFailedNamingSurfacesAnError`.)
+- **Failed paths were logged uncapped on the main actor** — a rename can fail
+  every photo of a person. Capped at 20 plus a count.
+- **The "shared" coalescer was two instances.** One `SidecarRefreshCoalescer`
+  is now built by `GalleryStore` and injected into both services, so the 30 s
+  rescan window is an app-wide budget rather than one each.
+  (`SidecarRefreshCoalescerTests`.)
+- **`namedClusters` sorted on size alone** — `sorted(by:)` is not stable, so
+  equal-sized groups shuffled between reads. Id breaks the tie
+  (`FaceService.biggestFirst`).
+  (`testEqualSizedClustersAreOrderedByIdNotByLuck`.)
+- **Suggesting an existing person's name implied a merge.** `name_cluster`
+  names *this* group; there is no merge. `ClusterReviewView` now says what
+  actually happens — the photos join that person everywhere the app shows
+  people, and the two groups stay separate here.
 
 **Remaining.**
 
@@ -89,15 +195,17 @@ cover crop; digiKam opened on the same tree shows the same people/regions.
   loads ~16 MB of weights the user may never scan with (off the main actor,
   once per launch, and skipped entirely for a tagging-only pack). A
   cache-only FFI entry point would fix it.
-- **The two engines are serialised in the UI, not in the core.** They hold
-  separate SQLite connections to one WAL cache file, so Settings disables each
-  run button while the other runs rather than either side retrying
-  `SQLITE_BUSY`.
-- **Re-detection drops a naming.** `put_faces` clears `cluster_members` for a
-  re-detected photo, so a photo edited in place loses its cluster membership
-  and its sidecar keeps the old `People/*` until the face rejoins the named
-  cluster (which the auto path then writes). Retracting eagerly would be worse
-  — a transient re-detect would strip names off disk.
+- **The two *runs* are still serialised in the UI, not in the core.** The
+  write paths are no longer: `PRAGMA busy_timeout` makes the two connections
+  wait for each other, reclaim happens only at run start, and naming is gated
+  on both engines (`FaceService.isCoreBusy`). What is left is that Settings
+  still disables each run button while the other runs — a face run and a
+  tagging run over one library have never been tried together.
+- **A name the cache can no longer explain is kept forever.** That is the
+  deliberate direction (see `Authority::Partial`), and it has a cost: a person
+  who genuinely left a photo — the file was re-edited, the face is gone — stays
+  named until something explicitly un-names them, and no UI does that per
+  photo. Un-naming or renaming the *cluster* still retracts.
 - **Swift-side acceptance:** cover-crop performance with 10–100× more regions,
   and the digiKam cross-check on a real tree. Neither is reachable on the
   synthetic pack — both need the production pack above.
@@ -174,9 +282,9 @@ session.stats() / libraryStats() / resetQueue()
 session.clusters() -> [ClusterSummary]                   // id, size, state, name?,
                                                          //   ≤4 exemplar FaceRefs
 session.clusterFaces(clusterId:) -> [FaceRef]            // unpaged, best first
-session.nameCluster(clusterId:name:) -> SidecarWriteReport
-session.unnameCluster(clusterId:) / ignoreCluster(clusterId:)
-session.renamePerson(old:new:) -> SidecarWriteReport
+session.nameCluster(clusterId:name:rootPrefix:) -> SidecarWriteReport
+session.unnameCluster(clusterId:rootPrefix:) / ignoreCluster(clusterId:rootPrefix:)
+session.renamePerson(old:new:rootPrefix:) -> SidecarWriteReport
 session.recluster() -> ReclusterSummary
 ```
 

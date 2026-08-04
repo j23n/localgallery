@@ -1,0 +1,543 @@
+{
+  "corpus" : [
+    {
+      "photoID" : "4F866783-3B7D-566E-ACD2-22D16465BEF7",
+      "terms" : [
+        "b-equal"
+      ]
+    },
+    {
+      "photoID" : "46B40097-8960-5520-B773-C9C3107B729E",
+      "terms" : [
+        "a-equal"
+      ]
+    },
+    {
+      "photoID" : "8737BEC4-D823-5086-8568-82628E923CF4",
+      "terms" : [
+        "c-later"
+      ]
+    },
+    {
+      "photoID" : "EF0749F1-B493-52C6-825B-4FB94682AE17",
+      "terms" : [
+        "undated-b"
+      ]
+    },
+    {
+      "photoID" : "F0C2A980-C63A-5189-921C-6909B9061CCE",
+      "terms" : [
+        "undated-a"
+      ]
+    },
+    {
+      "photoID" : "0D6EAA7C-321B-53FD-9F66-CEBAABC98531",
+      "terms" : [
+        "beach italy",
+        "rome",
+        "places/italy/lazio/rome",
+        "beach",
+        "scenes/beach"
+      ]
+    },
+    {
+      "photoID" : "52906CA2-2C92-57FD-B476-DA357C2316C1",
+      "terms" : [
+        "rome2",
+        "rome",
+        "places/italy/lazio/rome"
+      ]
+    },
+    {
+      "photoID" : "2FE05266-1B18-575D-9A92-39B634E01E21",
+      "terms" : [
+        "milan",
+        "milan",
+        "places/italy/lombardy/milan"
+      ]
+    },
+    {
+      "photoID" : "41713963-DE1B-5599-BFC5-B207F5008CF6",
+      "terms" : [
+        "paris",
+        "paris",
+        "places/france/île-de-france/paris"
+      ]
+    },
+    {
+      "photoID" : "46D5D0E0-4173-508F-8E94-CBCA7C31325D",
+      "terms" : [
+        "café",
+        "cup",
+        "objects/cup"
+      ]
+    },
+    {
+      "photoID" : "D61B2BB5-4A23-534C-915C-D3A881B184EE",
+      "terms" : [
+        "i̇stanbul",
+        "istanbul",
+        "places/türkiye/istanbul"
+      ]
+    },
+    {
+      "photoID" : "3F4BE058-4622-599E-837B-F05897ACD718",
+      "terms" : [
+        "alice1",
+        "alice anderson",
+        "people/alice anderson"
+      ]
+    },
+    {
+      "photoID" : "EB203AE9-B15A-509D-B10E-630F980D9ADC",
+      "terms" : [
+        "alice2",
+        "alice anderson",
+        "people/alice anderson",
+        "beach",
+        "scenes/beach"
+      ]
+    },
+    {
+      "photoID" : "264133B3-0235-5E5B-9DB5-00D54C4C5BA1",
+      "terms" : [
+        "bob",
+        "bob brown",
+        "people/bob brown"
+      ]
+    },
+    {
+      "photoID" : "94A408C6-074E-5AC2-BACE-47883453F072",
+      "terms" : [
+        "flat",
+        "vacation",
+        "vacation"
+      ]
+    },
+    {
+      "photoID" : "4C8C1958-A151-5C89-BF5D-53A2A852A8E8",
+      "terms" : [
+        "both-levels",
+        "italy",
+        "places/italy",
+        "rome",
+        "places/italy/lazio/rome"
+      ]
+    }
+  ],
+  "notes" : [
+    "Produced by LocalGalleryTests/Unit/IndexConformanceTests.swift from the shipping Swift SearchIndex, BEFORE the Rust port.",
+    "Sort: dateTaken descending with nil as .distantPast, ties broken by `url.path` ascending. The tiebreak exists so a rescan cannot reshuffle the grid — pin it or the flicker comes back.",
+    "`url.path` is compared with Swift's `<`, which for equal-length ASCII is byte order. The fixture's paths are ASCII apart from the two Unicode filenames, which do not tie with anything.",
+    "The corpus is filename + (displayName, fullPath) per tag, joined with '\\n' and lowercased. It is rebuilt wholesale on every build(allPhotos:).",
+    "Matching is `corpus.contains(query)` on lowercased strings — Swift substring search, i.e. CANONICAL EQUIVALENCE, not byte equality. See the 'café' query."
+  ],
+  "photos" : [
+    {
+      "dateTaken" : "2024-03-01T12:00:00.000Z",
+      "filename" : "b-equal",
+      "id" : "4F866783-3B7D-566E-ACD2-22D16465BEF7",
+      "isVideo" : false,
+      "path" : "/fixtures/idx/b-equal.jpg",
+      "tags" : [
+
+      ]
+    },
+    {
+      "dateTaken" : "2024-03-01T12:00:00.000Z",
+      "filename" : "a-equal",
+      "id" : "46B40097-8960-5520-B773-C9C3107B729E",
+      "isVideo" : false,
+      "path" : "/fixtures/idx/a-equal.jpg",
+      "tags" : [
+
+      ]
+    },
+    {
+      "dateTaken" : "2024-05-01T12:00:00.000Z",
+      "filename" : "c-later",
+      "id" : "8737BEC4-D823-5086-8568-82628E923CF4",
+      "isVideo" : false,
+      "path" : "/fixtures/idx/c-later.jpg",
+      "tags" : [
+
+      ]
+    },
+    {
+      "filename" : "undated-b",
+      "id" : "EF0749F1-B493-52C6-825B-4FB94682AE17",
+      "isVideo" : false,
+      "path" : "/fixtures/idx/undated-b.jpg",
+      "tags" : [
+
+      ]
+    },
+    {
+      "filename" : "undated-a",
+      "id" : "F0C2A980-C63A-5189-921C-6909B9061CCE",
+      "isVideo" : false,
+      "path" : "/fixtures/idx/undated-a.jpg",
+      "tags" : [
+
+      ]
+    },
+    {
+      "dateTaken" : "2023-08-01T12:00:00.000Z",
+      "filename" : "Beach Italy",
+      "id" : "0D6EAA7C-321B-53FD-9F66-CEBAABC98531",
+      "isVideo" : false,
+      "path" : "/fixtures/idx/Beach Italy.jpg",
+      "tags" : [
+        "Places/Italy/Lazio/Rome",
+        "Scenes/Beach"
+      ]
+    },
+    {
+      "dateTaken" : "2023-08-02T12:00:00.000Z",
+      "filename" : "rome2",
+      "id" : "52906CA2-2C92-57FD-B476-DA357C2316C1",
+      "isVideo" : false,
+      "path" : "/fixtures/idx/rome2.jpg",
+      "tags" : [
+        "Places/Italy/Lazio/Rome"
+      ]
+    },
+    {
+      "dateTaken" : "2023-09-01T12:00:00.000Z",
+      "filename" : "milan",
+      "id" : "2FE05266-1B18-575D-9A92-39B634E01E21",
+      "isVideo" : false,
+      "path" : "/fixtures/idx/milan.jpg",
+      "tags" : [
+        "Places/Italy/Lombardy/Milan"
+      ]
+    },
+    {
+      "dateTaken" : "2023-10-01T12:00:00.000Z",
+      "filename" : "paris",
+      "id" : "41713963-DE1B-5599-BFC5-B207F5008CF6",
+      "isVideo" : false,
+      "path" : "/fixtures/idx/paris.jpg",
+      "tags" : [
+        "Places/France/Île-de-France/Paris"
+      ]
+    },
+    {
+      "dateTaken" : "2023-11-01T12:00:00.000Z",
+      "filename" : "café",
+      "id" : "46D5D0E0-4173-508F-8E94-CBCA7C31325D",
+      "isVideo" : false,
+      "path" : "/fixtures/idx/café.jpg",
+      "tags" : [
+        "Objects/Cup"
+      ]
+    },
+    {
+      "dateTaken" : "2023-12-01T12:00:00.000Z",
+      "filename" : "İstanbul",
+      "id" : "D61B2BB5-4A23-534C-915C-D3A881B184EE",
+      "isVideo" : false,
+      "path" : "/fixtures/idx/İstanbul.jpg",
+      "tags" : [
+        "Places/Türkiye/Istanbul"
+      ]
+    },
+    {
+      "dateTaken" : "2024-01-01T12:00:00.000Z",
+      "filename" : "alice1",
+      "id" : "3F4BE058-4622-599E-837B-F05897ACD718",
+      "isVideo" : false,
+      "path" : "/fixtures/idx/alice1.jpg",
+      "tags" : [
+        "People/Alice Anderson"
+      ]
+    },
+    {
+      "dateTaken" : "2024-02-01T12:00:00.000Z",
+      "filename" : "alice2",
+      "id" : "EB203AE9-B15A-509D-B10E-630F980D9ADC",
+      "isVideo" : false,
+      "path" : "/fixtures/idx/alice2.jpg",
+      "tags" : [
+        "People/Alice Anderson",
+        "Scenes/Beach"
+      ]
+    },
+    {
+      "dateTaken" : "2023-01-01T12:00:00.000Z",
+      "filename" : "bob",
+      "id" : "264133B3-0235-5E5B-9DB5-00D54C4C5BA1",
+      "isVideo" : false,
+      "path" : "/fixtures/idx/bob.jpg",
+      "tags" : [
+        "People/Bob Brown"
+      ]
+    },
+    {
+      "dateTaken" : "2022-01-01T12:00:00.000Z",
+      "filename" : "flat",
+      "id" : "94A408C6-074E-5AC2-BACE-47883453F072",
+      "isVideo" : false,
+      "path" : "/fixtures/idx/flat.jpg",
+      "tags" : [
+        "Vacation"
+      ]
+    },
+    {
+      "dateTaken" : "2022-02-01T12:00:00.000Z",
+      "filename" : "both-levels",
+      "id" : "4C8C1958-A151-5C89-BF5D-53A2A852A8E8",
+      "isVideo" : false,
+      "path" : "/fixtures/idx/both-levels.jpg",
+      "tags" : [
+        "Places/Italy",
+        "Places/Italy/Lazio/Rome"
+      ]
+    }
+  ],
+  "queries" : [
+    {
+      "expectedPhotoIDs" : [
+        "8737BEC4-D823-5086-8568-82628E923CF4",
+        "46B40097-8960-5520-B773-C9C3107B729E",
+        "4F866783-3B7D-566E-ACD2-22D16465BEF7",
+        "EB203AE9-B15A-509D-B10E-630F980D9ADC",
+        "3F4BE058-4622-599E-837B-F05897ACD718",
+        "D61B2BB5-4A23-534C-915C-D3A881B184EE",
+        "46D5D0E0-4173-508F-8E94-CBCA7C31325D",
+        "41713963-DE1B-5599-BFC5-B207F5008CF6",
+        "2FE05266-1B18-575D-9A92-39B634E01E21",
+        "52906CA2-2C92-57FD-B476-DA357C2316C1",
+        "0D6EAA7C-321B-53FD-9F66-CEBAABC98531",
+        "264133B3-0235-5E5B-9DB5-00D54C4C5BA1",
+        "4C8C1958-A151-5C89-BF5D-53A2A852A8E8",
+        "94A408C6-074E-5AC2-BACE-47883453F072",
+        "F0C2A980-C63A-5189-921C-6909B9061CCE",
+        "EF0749F1-B493-52C6-825B-4FB94682AE17"
+      ],
+      "notes" : [
+        "An empty query with no required tags returns the sorted list untouched — this is the grid's default."
+      ],
+      "query" : "",
+      "requiredTagPaths" : [
+
+      ]
+    },
+    {
+      "expectedPhotoIDs" : [
+        "52906CA2-2C92-57FD-B476-DA357C2316C1",
+        "0D6EAA7C-321B-53FD-9F66-CEBAABC98531",
+        "4C8C1958-A151-5C89-BF5D-53A2A852A8E8"
+      ],
+      "notes" : [
+        "Plain substring against the corpus. Matches the tag leaf 'Rome' and the full path, so photos tagged Places/Italy/Lazio/Rome all hit."
+      ],
+      "query" : "rome",
+      "requiredTagPaths" : [
+
+      ]
+    },
+    {
+      "expectedPhotoIDs" : [
+        "52906CA2-2C92-57FD-B476-DA357C2316C1",
+        "0D6EAA7C-321B-53FD-9F66-CEBAABC98531",
+        "4C8C1958-A151-5C89-BF5D-53A2A852A8E8"
+      ],
+      "notes" : [
+        "The query is lowercased and so is the corpus: case never matters."
+      ],
+      "query" : "ROME",
+      "requiredTagPaths" : [
+
+      ]
+    },
+    {
+      "expectedPhotoIDs" : [
+        "2FE05266-1B18-575D-9A92-39B634E01E21",
+        "52906CA2-2C92-57FD-B476-DA357C2316C1",
+        "0D6EAA7C-321B-53FD-9F66-CEBAABC98531",
+        "4C8C1958-A151-5C89-BF5D-53A2A852A8E8"
+      ],
+      "notes" : [
+        "The query matches a known tag path exactly, so search switches to the TAG branch — and because the namespace is Places, it also matches every nested path. A photo tagged only Places/France is not swept in.",
+        "This branch depends on `allTags`, which is the Store's aggregated list — the same list TagIndex produces. A port must feed it the same way or this query silently degrades to a substring match."
+      ],
+      "query" : "places/italy",
+      "requiredTagPaths" : [
+
+      ]
+    },
+    {
+      "expectedPhotoIDs" : [
+        "EB203AE9-B15A-509D-B10E-630F980D9ADC",
+        "3F4BE058-4622-599E-837B-F05897ACD718"
+      ],
+      "notes" : [
+        "Same tag branch, non-Places namespace: exact path only, no prefix expansion."
+      ],
+      "query" : "people/alice anderson",
+      "requiredTagPaths" : [
+
+      ]
+    },
+    {
+      "expectedPhotoIDs" : [
+        "52906CA2-2C92-57FD-B476-DA357C2316C1",
+        "0D6EAA7C-321B-53FD-9F66-CEBAABC98531",
+        "4C8C1958-A151-5C89-BF5D-53A2A852A8E8"
+      ],
+      "notes" : [
+        "A VIRTUAL tag: no photo carries this path, but TagIndex synthesises it from the prefix expansion, so it is in allTags and takes the tag branch."
+      ],
+      "query" : "places/italy/lazio",
+      "requiredTagPaths" : [
+
+      ]
+    },
+    {
+      "expectedPhotoIDs" : [
+        "0D6EAA7C-321B-53FD-9F66-CEBAABC98531"
+      ],
+      "notes" : [
+        "A multi-token query is not tokenised — it is one substring. It matches only because a filename literally contains 'beach italy'."
+      ],
+      "query" : "beach italy",
+      "requiredTagPaths" : [
+
+      ]
+    },
+    {
+      "expectedPhotoIDs" : [
+
+      ],
+      "notes" : [
+        "…and reversing the two words matches nothing. The corpus joins terms with '\\n', so a substring can never span two terms either."
+      ],
+      "query" : "italy beach",
+      "requiredTagPaths" : [
+
+      ]
+    },
+    {
+      "expectedPhotoIDs" : [
+        "46D5D0E0-4173-508F-8E94-CBCA7C31325D"
+      ],
+      "notes" : [
+        "The query is precomposed (NFC); the filename on disk is decomposed (Foundation's URL(fileURLWithPath:) decomposes). Swift's String.contains compares by CANONICAL EQUIVALENCE, so it matches anyway.",
+        "A Rust port that compares bytes will NOT match this, and a user searching for a name with an accent will get nothing. This is the single most likely regression in the index port."
+      ],
+      "query" : "café",
+      "requiredTagPaths" : [
+
+      ]
+    },
+    {
+      "expectedPhotoIDs" : [
+
+      ],
+      "notes" : [
+        "Canonical equivalence is not accent folding: the unaccented spelling does not match."
+      ],
+      "query" : "cafe",
+      "requiredTagPaths" : [
+
+      ]
+    },
+    {
+      "expectedPhotoIDs" : [
+        "D61B2BB5-4A23-534C-915C-D3A881B184EE"
+      ],
+      "notes" : [
+        "'İ'.lowercased() is 'i' + U+0307 COMBINING DOT ABOVE, which is not canonically equivalent to plain 'i'. Whatever this records is what a Turkish filename does today.",
+        "Swift's lowercased() is the full Unicode mapping and is locale-INdependent — it does not do the Turkish dotless-i thing."
+      ],
+      "query" : "istanbul",
+      "requiredTagPaths" : [
+
+      ]
+    },
+    {
+      "expectedPhotoIDs" : [
+
+      ],
+      "notes" : [
+        "No match: an empty result, not the unfiltered list."
+      ],
+      "query" : "zzz-no-such-thing",
+      "requiredTagPaths" : [
+
+      ]
+    },
+    {
+      "expectedPhotoIDs" : [
+        "2FE05266-1B18-575D-9A92-39B634E01E21",
+        "52906CA2-2C92-57FD-B476-DA357C2316C1",
+        "0D6EAA7C-321B-53FD-9F66-CEBAABC98531",
+        "4C8C1958-A151-5C89-BF5D-53A2A852A8E8"
+      ],
+      "notes" : [
+        "Required tags AND together and are applied BEFORE the query. Places prefix expansion applies here too."
+      ],
+      "query" : "",
+      "requiredTagPaths" : [
+        "Places/Italy"
+      ]
+    },
+    {
+      "expectedPhotoIDs" : [
+        "0D6EAA7C-321B-53FD-9F66-CEBAABC98531"
+      ],
+      "notes" : [
+        "Two required tags intersect."
+      ],
+      "query" : "",
+      "requiredTagPaths" : [
+        "Places/Italy",
+        "Scenes/Beach"
+      ]
+    },
+    {
+      "expectedPhotoIDs" : [
+        "EB203AE9-B15A-509D-B10E-630F980D9ADC"
+      ],
+      "notes" : [
+        "Required tag plus a substring query: both must hold."
+      ],
+      "query" : "alice",
+      "requiredTagPaths" : [
+        "Scenes/Beach"
+      ]
+    },
+    {
+      "expectedPhotoIDs" : [
+        "94A408C6-074E-5AC2-BACE-47883453F072"
+      ],
+      "notes" : [
+        "A namespace-less flat tag: no prefix expansion, exact match only."
+      ],
+      "query" : "",
+      "requiredTagPaths" : [
+        "Vacation"
+      ]
+    }
+  ],
+  "schema" : 1,
+  "sortedPhotoIDs" : [
+    "8737BEC4-D823-5086-8568-82628E923CF4",
+    "46B40097-8960-5520-B773-C9C3107B729E",
+    "4F866783-3B7D-566E-ACD2-22D16465BEF7",
+    "EB203AE9-B15A-509D-B10E-630F980D9ADC",
+    "3F4BE058-4622-599E-837B-F05897ACD718",
+    "D61B2BB5-4A23-534C-915C-D3A881B184EE",
+    "46D5D0E0-4173-508F-8E94-CBCA7C31325D",
+    "41713963-DE1B-5599-BFC5-B207F5008CF6",
+    "2FE05266-1B18-575D-9A92-39B634E01E21",
+    "52906CA2-2C92-57FD-B476-DA357C2316C1",
+    "0D6EAA7C-321B-53FD-9F66-CEBAABC98531",
+    "264133B3-0235-5E5B-9DB5-00D54C4C5BA1",
+    "4C8C1958-A151-5C89-BF5D-53A2A852A8E8",
+    "94A408C6-074E-5AC2-BACE-47883453F072",
+    "F0C2A980-C63A-5189-921C-6909B9061CCE",
+    "EF0749F1-B493-52C6-825B-4FB94682AE17"
+  ]
+}

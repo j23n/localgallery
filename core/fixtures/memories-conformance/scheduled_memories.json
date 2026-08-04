@@ -1,0 +1,2853 @@
+{
+  "environment" : {
+    "calendarIdentifier" : "gregorian",
+    "localeIdentifier" : "en_US",
+    "notes" : [
+      "Same locale caveat as memory_engine.json: subtitles are ICU-formatted."
+    ]
+  },
+  "notes" : [
+    "Produced by LocalGalleryTests/Unit/ScheduledMemoriesConformanceTests.swift from the shipping Swift GalleryStore.computeScheduledMemories, BEFORE the Rust port.",
+    "The horizon is offsets 1…7 from Calendar.current.startOfDay(for: clock.now()). Day 0 is excluded — it is already in memories.visible.",
+    "Each item's window is [startOfDay(+n), startOfDay(+n+1)). The scheduled pass runs the SAME MemoryEngine.finalize as the daily pipeline, which is what makes the ids and the content match.",
+    "Only calendar-tied types are pre-published: onThisDay, yearsAgo, birthdays. No trips, folder events or density.",
+    "`parity` is the acceptance gate from the plan: day-N pre-published id == the id generated live on day N."
+  ],
+  "scenarios" : [
+    {
+      "birthdaysEnabled" : true,
+      "contacts" : [
+        {
+          "birthdayDay" : 9,
+          "birthdayMonth" : 12,
+          "familyName" : "Hopper",
+          "givenName" : "Grace",
+          "id" : "c-grace"
+        }
+      ],
+      "horizonDays" : 7,
+      "name" : "no-birthday-in-the-horizon",
+      "notes" : [
+        "Grace's birthday (12-09) is outside the 06-09…06-15 window, so not one of the seven days produces a birthday memory. This is the common case and the one Finding 3 says must cost ~nothing: the person→photo grouping is day-independent, and today it runs seven times anyway.",
+        "The photo work still happens on every day of the horizon — only the birthday branch is empty. A port that early-exits must early-exit on the BIRTHDAY check, not on the day."
+      ],
+      "parity" : [
+        {
+          "contentIdenticalForMatchedIDs" : true,
+          "dayOffset" : 1,
+          "liveGeneratedIDs" : [
+
+          ],
+          "matchedIDs" : [
+
+          ],
+          "scheduledButNotGeneratedLive" : [
+
+          ],
+          "scheduledIDs" : [
+
+          ]
+        },
+        {
+          "contentIdenticalForMatchedIDs" : true,
+          "dayOffset" : 2,
+          "liveGeneratedIDs" : [
+
+          ],
+          "matchedIDs" : [
+
+          ],
+          "scheduledButNotGeneratedLive" : [
+
+          ],
+          "scheduledIDs" : [
+
+          ]
+        },
+        {
+          "contentIdenticalForMatchedIDs" : true,
+          "dayOffset" : 3,
+          "liveGeneratedIDs" : [
+            "onThisDay-2024-06-11",
+            "yearsAgo-5-2024-06-11",
+            "yearsAgo-3-2024-06-11"
+          ],
+          "matchedIDs" : [
+            "onThisDay-2024-06-11",
+            "yearsAgo-3-2024-06-11",
+            "yearsAgo-5-2024-06-11"
+          ],
+          "scheduledButNotGeneratedLive" : [
+
+          ],
+          "scheduledIDs" : [
+            "onThisDay-2024-06-11",
+            "yearsAgo-3-2024-06-11",
+            "yearsAgo-5-2024-06-11"
+          ]
+        },
+        {
+          "contentIdenticalForMatchedIDs" : true,
+          "dayOffset" : 4,
+          "liveGeneratedIDs" : [
+
+          ],
+          "matchedIDs" : [
+
+          ],
+          "scheduledButNotGeneratedLive" : [
+
+          ],
+          "scheduledIDs" : [
+
+          ]
+        },
+        {
+          "contentIdenticalForMatchedIDs" : true,
+          "dayOffset" : 5,
+          "liveGeneratedIDs" : [
+
+          ],
+          "matchedIDs" : [
+
+          ],
+          "scheduledButNotGeneratedLive" : [
+
+          ],
+          "scheduledIDs" : [
+
+          ]
+        },
+        {
+          "contentIdenticalForMatchedIDs" : true,
+          "dayOffset" : 6,
+          "liveGeneratedIDs" : [
+            "onThisDay-2024-06-14",
+            "yearsAgo-1-2024-06-14"
+          ],
+          "matchedIDs" : [
+            "onThisDay-2024-06-14",
+            "yearsAgo-1-2024-06-14"
+          ],
+          "scheduledButNotGeneratedLive" : [
+
+          ],
+          "scheduledIDs" : [
+            "onThisDay-2024-06-14",
+            "yearsAgo-1-2024-06-14"
+          ]
+        },
+        {
+          "contentIdenticalForMatchedIDs" : true,
+          "dayOffset" : 7,
+          "liveGeneratedIDs" : [
+
+          ],
+          "matchedIDs" : [
+
+          ],
+          "scheduledButNotGeneratedLive" : [
+
+          ],
+          "scheduledIDs" : [
+
+          ]
+        }
+      ],
+      "personContactLinks" : [
+
+      ],
+      "photos" : [
+        {
+          "dateTaken" : "2019-06-11T12:00:00.000Z",
+          "filename" : "otd-2019-0",
+          "id" : "0EF0ED9A-7D9B-5170-A7DB-26E43C1F2D4C",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-0.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:02:00.000Z",
+          "filename" : "otd-2019-1",
+          "id" : "1B82AADD-E32C-5D27-95B6-12166351D1C9",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-1.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:04:00.000Z",
+          "filename" : "otd-2019-2",
+          "id" : "CCE6B15C-D0A1-5772-B686-0760BEA0180B",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-2.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:06:00.000Z",
+          "filename" : "otd-2019-3",
+          "id" : "8DFC5DC4-C214-5CA4-857E-FB1D130D8C6D",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-3.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:08:00.000Z",
+          "filename" : "otd-2019-4",
+          "id" : "1FB6BC4E-FAC4-50E6-89C8-5590E5E137BA",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-4.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:10:00.000Z",
+          "filename" : "otd-2019-5",
+          "id" : "CEAE3192-D363-55CE-A2B5-3D7A9D5E48D1",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-5.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:12:00.000Z",
+          "filename" : "otd-2019-6",
+          "id" : "A1A962DB-FE54-5719-B32A-80EA27B0C423",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-6.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:14:00.000Z",
+          "filename" : "otd-2019-7",
+          "id" : "335D383A-E81D-5C4D-8C30-1F9B37844461",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-7.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:16:00.000Z",
+          "filename" : "otd-2019-8",
+          "id" : "FD7A0931-B8CB-52F6-A36C-B8E1319DA19A",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-8.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:18:00.000Z",
+          "filename" : "otd-2019-9",
+          "id" : "007C2B49-21B2-5A0C-8B59-A168EFDFEC8C",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-9.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:20:00.000Z",
+          "filename" : "otd-2019-10",
+          "id" : "04521559-923C-5FD0-8E0E-EC19F8C93007",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-10.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:22:00.000Z",
+          "filename" : "otd-2019-11",
+          "id" : "9CECA1FB-18EF-5A92-A597-551B845874DE",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-11.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:00:00.000Z",
+          "filename" : "otd-2021-0",
+          "id" : "A3E14540-823C-51A4-BED8-2F5EB7DDCB9A",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-0.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:02:00.000Z",
+          "filename" : "otd-2021-1",
+          "id" : "A8ED4EDA-CC10-5D16-8A73-CDD2B4E7A4B6",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-1.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:04:00.000Z",
+          "filename" : "otd-2021-2",
+          "id" : "A528BFAF-2330-543F-9E46-F9AF869B5B13",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-2.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:06:00.000Z",
+          "filename" : "otd-2021-3",
+          "id" : "B80C6975-5A0B-5749-8E6A-428563112910",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-3.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:08:00.000Z",
+          "filename" : "otd-2021-4",
+          "id" : "E9446DE3-1CBF-523C-95F3-073146D0E879",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-4.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:10:00.000Z",
+          "filename" : "otd-2021-5",
+          "id" : "1A7C98FF-E550-5E43-A826-A358B07475C6",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-5.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:12:00.000Z",
+          "filename" : "otd-2021-6",
+          "id" : "A3DA749D-00CA-5F74-B225-9362B4D8EEC2",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-6.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:14:00.000Z",
+          "filename" : "otd-2021-7",
+          "id" : "810E803D-E597-5D6B-B0FD-A30F1989E7F7",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-7.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:16:00.000Z",
+          "filename" : "otd-2021-8",
+          "id" : "88EBC04D-1F7E-58EB-84D0-58087CD8C442",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-8.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:18:00.000Z",
+          "filename" : "otd-2021-9",
+          "id" : "C58B7FB9-EF1E-5ED0-BA8F-E6B9064C56B2",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-9.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:20:00.000Z",
+          "filename" : "otd-2021-10",
+          "id" : "BABAC020-8F1B-5C88-AFAA-2F76804A0BD7",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-10.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:00:00.000Z",
+          "filename" : "otd-2023-0",
+          "id" : "687A4026-8FDB-5F02-8DBD-4239DD010B0E",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-0.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:02:00.000Z",
+          "filename" : "otd-2023-1",
+          "id" : "8EE58F9C-4BF7-5CB1-8A24-F77C578E52D4",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-1.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:04:00.000Z",
+          "filename" : "otd-2023-2",
+          "id" : "26FE4AC9-6FE5-566F-9B6E-50DC93B5D617",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-2.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:06:00.000Z",
+          "filename" : "otd-2023-3",
+          "id" : "20E215AA-BC6B-5A53-89C8-2DC56139FE1E",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-3.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:08:00.000Z",
+          "filename" : "otd-2023-4",
+          "id" : "60EA956C-01E9-588D-95E6-F219F7101D98",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-4.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:10:00.000Z",
+          "filename" : "otd-2023-5",
+          "id" : "03B816F4-7543-5B4F-93A9-23569F41E5DA",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-5.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:12:00.000Z",
+          "filename" : "otd-2023-6",
+          "id" : "803CBBC6-FCA9-5A9F-B634-C43A645A49FB",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-6.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:14:00.000Z",
+          "filename" : "otd-2023-7",
+          "id" : "3543355F-D7D5-5632-9A45-6610D40EC2B2",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-7.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:16:00.000Z",
+          "filename" : "otd-2023-8",
+          "id" : "BFA11FE5-D435-55D3-87E3-651B82511D10",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-8.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:18:00.000Z",
+          "filename" : "otd-2023-9",
+          "id" : "7FC8D1B4-5D8A-5ACF-951D-A9AB477E3F2C",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-9.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:20:00.000Z",
+          "filename" : "otd-2023-10",
+          "id" : "4F79F5E3-B6D8-596C-A978-0D62652D1D89",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-10.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2022-01-04T10:00:00.000Z",
+          "filename" : "ada-0",
+          "id" : "7B3EE740-FFC5-5B24-A96D-F41398A31D20",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/ada-0.jpg",
+          "tags" : [
+            "People/Ada Lovelace"
+          ]
+        },
+        {
+          "dateTaken" : "2022-01-05T10:00:00.000Z",
+          "filename" : "ada-1",
+          "id" : "370F5870-0B04-562B-B3BC-033F9EE9C80E",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/ada-1.jpg",
+          "tags" : [
+            "People/Ada Lovelace"
+          ]
+        },
+        {
+          "dateTaken" : "2022-01-06T10:00:00.000Z",
+          "filename" : "ada-2",
+          "id" : "DD910092-9809-52C9-9B98-4E67CBE9813B",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/ada-2.jpg",
+          "tags" : [
+            "People/Ada Lovelace"
+          ]
+        },
+        {
+          "dateTaken" : "2022-01-07T10:00:00.000Z",
+          "filename" : "ada-3",
+          "id" : "70337C31-803C-55B6-AC38-5D8D6DD74D35",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/ada-3.jpg",
+          "tags" : [
+            "People/Ada Lovelace"
+          ]
+        }
+      ],
+      "scheduled" : [
+        {
+          "dayOffset" : 3,
+          "memory" : {
+            "coverPhotoID" : "9CECA1FB-18EF-5A92-A597-551B845874DE",
+            "dateRangeEnd" : "2021-06-11T15:20:00.000Z",
+            "dateRangeStart" : "2019-06-11T12:00:00.000Z",
+            "id" : "onThisDay-2024-06-11",
+            "photoCount" : 23,
+            "photoIDs" : [
+              "0EF0ED9A-7D9B-5170-A7DB-26E43C1F2D4C",
+              "1B82AADD-E32C-5D27-95B6-12166351D1C9",
+              "CCE6B15C-D0A1-5772-B686-0760BEA0180B",
+              "8DFC5DC4-C214-5CA4-857E-FB1D130D8C6D",
+              "1FB6BC4E-FAC4-50E6-89C8-5590E5E137BA",
+              "CEAE3192-D363-55CE-A2B5-3D7A9D5E48D1",
+              "A1A962DB-FE54-5719-B32A-80EA27B0C423",
+              "335D383A-E81D-5C4D-8C30-1F9B37844461",
+              "FD7A0931-B8CB-52F6-A36C-B8E1319DA19A",
+              "007C2B49-21B2-5A0C-8B59-A168EFDFEC8C",
+              "04521559-923C-5FD0-8E0E-EC19F8C93007",
+              "9CECA1FB-18EF-5A92-A597-551B845874DE",
+              "A3E14540-823C-51A4-BED8-2F5EB7DDCB9A",
+              "A8ED4EDA-CC10-5D16-8A73-CDD2B4E7A4B6",
+              "A528BFAF-2330-543F-9E46-F9AF869B5B13",
+              "B80C6975-5A0B-5749-8E6A-428563112910",
+              "E9446DE3-1CBF-523C-95F3-073146D0E879",
+              "1A7C98FF-E550-5E43-A826-A358B07475C6",
+              "A3DA749D-00CA-5F74-B225-9362B4D8EEC2",
+              "810E803D-E597-5D6B-B0FD-A30F1989E7F7",
+              "88EBC04D-1F7E-58EB-84D0-58087CD8C442",
+              "C58B7FB9-EF1E-5ED0-BA8F-E6B9064C56B2",
+              "BABAC020-8F1B-5C88-AFAA-2F76804A0BD7"
+            ],
+            "score" : 60,
+            "subtitle" : "Jun 11, 2019 – Jun 11, 2021 · 23 photos",
+            "title" : "On this day",
+            "type" : "onThisDay"
+          },
+          "validFrom" : "2024-06-11T00:00:00.000Z",
+          "validTo" : "2024-06-12T00:00:00.000Z"
+        },
+        {
+          "dayOffset" : 3,
+          "memory" : {
+            "coverPhotoID" : "1A7C98FF-E550-5E43-A826-A358B07475C6",
+            "dateRangeEnd" : "2021-06-11T15:20:00.000Z",
+            "dateRangeStart" : "2021-06-11T15:00:00.000Z",
+            "id" : "yearsAgo-3-2024-06-11",
+            "photoCount" : 11,
+            "photoIDs" : [
+              "A3E14540-823C-51A4-BED8-2F5EB7DDCB9A",
+              "A8ED4EDA-CC10-5D16-8A73-CDD2B4E7A4B6",
+              "A528BFAF-2330-543F-9E46-F9AF869B5B13",
+              "B80C6975-5A0B-5749-8E6A-428563112910",
+              "E9446DE3-1CBF-523C-95F3-073146D0E879",
+              "1A7C98FF-E550-5E43-A826-A358B07475C6",
+              "A3DA749D-00CA-5F74-B225-9362B4D8EEC2",
+              "810E803D-E597-5D6B-B0FD-A30F1989E7F7",
+              "88EBC04D-1F7E-58EB-84D0-58087CD8C442",
+              "C58B7FB9-EF1E-5ED0-BA8F-E6B9064C56B2",
+              "BABAC020-8F1B-5C88-AFAA-2F76804A0BD7"
+            ],
+            "score" : 35,
+            "subtitle" : "Jun 11, 2021 · 11 photos",
+            "title" : "On this day in 2021",
+            "type" : "yearsAgo",
+            "yearsAgo" : 3
+          },
+          "validFrom" : "2024-06-11T00:00:00.000Z",
+          "validTo" : "2024-06-12T00:00:00.000Z"
+        },
+        {
+          "dayOffset" : 3,
+          "memory" : {
+            "coverPhotoID" : "A1A962DB-FE54-5719-B32A-80EA27B0C423",
+            "dateRangeEnd" : "2019-06-11T12:22:00.000Z",
+            "dateRangeStart" : "2019-06-11T12:00:00.000Z",
+            "id" : "yearsAgo-5-2024-06-11",
+            "photoCount" : 12,
+            "photoIDs" : [
+              "0EF0ED9A-7D9B-5170-A7DB-26E43C1F2D4C",
+              "1B82AADD-E32C-5D27-95B6-12166351D1C9",
+              "CCE6B15C-D0A1-5772-B686-0760BEA0180B",
+              "8DFC5DC4-C214-5CA4-857E-FB1D130D8C6D",
+              "1FB6BC4E-FAC4-50E6-89C8-5590E5E137BA",
+              "CEAE3192-D363-55CE-A2B5-3D7A9D5E48D1",
+              "A1A962DB-FE54-5719-B32A-80EA27B0C423",
+              "335D383A-E81D-5C4D-8C30-1F9B37844461",
+              "FD7A0931-B8CB-52F6-A36C-B8E1319DA19A",
+              "007C2B49-21B2-5A0C-8B59-A168EFDFEC8C",
+              "04521559-923C-5FD0-8E0E-EC19F8C93007",
+              "9CECA1FB-18EF-5A92-A597-551B845874DE"
+            ],
+            "score" : 40,
+            "subtitle" : "Jun 11, 2019 · 12 photos",
+            "title" : "On this day in 2019",
+            "type" : "yearsAgo",
+            "yearsAgo" : 5
+          },
+          "validFrom" : "2024-06-11T00:00:00.000Z",
+          "validTo" : "2024-06-12T00:00:00.000Z"
+        },
+        {
+          "dayOffset" : 6,
+          "memory" : {
+            "coverPhotoID" : "03B816F4-7543-5B4F-93A9-23569F41E5DA",
+            "dateRangeEnd" : "2023-06-14T09:20:00.000Z",
+            "dateRangeStart" : "2023-06-14T09:00:00.000Z",
+            "id" : "onThisDay-2024-06-14",
+            "photoCount" : 11,
+            "photoIDs" : [
+              "687A4026-8FDB-5F02-8DBD-4239DD010B0E",
+              "8EE58F9C-4BF7-5CB1-8A24-F77C578E52D4",
+              "26FE4AC9-6FE5-566F-9B6E-50DC93B5D617",
+              "20E215AA-BC6B-5A53-89C8-2DC56139FE1E",
+              "60EA956C-01E9-588D-95E6-F219F7101D98",
+              "03B816F4-7543-5B4F-93A9-23569F41E5DA",
+              "803CBBC6-FCA9-5A9F-B634-C43A645A49FB",
+              "3543355F-D7D5-5632-9A45-6610D40EC2B2",
+              "BFA11FE5-D435-55D3-87E3-651B82511D10",
+              "7FC8D1B4-5D8A-5ACF-951D-A9AB477E3F2C",
+              "4F79F5E3-B6D8-596C-A978-0D62652D1D89"
+            ],
+            "score" : 55,
+            "subtitle" : "Jun 14, 2023 · 11 photos",
+            "title" : "On this day",
+            "type" : "onThisDay"
+          },
+          "validFrom" : "2024-06-14T00:00:00.000Z",
+          "validTo" : "2024-06-15T00:00:00.000Z"
+        },
+        {
+          "dayOffset" : 6,
+          "memory" : {
+            "coverPhotoID" : "03B816F4-7543-5B4F-93A9-23569F41E5DA",
+            "dateRangeEnd" : "2023-06-14T09:20:00.000Z",
+            "dateRangeStart" : "2023-06-14T09:00:00.000Z",
+            "id" : "yearsAgo-1-2024-06-14",
+            "photoCount" : 11,
+            "photoIDs" : [
+              "687A4026-8FDB-5F02-8DBD-4239DD010B0E",
+              "8EE58F9C-4BF7-5CB1-8A24-F77C578E52D4",
+              "26FE4AC9-6FE5-566F-9B6E-50DC93B5D617",
+              "20E215AA-BC6B-5A53-89C8-2DC56139FE1E",
+              "60EA956C-01E9-588D-95E6-F219F7101D98",
+              "03B816F4-7543-5B4F-93A9-23569F41E5DA",
+              "803CBBC6-FCA9-5A9F-B634-C43A645A49FB",
+              "3543355F-D7D5-5632-9A45-6610D40EC2B2",
+              "BFA11FE5-D435-55D3-87E3-651B82511D10",
+              "7FC8D1B4-5D8A-5ACF-951D-A9AB477E3F2C",
+              "4F79F5E3-B6D8-596C-A978-0D62652D1D89"
+            ],
+            "score" : 35,
+            "subtitle" : "Jun 14, 2023 · 11 photos",
+            "title" : "On this day in 2023",
+            "type" : "yearsAgo",
+            "yearsAgo" : 1
+          },
+          "validFrom" : "2024-06-14T00:00:00.000Z",
+          "validTo" : "2024-06-15T00:00:00.000Z"
+        }
+      ],
+      "timeZone" : "UTC",
+      "today" : "2024-06-08T12:00:00.000Z"
+    },
+    {
+      "birthdaysEnabled" : true,
+      "contacts" : [
+        {
+          "birthdayDay" : 13,
+          "birthdayMonth" : 6,
+          "familyName" : "Lovelace",
+          "givenName" : "Ada",
+          "id" : "c-ada"
+        },
+        {
+          "birthdayDay" : 9,
+          "birthdayMonth" : 12,
+          "familyName" : "Hopper",
+          "givenName" : "Grace",
+          "id" : "c-grace"
+        }
+      ],
+      "horizonDays" : 7,
+      "name" : "birthday-mid-horizon",
+      "notes" : [
+        "Ada's birthday lands on 2024-06-13, offset +5. Exactly one of the seven days produces a birthday memory; the other six are the early-exit case.",
+        "Birthday memories are built from ALL photos rather than the (month, day) bucket, so they are the one scheduled item whose cost is proportional to the whole library."
+      ],
+      "parity" : [
+        {
+          "contentIdenticalForMatchedIDs" : true,
+          "dayOffset" : 1,
+          "liveGeneratedIDs" : [
+
+          ],
+          "matchedIDs" : [
+
+          ],
+          "scheduledButNotGeneratedLive" : [
+
+          ],
+          "scheduledIDs" : [
+
+          ]
+        },
+        {
+          "contentIdenticalForMatchedIDs" : true,
+          "dayOffset" : 2,
+          "liveGeneratedIDs" : [
+
+          ],
+          "matchedIDs" : [
+
+          ],
+          "scheduledButNotGeneratedLive" : [
+
+          ],
+          "scheduledIDs" : [
+
+          ]
+        },
+        {
+          "contentIdenticalForMatchedIDs" : true,
+          "dayOffset" : 3,
+          "liveGeneratedIDs" : [
+            "onThisDay-2024-06-11",
+            "yearsAgo-5-2024-06-11",
+            "yearsAgo-3-2024-06-11"
+          ],
+          "matchedIDs" : [
+            "onThisDay-2024-06-11",
+            "yearsAgo-3-2024-06-11",
+            "yearsAgo-5-2024-06-11"
+          ],
+          "scheduledButNotGeneratedLive" : [
+
+          ],
+          "scheduledIDs" : [
+            "onThisDay-2024-06-11",
+            "yearsAgo-3-2024-06-11",
+            "yearsAgo-5-2024-06-11"
+          ]
+        },
+        {
+          "contentIdenticalForMatchedIDs" : true,
+          "dayOffset" : 4,
+          "liveGeneratedIDs" : [
+
+          ],
+          "matchedIDs" : [
+
+          ],
+          "scheduledButNotGeneratedLive" : [
+
+          ],
+          "scheduledIDs" : [
+
+          ]
+        },
+        {
+          "contentIdenticalForMatchedIDs" : true,
+          "dayOffset" : 5,
+          "liveGeneratedIDs" : [
+            "birthday-People/Ada Lovelace"
+          ],
+          "matchedIDs" : [
+            "birthday-People/Ada Lovelace"
+          ],
+          "scheduledButNotGeneratedLive" : [
+
+          ],
+          "scheduledIDs" : [
+            "birthday-People/Ada Lovelace"
+          ]
+        },
+        {
+          "contentIdenticalForMatchedIDs" : true,
+          "dayOffset" : 6,
+          "liveGeneratedIDs" : [
+            "onThisDay-2024-06-14",
+            "yearsAgo-1-2024-06-14"
+          ],
+          "matchedIDs" : [
+            "onThisDay-2024-06-14",
+            "yearsAgo-1-2024-06-14"
+          ],
+          "scheduledButNotGeneratedLive" : [
+
+          ],
+          "scheduledIDs" : [
+            "onThisDay-2024-06-14",
+            "yearsAgo-1-2024-06-14"
+          ]
+        },
+        {
+          "contentIdenticalForMatchedIDs" : true,
+          "dayOffset" : 7,
+          "liveGeneratedIDs" : [
+
+          ],
+          "matchedIDs" : [
+
+          ],
+          "scheduledButNotGeneratedLive" : [
+
+          ],
+          "scheduledIDs" : [
+
+          ]
+        }
+      ],
+      "personContactLinks" : [
+
+      ],
+      "photos" : [
+        {
+          "dateTaken" : "2019-06-11T12:00:00.000Z",
+          "filename" : "otd-2019-0",
+          "id" : "0EF0ED9A-7D9B-5170-A7DB-26E43C1F2D4C",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-0.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:02:00.000Z",
+          "filename" : "otd-2019-1",
+          "id" : "1B82AADD-E32C-5D27-95B6-12166351D1C9",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-1.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:04:00.000Z",
+          "filename" : "otd-2019-2",
+          "id" : "CCE6B15C-D0A1-5772-B686-0760BEA0180B",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-2.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:06:00.000Z",
+          "filename" : "otd-2019-3",
+          "id" : "8DFC5DC4-C214-5CA4-857E-FB1D130D8C6D",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-3.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:08:00.000Z",
+          "filename" : "otd-2019-4",
+          "id" : "1FB6BC4E-FAC4-50E6-89C8-5590E5E137BA",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-4.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:10:00.000Z",
+          "filename" : "otd-2019-5",
+          "id" : "CEAE3192-D363-55CE-A2B5-3D7A9D5E48D1",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-5.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:12:00.000Z",
+          "filename" : "otd-2019-6",
+          "id" : "A1A962DB-FE54-5719-B32A-80EA27B0C423",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-6.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:14:00.000Z",
+          "filename" : "otd-2019-7",
+          "id" : "335D383A-E81D-5C4D-8C30-1F9B37844461",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-7.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:16:00.000Z",
+          "filename" : "otd-2019-8",
+          "id" : "FD7A0931-B8CB-52F6-A36C-B8E1319DA19A",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-8.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:18:00.000Z",
+          "filename" : "otd-2019-9",
+          "id" : "007C2B49-21B2-5A0C-8B59-A168EFDFEC8C",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-9.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:20:00.000Z",
+          "filename" : "otd-2019-10",
+          "id" : "04521559-923C-5FD0-8E0E-EC19F8C93007",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-10.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:22:00.000Z",
+          "filename" : "otd-2019-11",
+          "id" : "9CECA1FB-18EF-5A92-A597-551B845874DE",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-11.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:00:00.000Z",
+          "filename" : "otd-2021-0",
+          "id" : "A3E14540-823C-51A4-BED8-2F5EB7DDCB9A",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-0.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:02:00.000Z",
+          "filename" : "otd-2021-1",
+          "id" : "A8ED4EDA-CC10-5D16-8A73-CDD2B4E7A4B6",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-1.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:04:00.000Z",
+          "filename" : "otd-2021-2",
+          "id" : "A528BFAF-2330-543F-9E46-F9AF869B5B13",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-2.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:06:00.000Z",
+          "filename" : "otd-2021-3",
+          "id" : "B80C6975-5A0B-5749-8E6A-428563112910",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-3.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:08:00.000Z",
+          "filename" : "otd-2021-4",
+          "id" : "E9446DE3-1CBF-523C-95F3-073146D0E879",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-4.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:10:00.000Z",
+          "filename" : "otd-2021-5",
+          "id" : "1A7C98FF-E550-5E43-A826-A358B07475C6",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-5.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:12:00.000Z",
+          "filename" : "otd-2021-6",
+          "id" : "A3DA749D-00CA-5F74-B225-9362B4D8EEC2",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-6.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:14:00.000Z",
+          "filename" : "otd-2021-7",
+          "id" : "810E803D-E597-5D6B-B0FD-A30F1989E7F7",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-7.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:16:00.000Z",
+          "filename" : "otd-2021-8",
+          "id" : "88EBC04D-1F7E-58EB-84D0-58087CD8C442",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-8.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:18:00.000Z",
+          "filename" : "otd-2021-9",
+          "id" : "C58B7FB9-EF1E-5ED0-BA8F-E6B9064C56B2",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-9.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:20:00.000Z",
+          "filename" : "otd-2021-10",
+          "id" : "BABAC020-8F1B-5C88-AFAA-2F76804A0BD7",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-10.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:00:00.000Z",
+          "filename" : "otd-2023-0",
+          "id" : "687A4026-8FDB-5F02-8DBD-4239DD010B0E",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-0.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:02:00.000Z",
+          "filename" : "otd-2023-1",
+          "id" : "8EE58F9C-4BF7-5CB1-8A24-F77C578E52D4",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-1.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:04:00.000Z",
+          "filename" : "otd-2023-2",
+          "id" : "26FE4AC9-6FE5-566F-9B6E-50DC93B5D617",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-2.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:06:00.000Z",
+          "filename" : "otd-2023-3",
+          "id" : "20E215AA-BC6B-5A53-89C8-2DC56139FE1E",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-3.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:08:00.000Z",
+          "filename" : "otd-2023-4",
+          "id" : "60EA956C-01E9-588D-95E6-F219F7101D98",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-4.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:10:00.000Z",
+          "filename" : "otd-2023-5",
+          "id" : "03B816F4-7543-5B4F-93A9-23569F41E5DA",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-5.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:12:00.000Z",
+          "filename" : "otd-2023-6",
+          "id" : "803CBBC6-FCA9-5A9F-B634-C43A645A49FB",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-6.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:14:00.000Z",
+          "filename" : "otd-2023-7",
+          "id" : "3543355F-D7D5-5632-9A45-6610D40EC2B2",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-7.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:16:00.000Z",
+          "filename" : "otd-2023-8",
+          "id" : "BFA11FE5-D435-55D3-87E3-651B82511D10",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-8.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:18:00.000Z",
+          "filename" : "otd-2023-9",
+          "id" : "7FC8D1B4-5D8A-5ACF-951D-A9AB477E3F2C",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-9.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:20:00.000Z",
+          "filename" : "otd-2023-10",
+          "id" : "4F79F5E3-B6D8-596C-A978-0D62652D1D89",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-10.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2022-01-04T10:00:00.000Z",
+          "filename" : "ada-0",
+          "id" : "7B3EE740-FFC5-5B24-A96D-F41398A31D20",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/ada-0.jpg",
+          "tags" : [
+            "People/Ada Lovelace"
+          ]
+        },
+        {
+          "dateTaken" : "2022-01-05T10:00:00.000Z",
+          "filename" : "ada-1",
+          "id" : "370F5870-0B04-562B-B3BC-033F9EE9C80E",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/ada-1.jpg",
+          "tags" : [
+            "People/Ada Lovelace"
+          ]
+        },
+        {
+          "dateTaken" : "2022-01-06T10:00:00.000Z",
+          "filename" : "ada-2",
+          "id" : "DD910092-9809-52C9-9B98-4E67CBE9813B",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/ada-2.jpg",
+          "tags" : [
+            "People/Ada Lovelace"
+          ]
+        },
+        {
+          "dateTaken" : "2022-01-07T10:00:00.000Z",
+          "filename" : "ada-3",
+          "id" : "70337C31-803C-55B6-AC38-5D8D6DD74D35",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/ada-3.jpg",
+          "tags" : [
+            "People/Ada Lovelace"
+          ]
+        }
+      ],
+      "scheduled" : [
+        {
+          "dayOffset" : 3,
+          "memory" : {
+            "coverPhotoID" : "9CECA1FB-18EF-5A92-A597-551B845874DE",
+            "dateRangeEnd" : "2021-06-11T15:20:00.000Z",
+            "dateRangeStart" : "2019-06-11T12:00:00.000Z",
+            "id" : "onThisDay-2024-06-11",
+            "photoCount" : 23,
+            "photoIDs" : [
+              "0EF0ED9A-7D9B-5170-A7DB-26E43C1F2D4C",
+              "1B82AADD-E32C-5D27-95B6-12166351D1C9",
+              "CCE6B15C-D0A1-5772-B686-0760BEA0180B",
+              "8DFC5DC4-C214-5CA4-857E-FB1D130D8C6D",
+              "1FB6BC4E-FAC4-50E6-89C8-5590E5E137BA",
+              "CEAE3192-D363-55CE-A2B5-3D7A9D5E48D1",
+              "A1A962DB-FE54-5719-B32A-80EA27B0C423",
+              "335D383A-E81D-5C4D-8C30-1F9B37844461",
+              "FD7A0931-B8CB-52F6-A36C-B8E1319DA19A",
+              "007C2B49-21B2-5A0C-8B59-A168EFDFEC8C",
+              "04521559-923C-5FD0-8E0E-EC19F8C93007",
+              "9CECA1FB-18EF-5A92-A597-551B845874DE",
+              "A3E14540-823C-51A4-BED8-2F5EB7DDCB9A",
+              "A8ED4EDA-CC10-5D16-8A73-CDD2B4E7A4B6",
+              "A528BFAF-2330-543F-9E46-F9AF869B5B13",
+              "B80C6975-5A0B-5749-8E6A-428563112910",
+              "E9446DE3-1CBF-523C-95F3-073146D0E879",
+              "1A7C98FF-E550-5E43-A826-A358B07475C6",
+              "A3DA749D-00CA-5F74-B225-9362B4D8EEC2",
+              "810E803D-E597-5D6B-B0FD-A30F1989E7F7",
+              "88EBC04D-1F7E-58EB-84D0-58087CD8C442",
+              "C58B7FB9-EF1E-5ED0-BA8F-E6B9064C56B2",
+              "BABAC020-8F1B-5C88-AFAA-2F76804A0BD7"
+            ],
+            "score" : 60,
+            "subtitle" : "Jun 11, 2019 – Jun 11, 2021 · 23 photos",
+            "title" : "On this day",
+            "type" : "onThisDay"
+          },
+          "validFrom" : "2024-06-11T00:00:00.000Z",
+          "validTo" : "2024-06-12T00:00:00.000Z"
+        },
+        {
+          "dayOffset" : 3,
+          "memory" : {
+            "coverPhotoID" : "1A7C98FF-E550-5E43-A826-A358B07475C6",
+            "dateRangeEnd" : "2021-06-11T15:20:00.000Z",
+            "dateRangeStart" : "2021-06-11T15:00:00.000Z",
+            "id" : "yearsAgo-3-2024-06-11",
+            "photoCount" : 11,
+            "photoIDs" : [
+              "A3E14540-823C-51A4-BED8-2F5EB7DDCB9A",
+              "A8ED4EDA-CC10-5D16-8A73-CDD2B4E7A4B6",
+              "A528BFAF-2330-543F-9E46-F9AF869B5B13",
+              "B80C6975-5A0B-5749-8E6A-428563112910",
+              "E9446DE3-1CBF-523C-95F3-073146D0E879",
+              "1A7C98FF-E550-5E43-A826-A358B07475C6",
+              "A3DA749D-00CA-5F74-B225-9362B4D8EEC2",
+              "810E803D-E597-5D6B-B0FD-A30F1989E7F7",
+              "88EBC04D-1F7E-58EB-84D0-58087CD8C442",
+              "C58B7FB9-EF1E-5ED0-BA8F-E6B9064C56B2",
+              "BABAC020-8F1B-5C88-AFAA-2F76804A0BD7"
+            ],
+            "score" : 35,
+            "subtitle" : "Jun 11, 2021 · 11 photos",
+            "title" : "On this day in 2021",
+            "type" : "yearsAgo",
+            "yearsAgo" : 3
+          },
+          "validFrom" : "2024-06-11T00:00:00.000Z",
+          "validTo" : "2024-06-12T00:00:00.000Z"
+        },
+        {
+          "dayOffset" : 3,
+          "memory" : {
+            "coverPhotoID" : "A1A962DB-FE54-5719-B32A-80EA27B0C423",
+            "dateRangeEnd" : "2019-06-11T12:22:00.000Z",
+            "dateRangeStart" : "2019-06-11T12:00:00.000Z",
+            "id" : "yearsAgo-5-2024-06-11",
+            "photoCount" : 12,
+            "photoIDs" : [
+              "0EF0ED9A-7D9B-5170-A7DB-26E43C1F2D4C",
+              "1B82AADD-E32C-5D27-95B6-12166351D1C9",
+              "CCE6B15C-D0A1-5772-B686-0760BEA0180B",
+              "8DFC5DC4-C214-5CA4-857E-FB1D130D8C6D",
+              "1FB6BC4E-FAC4-50E6-89C8-5590E5E137BA",
+              "CEAE3192-D363-55CE-A2B5-3D7A9D5E48D1",
+              "A1A962DB-FE54-5719-B32A-80EA27B0C423",
+              "335D383A-E81D-5C4D-8C30-1F9B37844461",
+              "FD7A0931-B8CB-52F6-A36C-B8E1319DA19A",
+              "007C2B49-21B2-5A0C-8B59-A168EFDFEC8C",
+              "04521559-923C-5FD0-8E0E-EC19F8C93007",
+              "9CECA1FB-18EF-5A92-A597-551B845874DE"
+            ],
+            "score" : 40,
+            "subtitle" : "Jun 11, 2019 · 12 photos",
+            "title" : "On this day in 2019",
+            "type" : "yearsAgo",
+            "yearsAgo" : 5
+          },
+          "validFrom" : "2024-06-11T00:00:00.000Z",
+          "validTo" : "2024-06-12T00:00:00.000Z"
+        },
+        {
+          "dayOffset" : 5,
+          "memory" : {
+            "coverPhotoID" : "70337C31-803C-55B6-AC38-5D8D6DD74D35",
+            "dateRangeEnd" : "2022-01-07T10:00:00.000Z",
+            "dateRangeStart" : "2022-01-04T10:00:00.000Z",
+            "id" : "birthday-People/Ada Lovelace",
+            "personName" : "Ada Lovelace",
+            "photoCount" : 4,
+            "photoIDs" : [
+              "7B3EE740-FFC5-5B24-A96D-F41398A31D20",
+              "370F5870-0B04-562B-B3BC-033F9EE9C80E",
+              "DD910092-9809-52C9-9B98-4E67CBE9813B",
+              "70337C31-803C-55B6-AC38-5D8D6DD74D35"
+            ],
+            "score" : 100,
+            "subtitle" : "Jan 4, 2022 – Jan 7, 2022 · 4 photos",
+            "title" : "Happy birthday, Ada Lovelace",
+            "type" : "birthday"
+          },
+          "validFrom" : "2024-06-13T00:00:00.000Z",
+          "validTo" : "2024-06-14T00:00:00.000Z"
+        },
+        {
+          "dayOffset" : 6,
+          "memory" : {
+            "coverPhotoID" : "03B816F4-7543-5B4F-93A9-23569F41E5DA",
+            "dateRangeEnd" : "2023-06-14T09:20:00.000Z",
+            "dateRangeStart" : "2023-06-14T09:00:00.000Z",
+            "id" : "onThisDay-2024-06-14",
+            "photoCount" : 11,
+            "photoIDs" : [
+              "687A4026-8FDB-5F02-8DBD-4239DD010B0E",
+              "8EE58F9C-4BF7-5CB1-8A24-F77C578E52D4",
+              "26FE4AC9-6FE5-566F-9B6E-50DC93B5D617",
+              "20E215AA-BC6B-5A53-89C8-2DC56139FE1E",
+              "60EA956C-01E9-588D-95E6-F219F7101D98",
+              "03B816F4-7543-5B4F-93A9-23569F41E5DA",
+              "803CBBC6-FCA9-5A9F-B634-C43A645A49FB",
+              "3543355F-D7D5-5632-9A45-6610D40EC2B2",
+              "BFA11FE5-D435-55D3-87E3-651B82511D10",
+              "7FC8D1B4-5D8A-5ACF-951D-A9AB477E3F2C",
+              "4F79F5E3-B6D8-596C-A978-0D62652D1D89"
+            ],
+            "score" : 55,
+            "subtitle" : "Jun 14, 2023 · 11 photos",
+            "title" : "On this day",
+            "type" : "onThisDay"
+          },
+          "validFrom" : "2024-06-14T00:00:00.000Z",
+          "validTo" : "2024-06-15T00:00:00.000Z"
+        },
+        {
+          "dayOffset" : 6,
+          "memory" : {
+            "coverPhotoID" : "03B816F4-7543-5B4F-93A9-23569F41E5DA",
+            "dateRangeEnd" : "2023-06-14T09:20:00.000Z",
+            "dateRangeStart" : "2023-06-14T09:00:00.000Z",
+            "id" : "yearsAgo-1-2024-06-14",
+            "photoCount" : 11,
+            "photoIDs" : [
+              "687A4026-8FDB-5F02-8DBD-4239DD010B0E",
+              "8EE58F9C-4BF7-5CB1-8A24-F77C578E52D4",
+              "26FE4AC9-6FE5-566F-9B6E-50DC93B5D617",
+              "20E215AA-BC6B-5A53-89C8-2DC56139FE1E",
+              "60EA956C-01E9-588D-95E6-F219F7101D98",
+              "03B816F4-7543-5B4F-93A9-23569F41E5DA",
+              "803CBBC6-FCA9-5A9F-B634-C43A645A49FB",
+              "3543355F-D7D5-5632-9A45-6610D40EC2B2",
+              "BFA11FE5-D435-55D3-87E3-651B82511D10",
+              "7FC8D1B4-5D8A-5ACF-951D-A9AB477E3F2C",
+              "4F79F5E3-B6D8-596C-A978-0D62652D1D89"
+            ],
+            "score" : 35,
+            "subtitle" : "Jun 14, 2023 · 11 photos",
+            "title" : "On this day in 2023",
+            "type" : "yearsAgo",
+            "yearsAgo" : 1
+          },
+          "validFrom" : "2024-06-14T00:00:00.000Z",
+          "validTo" : "2024-06-15T00:00:00.000Z"
+        }
+      ],
+      "timeZone" : "UTC",
+      "today" : "2024-06-08T12:00:00.000Z"
+    },
+    {
+      "birthdaysEnabled" : false,
+      "contacts" : [
+        {
+          "birthdayDay" : 13,
+          "birthdayMonth" : 6,
+          "familyName" : "Lovelace",
+          "givenName" : "Ada",
+          "id" : "c-ada"
+        }
+      ],
+      "horizonDays" : 7,
+      "name" : "birthdays-toggle-off",
+      "notes" : [
+        "With the toggle off the birthday branch is skipped entirely, so 06-13 looks exactly like the other six days."
+      ],
+      "parity" : [
+        {
+          "contentIdenticalForMatchedIDs" : true,
+          "dayOffset" : 1,
+          "liveGeneratedIDs" : [
+
+          ],
+          "matchedIDs" : [
+
+          ],
+          "scheduledButNotGeneratedLive" : [
+
+          ],
+          "scheduledIDs" : [
+
+          ]
+        },
+        {
+          "contentIdenticalForMatchedIDs" : true,
+          "dayOffset" : 2,
+          "liveGeneratedIDs" : [
+
+          ],
+          "matchedIDs" : [
+
+          ],
+          "scheduledButNotGeneratedLive" : [
+
+          ],
+          "scheduledIDs" : [
+
+          ]
+        },
+        {
+          "contentIdenticalForMatchedIDs" : true,
+          "dayOffset" : 3,
+          "liveGeneratedIDs" : [
+            "onThisDay-2024-06-11",
+            "yearsAgo-5-2024-06-11",
+            "yearsAgo-3-2024-06-11"
+          ],
+          "matchedIDs" : [
+            "onThisDay-2024-06-11",
+            "yearsAgo-3-2024-06-11",
+            "yearsAgo-5-2024-06-11"
+          ],
+          "scheduledButNotGeneratedLive" : [
+
+          ],
+          "scheduledIDs" : [
+            "onThisDay-2024-06-11",
+            "yearsAgo-3-2024-06-11",
+            "yearsAgo-5-2024-06-11"
+          ]
+        },
+        {
+          "contentIdenticalForMatchedIDs" : true,
+          "dayOffset" : 4,
+          "liveGeneratedIDs" : [
+
+          ],
+          "matchedIDs" : [
+
+          ],
+          "scheduledButNotGeneratedLive" : [
+
+          ],
+          "scheduledIDs" : [
+
+          ]
+        },
+        {
+          "contentIdenticalForMatchedIDs" : true,
+          "dayOffset" : 5,
+          "liveGeneratedIDs" : [
+
+          ],
+          "matchedIDs" : [
+
+          ],
+          "scheduledButNotGeneratedLive" : [
+
+          ],
+          "scheduledIDs" : [
+
+          ]
+        },
+        {
+          "contentIdenticalForMatchedIDs" : true,
+          "dayOffset" : 6,
+          "liveGeneratedIDs" : [
+            "onThisDay-2024-06-14",
+            "yearsAgo-1-2024-06-14"
+          ],
+          "matchedIDs" : [
+            "onThisDay-2024-06-14",
+            "yearsAgo-1-2024-06-14"
+          ],
+          "scheduledButNotGeneratedLive" : [
+
+          ],
+          "scheduledIDs" : [
+            "onThisDay-2024-06-14",
+            "yearsAgo-1-2024-06-14"
+          ]
+        },
+        {
+          "contentIdenticalForMatchedIDs" : true,
+          "dayOffset" : 7,
+          "liveGeneratedIDs" : [
+
+          ],
+          "matchedIDs" : [
+
+          ],
+          "scheduledButNotGeneratedLive" : [
+
+          ],
+          "scheduledIDs" : [
+
+          ]
+        }
+      ],
+      "personContactLinks" : [
+
+      ],
+      "photos" : [
+        {
+          "dateTaken" : "2019-06-11T12:00:00.000Z",
+          "filename" : "otd-2019-0",
+          "id" : "0EF0ED9A-7D9B-5170-A7DB-26E43C1F2D4C",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-0.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:02:00.000Z",
+          "filename" : "otd-2019-1",
+          "id" : "1B82AADD-E32C-5D27-95B6-12166351D1C9",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-1.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:04:00.000Z",
+          "filename" : "otd-2019-2",
+          "id" : "CCE6B15C-D0A1-5772-B686-0760BEA0180B",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-2.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:06:00.000Z",
+          "filename" : "otd-2019-3",
+          "id" : "8DFC5DC4-C214-5CA4-857E-FB1D130D8C6D",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-3.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:08:00.000Z",
+          "filename" : "otd-2019-4",
+          "id" : "1FB6BC4E-FAC4-50E6-89C8-5590E5E137BA",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-4.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:10:00.000Z",
+          "filename" : "otd-2019-5",
+          "id" : "CEAE3192-D363-55CE-A2B5-3D7A9D5E48D1",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-5.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:12:00.000Z",
+          "filename" : "otd-2019-6",
+          "id" : "A1A962DB-FE54-5719-B32A-80EA27B0C423",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-6.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:14:00.000Z",
+          "filename" : "otd-2019-7",
+          "id" : "335D383A-E81D-5C4D-8C30-1F9B37844461",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-7.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:16:00.000Z",
+          "filename" : "otd-2019-8",
+          "id" : "FD7A0931-B8CB-52F6-A36C-B8E1319DA19A",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-8.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:18:00.000Z",
+          "filename" : "otd-2019-9",
+          "id" : "007C2B49-21B2-5A0C-8B59-A168EFDFEC8C",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-9.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:20:00.000Z",
+          "filename" : "otd-2019-10",
+          "id" : "04521559-923C-5FD0-8E0E-EC19F8C93007",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-10.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:22:00.000Z",
+          "filename" : "otd-2019-11",
+          "id" : "9CECA1FB-18EF-5A92-A597-551B845874DE",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-11.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:00:00.000Z",
+          "filename" : "otd-2021-0",
+          "id" : "A3E14540-823C-51A4-BED8-2F5EB7DDCB9A",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-0.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:02:00.000Z",
+          "filename" : "otd-2021-1",
+          "id" : "A8ED4EDA-CC10-5D16-8A73-CDD2B4E7A4B6",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-1.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:04:00.000Z",
+          "filename" : "otd-2021-2",
+          "id" : "A528BFAF-2330-543F-9E46-F9AF869B5B13",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-2.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:06:00.000Z",
+          "filename" : "otd-2021-3",
+          "id" : "B80C6975-5A0B-5749-8E6A-428563112910",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-3.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:08:00.000Z",
+          "filename" : "otd-2021-4",
+          "id" : "E9446DE3-1CBF-523C-95F3-073146D0E879",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-4.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:10:00.000Z",
+          "filename" : "otd-2021-5",
+          "id" : "1A7C98FF-E550-5E43-A826-A358B07475C6",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-5.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:12:00.000Z",
+          "filename" : "otd-2021-6",
+          "id" : "A3DA749D-00CA-5F74-B225-9362B4D8EEC2",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-6.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:14:00.000Z",
+          "filename" : "otd-2021-7",
+          "id" : "810E803D-E597-5D6B-B0FD-A30F1989E7F7",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-7.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:16:00.000Z",
+          "filename" : "otd-2021-8",
+          "id" : "88EBC04D-1F7E-58EB-84D0-58087CD8C442",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-8.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:18:00.000Z",
+          "filename" : "otd-2021-9",
+          "id" : "C58B7FB9-EF1E-5ED0-BA8F-E6B9064C56B2",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-9.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:20:00.000Z",
+          "filename" : "otd-2021-10",
+          "id" : "BABAC020-8F1B-5C88-AFAA-2F76804A0BD7",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-10.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:00:00.000Z",
+          "filename" : "otd-2023-0",
+          "id" : "687A4026-8FDB-5F02-8DBD-4239DD010B0E",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-0.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:02:00.000Z",
+          "filename" : "otd-2023-1",
+          "id" : "8EE58F9C-4BF7-5CB1-8A24-F77C578E52D4",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-1.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:04:00.000Z",
+          "filename" : "otd-2023-2",
+          "id" : "26FE4AC9-6FE5-566F-9B6E-50DC93B5D617",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-2.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:06:00.000Z",
+          "filename" : "otd-2023-3",
+          "id" : "20E215AA-BC6B-5A53-89C8-2DC56139FE1E",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-3.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:08:00.000Z",
+          "filename" : "otd-2023-4",
+          "id" : "60EA956C-01E9-588D-95E6-F219F7101D98",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-4.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:10:00.000Z",
+          "filename" : "otd-2023-5",
+          "id" : "03B816F4-7543-5B4F-93A9-23569F41E5DA",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-5.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:12:00.000Z",
+          "filename" : "otd-2023-6",
+          "id" : "803CBBC6-FCA9-5A9F-B634-C43A645A49FB",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-6.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:14:00.000Z",
+          "filename" : "otd-2023-7",
+          "id" : "3543355F-D7D5-5632-9A45-6610D40EC2B2",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-7.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:16:00.000Z",
+          "filename" : "otd-2023-8",
+          "id" : "BFA11FE5-D435-55D3-87E3-651B82511D10",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-8.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:18:00.000Z",
+          "filename" : "otd-2023-9",
+          "id" : "7FC8D1B4-5D8A-5ACF-951D-A9AB477E3F2C",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-9.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:20:00.000Z",
+          "filename" : "otd-2023-10",
+          "id" : "4F79F5E3-B6D8-596C-A978-0D62652D1D89",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-10.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2022-01-04T10:00:00.000Z",
+          "filename" : "ada-0",
+          "id" : "7B3EE740-FFC5-5B24-A96D-F41398A31D20",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/ada-0.jpg",
+          "tags" : [
+            "People/Ada Lovelace"
+          ]
+        },
+        {
+          "dateTaken" : "2022-01-05T10:00:00.000Z",
+          "filename" : "ada-1",
+          "id" : "370F5870-0B04-562B-B3BC-033F9EE9C80E",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/ada-1.jpg",
+          "tags" : [
+            "People/Ada Lovelace"
+          ]
+        },
+        {
+          "dateTaken" : "2022-01-06T10:00:00.000Z",
+          "filename" : "ada-2",
+          "id" : "DD910092-9809-52C9-9B98-4E67CBE9813B",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/ada-2.jpg",
+          "tags" : [
+            "People/Ada Lovelace"
+          ]
+        },
+        {
+          "dateTaken" : "2022-01-07T10:00:00.000Z",
+          "filename" : "ada-3",
+          "id" : "70337C31-803C-55B6-AC38-5D8D6DD74D35",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/ada-3.jpg",
+          "tags" : [
+            "People/Ada Lovelace"
+          ]
+        }
+      ],
+      "scheduled" : [
+        {
+          "dayOffset" : 3,
+          "memory" : {
+            "coverPhotoID" : "9CECA1FB-18EF-5A92-A597-551B845874DE",
+            "dateRangeEnd" : "2021-06-11T15:20:00.000Z",
+            "dateRangeStart" : "2019-06-11T12:00:00.000Z",
+            "id" : "onThisDay-2024-06-11",
+            "photoCount" : 23,
+            "photoIDs" : [
+              "0EF0ED9A-7D9B-5170-A7DB-26E43C1F2D4C",
+              "1B82AADD-E32C-5D27-95B6-12166351D1C9",
+              "CCE6B15C-D0A1-5772-B686-0760BEA0180B",
+              "8DFC5DC4-C214-5CA4-857E-FB1D130D8C6D",
+              "1FB6BC4E-FAC4-50E6-89C8-5590E5E137BA",
+              "CEAE3192-D363-55CE-A2B5-3D7A9D5E48D1",
+              "A1A962DB-FE54-5719-B32A-80EA27B0C423",
+              "335D383A-E81D-5C4D-8C30-1F9B37844461",
+              "FD7A0931-B8CB-52F6-A36C-B8E1319DA19A",
+              "007C2B49-21B2-5A0C-8B59-A168EFDFEC8C",
+              "04521559-923C-5FD0-8E0E-EC19F8C93007",
+              "9CECA1FB-18EF-5A92-A597-551B845874DE",
+              "A3E14540-823C-51A4-BED8-2F5EB7DDCB9A",
+              "A8ED4EDA-CC10-5D16-8A73-CDD2B4E7A4B6",
+              "A528BFAF-2330-543F-9E46-F9AF869B5B13",
+              "B80C6975-5A0B-5749-8E6A-428563112910",
+              "E9446DE3-1CBF-523C-95F3-073146D0E879",
+              "1A7C98FF-E550-5E43-A826-A358B07475C6",
+              "A3DA749D-00CA-5F74-B225-9362B4D8EEC2",
+              "810E803D-E597-5D6B-B0FD-A30F1989E7F7",
+              "88EBC04D-1F7E-58EB-84D0-58087CD8C442",
+              "C58B7FB9-EF1E-5ED0-BA8F-E6B9064C56B2",
+              "BABAC020-8F1B-5C88-AFAA-2F76804A0BD7"
+            ],
+            "score" : 60,
+            "subtitle" : "Jun 11, 2019 – Jun 11, 2021 · 23 photos",
+            "title" : "On this day",
+            "type" : "onThisDay"
+          },
+          "validFrom" : "2024-06-11T00:00:00.000Z",
+          "validTo" : "2024-06-12T00:00:00.000Z"
+        },
+        {
+          "dayOffset" : 3,
+          "memory" : {
+            "coverPhotoID" : "1A7C98FF-E550-5E43-A826-A358B07475C6",
+            "dateRangeEnd" : "2021-06-11T15:20:00.000Z",
+            "dateRangeStart" : "2021-06-11T15:00:00.000Z",
+            "id" : "yearsAgo-3-2024-06-11",
+            "photoCount" : 11,
+            "photoIDs" : [
+              "A3E14540-823C-51A4-BED8-2F5EB7DDCB9A",
+              "A8ED4EDA-CC10-5D16-8A73-CDD2B4E7A4B6",
+              "A528BFAF-2330-543F-9E46-F9AF869B5B13",
+              "B80C6975-5A0B-5749-8E6A-428563112910",
+              "E9446DE3-1CBF-523C-95F3-073146D0E879",
+              "1A7C98FF-E550-5E43-A826-A358B07475C6",
+              "A3DA749D-00CA-5F74-B225-9362B4D8EEC2",
+              "810E803D-E597-5D6B-B0FD-A30F1989E7F7",
+              "88EBC04D-1F7E-58EB-84D0-58087CD8C442",
+              "C58B7FB9-EF1E-5ED0-BA8F-E6B9064C56B2",
+              "BABAC020-8F1B-5C88-AFAA-2F76804A0BD7"
+            ],
+            "score" : 35,
+            "subtitle" : "Jun 11, 2021 · 11 photos",
+            "title" : "On this day in 2021",
+            "type" : "yearsAgo",
+            "yearsAgo" : 3
+          },
+          "validFrom" : "2024-06-11T00:00:00.000Z",
+          "validTo" : "2024-06-12T00:00:00.000Z"
+        },
+        {
+          "dayOffset" : 3,
+          "memory" : {
+            "coverPhotoID" : "A1A962DB-FE54-5719-B32A-80EA27B0C423",
+            "dateRangeEnd" : "2019-06-11T12:22:00.000Z",
+            "dateRangeStart" : "2019-06-11T12:00:00.000Z",
+            "id" : "yearsAgo-5-2024-06-11",
+            "photoCount" : 12,
+            "photoIDs" : [
+              "0EF0ED9A-7D9B-5170-A7DB-26E43C1F2D4C",
+              "1B82AADD-E32C-5D27-95B6-12166351D1C9",
+              "CCE6B15C-D0A1-5772-B686-0760BEA0180B",
+              "8DFC5DC4-C214-5CA4-857E-FB1D130D8C6D",
+              "1FB6BC4E-FAC4-50E6-89C8-5590E5E137BA",
+              "CEAE3192-D363-55CE-A2B5-3D7A9D5E48D1",
+              "A1A962DB-FE54-5719-B32A-80EA27B0C423",
+              "335D383A-E81D-5C4D-8C30-1F9B37844461",
+              "FD7A0931-B8CB-52F6-A36C-B8E1319DA19A",
+              "007C2B49-21B2-5A0C-8B59-A168EFDFEC8C",
+              "04521559-923C-5FD0-8E0E-EC19F8C93007",
+              "9CECA1FB-18EF-5A92-A597-551B845874DE"
+            ],
+            "score" : 40,
+            "subtitle" : "Jun 11, 2019 · 12 photos",
+            "title" : "On this day in 2019",
+            "type" : "yearsAgo",
+            "yearsAgo" : 5
+          },
+          "validFrom" : "2024-06-11T00:00:00.000Z",
+          "validTo" : "2024-06-12T00:00:00.000Z"
+        },
+        {
+          "dayOffset" : 6,
+          "memory" : {
+            "coverPhotoID" : "03B816F4-7543-5B4F-93A9-23569F41E5DA",
+            "dateRangeEnd" : "2023-06-14T09:20:00.000Z",
+            "dateRangeStart" : "2023-06-14T09:00:00.000Z",
+            "id" : "onThisDay-2024-06-14",
+            "photoCount" : 11,
+            "photoIDs" : [
+              "687A4026-8FDB-5F02-8DBD-4239DD010B0E",
+              "8EE58F9C-4BF7-5CB1-8A24-F77C578E52D4",
+              "26FE4AC9-6FE5-566F-9B6E-50DC93B5D617",
+              "20E215AA-BC6B-5A53-89C8-2DC56139FE1E",
+              "60EA956C-01E9-588D-95E6-F219F7101D98",
+              "03B816F4-7543-5B4F-93A9-23569F41E5DA",
+              "803CBBC6-FCA9-5A9F-B634-C43A645A49FB",
+              "3543355F-D7D5-5632-9A45-6610D40EC2B2",
+              "BFA11FE5-D435-55D3-87E3-651B82511D10",
+              "7FC8D1B4-5D8A-5ACF-951D-A9AB477E3F2C",
+              "4F79F5E3-B6D8-596C-A978-0D62652D1D89"
+            ],
+            "score" : 55,
+            "subtitle" : "Jun 14, 2023 · 11 photos",
+            "title" : "On this day",
+            "type" : "onThisDay"
+          },
+          "validFrom" : "2024-06-14T00:00:00.000Z",
+          "validTo" : "2024-06-15T00:00:00.000Z"
+        },
+        {
+          "dayOffset" : 6,
+          "memory" : {
+            "coverPhotoID" : "03B816F4-7543-5B4F-93A9-23569F41E5DA",
+            "dateRangeEnd" : "2023-06-14T09:20:00.000Z",
+            "dateRangeStart" : "2023-06-14T09:00:00.000Z",
+            "id" : "yearsAgo-1-2024-06-14",
+            "photoCount" : 11,
+            "photoIDs" : [
+              "687A4026-8FDB-5F02-8DBD-4239DD010B0E",
+              "8EE58F9C-4BF7-5CB1-8A24-F77C578E52D4",
+              "26FE4AC9-6FE5-566F-9B6E-50DC93B5D617",
+              "20E215AA-BC6B-5A53-89C8-2DC56139FE1E",
+              "60EA956C-01E9-588D-95E6-F219F7101D98",
+              "03B816F4-7543-5B4F-93A9-23569F41E5DA",
+              "803CBBC6-FCA9-5A9F-B634-C43A645A49FB",
+              "3543355F-D7D5-5632-9A45-6610D40EC2B2",
+              "BFA11FE5-D435-55D3-87E3-651B82511D10",
+              "7FC8D1B4-5D8A-5ACF-951D-A9AB477E3F2C",
+              "4F79F5E3-B6D8-596C-A978-0D62652D1D89"
+            ],
+            "score" : 35,
+            "subtitle" : "Jun 14, 2023 · 11 photos",
+            "title" : "On this day in 2023",
+            "type" : "yearsAgo",
+            "yearsAgo" : 1
+          },
+          "validFrom" : "2024-06-14T00:00:00.000Z",
+          "validTo" : "2024-06-15T00:00:00.000Z"
+        }
+      ],
+      "timeZone" : "UTC",
+      "today" : "2024-06-08T12:00:00.000Z"
+    },
+    {
+      "birthdaysEnabled" : true,
+      "contacts" : [
+        {
+          "birthdayDay" : 13,
+          "birthdayMonth" : 6,
+          "familyName" : "Lovelace",
+          "givenName" : "Ada",
+          "id" : "c-ada"
+        }
+      ],
+      "horizonDays" : 7,
+      "name" : "asia-tokyo-horizon",
+      "notes" : [
+        "Non-UTC horizon. `computeScheduledMemories` walks days from `Calendar.current.startOfDay(for: now)` — local midnight — while the memory ID is rendered by an ISO8601DateFormatter pinned to GMT. In a zone ahead of GMT the local midnight belongs to the PREVIOUS GMT day, so the scheduled id can name a different date than the one the live run on that day produces.",
+        "Whatever `parity` records here is the shipped behaviour, not an aspiration. Read it before changing anything about the id format."
+      ],
+      "parity" : [
+        {
+          "contentIdenticalForMatchedIDs" : true,
+          "dayOffset" : 1,
+          "liveGeneratedIDs" : [
+
+          ],
+          "matchedIDs" : [
+
+          ],
+          "scheduledButNotGeneratedLive" : [
+
+          ],
+          "scheduledIDs" : [
+
+          ]
+        },
+        {
+          "contentIdenticalForMatchedIDs" : true,
+          "dayOffset" : 2,
+          "liveGeneratedIDs" : [
+
+          ],
+          "matchedIDs" : [
+
+          ],
+          "scheduledButNotGeneratedLive" : [
+
+          ],
+          "scheduledIDs" : [
+
+          ]
+        },
+        {
+          "contentIdenticalForMatchedIDs" : true,
+          "dayOffset" : 3,
+          "liveGeneratedIDs" : [
+            "onThisDay-2024-06-11",
+            "yearsAgo-5-2024-06-11"
+          ],
+          "matchedIDs" : [
+
+          ],
+          "scheduledButNotGeneratedLive" : [
+            "onThisDay-2024-06-10",
+            "yearsAgo-5-2024-06-10"
+          ],
+          "scheduledIDs" : [
+            "onThisDay-2024-06-10",
+            "yearsAgo-5-2024-06-10"
+          ]
+        },
+        {
+          "contentIdenticalForMatchedIDs" : true,
+          "dayOffset" : 4,
+          "liveGeneratedIDs" : [
+            "onThisDay-2024-06-12",
+            "yearsAgo-3-2024-06-12"
+          ],
+          "matchedIDs" : [
+
+          ],
+          "scheduledButNotGeneratedLive" : [
+            "onThisDay-2024-06-11",
+            "yearsAgo-3-2024-06-11"
+          ],
+          "scheduledIDs" : [
+            "onThisDay-2024-06-11",
+            "yearsAgo-3-2024-06-11"
+          ]
+        },
+        {
+          "contentIdenticalForMatchedIDs" : true,
+          "dayOffset" : 5,
+          "liveGeneratedIDs" : [
+            "birthday-People/Ada Lovelace"
+          ],
+          "matchedIDs" : [
+            "birthday-People/Ada Lovelace"
+          ],
+          "scheduledButNotGeneratedLive" : [
+
+          ],
+          "scheduledIDs" : [
+            "birthday-People/Ada Lovelace"
+          ]
+        },
+        {
+          "contentIdenticalForMatchedIDs" : true,
+          "dayOffset" : 6,
+          "liveGeneratedIDs" : [
+            "onThisDay-2024-06-14",
+            "yearsAgo-1-2024-06-14"
+          ],
+          "matchedIDs" : [
+
+          ],
+          "scheduledButNotGeneratedLive" : [
+            "onThisDay-2024-06-13",
+            "yearsAgo-1-2024-06-13"
+          ],
+          "scheduledIDs" : [
+            "onThisDay-2024-06-13",
+            "yearsAgo-1-2024-06-13"
+          ]
+        },
+        {
+          "contentIdenticalForMatchedIDs" : true,
+          "dayOffset" : 7,
+          "liveGeneratedIDs" : [
+
+          ],
+          "matchedIDs" : [
+
+          ],
+          "scheduledButNotGeneratedLive" : [
+
+          ],
+          "scheduledIDs" : [
+
+          ]
+        }
+      ],
+      "personContactLinks" : [
+
+      ],
+      "photos" : [
+        {
+          "dateTaken" : "2019-06-11T12:00:00.000Z",
+          "filename" : "otd-2019-0",
+          "id" : "0EF0ED9A-7D9B-5170-A7DB-26E43C1F2D4C",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-0.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:02:00.000Z",
+          "filename" : "otd-2019-1",
+          "id" : "1B82AADD-E32C-5D27-95B6-12166351D1C9",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-1.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:04:00.000Z",
+          "filename" : "otd-2019-2",
+          "id" : "CCE6B15C-D0A1-5772-B686-0760BEA0180B",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-2.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:06:00.000Z",
+          "filename" : "otd-2019-3",
+          "id" : "8DFC5DC4-C214-5CA4-857E-FB1D130D8C6D",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-3.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:08:00.000Z",
+          "filename" : "otd-2019-4",
+          "id" : "1FB6BC4E-FAC4-50E6-89C8-5590E5E137BA",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-4.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:10:00.000Z",
+          "filename" : "otd-2019-5",
+          "id" : "CEAE3192-D363-55CE-A2B5-3D7A9D5E48D1",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-5.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:12:00.000Z",
+          "filename" : "otd-2019-6",
+          "id" : "A1A962DB-FE54-5719-B32A-80EA27B0C423",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-6.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:14:00.000Z",
+          "filename" : "otd-2019-7",
+          "id" : "335D383A-E81D-5C4D-8C30-1F9B37844461",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-7.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:16:00.000Z",
+          "filename" : "otd-2019-8",
+          "id" : "FD7A0931-B8CB-52F6-A36C-B8E1319DA19A",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-8.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:18:00.000Z",
+          "filename" : "otd-2019-9",
+          "id" : "007C2B49-21B2-5A0C-8B59-A168EFDFEC8C",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-9.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:20:00.000Z",
+          "filename" : "otd-2019-10",
+          "id" : "04521559-923C-5FD0-8E0E-EC19F8C93007",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-10.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2019-06-11T12:22:00.000Z",
+          "filename" : "otd-2019-11",
+          "id" : "9CECA1FB-18EF-5A92-A597-551B845874DE",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2019-11.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:00:00.000Z",
+          "filename" : "otd-2021-0",
+          "id" : "A3E14540-823C-51A4-BED8-2F5EB7DDCB9A",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-0.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:02:00.000Z",
+          "filename" : "otd-2021-1",
+          "id" : "A8ED4EDA-CC10-5D16-8A73-CDD2B4E7A4B6",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-1.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:04:00.000Z",
+          "filename" : "otd-2021-2",
+          "id" : "A528BFAF-2330-543F-9E46-F9AF869B5B13",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-2.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:06:00.000Z",
+          "filename" : "otd-2021-3",
+          "id" : "B80C6975-5A0B-5749-8E6A-428563112910",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-3.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:08:00.000Z",
+          "filename" : "otd-2021-4",
+          "id" : "E9446DE3-1CBF-523C-95F3-073146D0E879",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-4.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:10:00.000Z",
+          "filename" : "otd-2021-5",
+          "id" : "1A7C98FF-E550-5E43-A826-A358B07475C6",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-5.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:12:00.000Z",
+          "filename" : "otd-2021-6",
+          "id" : "A3DA749D-00CA-5F74-B225-9362B4D8EEC2",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-6.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:14:00.000Z",
+          "filename" : "otd-2021-7",
+          "id" : "810E803D-E597-5D6B-B0FD-A30F1989E7F7",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-7.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:16:00.000Z",
+          "filename" : "otd-2021-8",
+          "id" : "88EBC04D-1F7E-58EB-84D0-58087CD8C442",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-8.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:18:00.000Z",
+          "filename" : "otd-2021-9",
+          "id" : "C58B7FB9-EF1E-5ED0-BA8F-E6B9064C56B2",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-9.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2021-06-11T15:20:00.000Z",
+          "filename" : "otd-2021-10",
+          "id" : "BABAC020-8F1B-5C88-AFAA-2F76804A0BD7",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2021-10.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:00:00.000Z",
+          "filename" : "otd-2023-0",
+          "id" : "687A4026-8FDB-5F02-8DBD-4239DD010B0E",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-0.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:02:00.000Z",
+          "filename" : "otd-2023-1",
+          "id" : "8EE58F9C-4BF7-5CB1-8A24-F77C578E52D4",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-1.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:04:00.000Z",
+          "filename" : "otd-2023-2",
+          "id" : "26FE4AC9-6FE5-566F-9B6E-50DC93B5D617",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-2.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:06:00.000Z",
+          "filename" : "otd-2023-3",
+          "id" : "20E215AA-BC6B-5A53-89C8-2DC56139FE1E",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-3.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:08:00.000Z",
+          "filename" : "otd-2023-4",
+          "id" : "60EA956C-01E9-588D-95E6-F219F7101D98",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-4.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:10:00.000Z",
+          "filename" : "otd-2023-5",
+          "id" : "03B816F4-7543-5B4F-93A9-23569F41E5DA",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-5.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:12:00.000Z",
+          "filename" : "otd-2023-6",
+          "id" : "803CBBC6-FCA9-5A9F-B634-C43A645A49FB",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-6.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:14:00.000Z",
+          "filename" : "otd-2023-7",
+          "id" : "3543355F-D7D5-5632-9A45-6610D40EC2B2",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-7.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:16:00.000Z",
+          "filename" : "otd-2023-8",
+          "id" : "BFA11FE5-D435-55D3-87E3-651B82511D10",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-8.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:18:00.000Z",
+          "filename" : "otd-2023-9",
+          "id" : "7FC8D1B4-5D8A-5ACF-951D-A9AB477E3F2C",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-9.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2023-06-14T09:20:00.000Z",
+          "filename" : "otd-2023-10",
+          "id" : "4F79F5E3-B6D8-596C-A978-0D62652D1D89",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/otd-2023-10.jpg",
+          "tags" : [
+
+          ]
+        },
+        {
+          "dateTaken" : "2022-01-04T10:00:00.000Z",
+          "filename" : "ada-0",
+          "id" : "7B3EE740-FFC5-5B24-A96D-F41398A31D20",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/ada-0.jpg",
+          "tags" : [
+            "People/Ada Lovelace"
+          ]
+        },
+        {
+          "dateTaken" : "2022-01-05T10:00:00.000Z",
+          "filename" : "ada-1",
+          "id" : "370F5870-0B04-562B-B3BC-033F9EE9C80E",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/ada-1.jpg",
+          "tags" : [
+            "People/Ada Lovelace"
+          ]
+        },
+        {
+          "dateTaken" : "2022-01-06T10:00:00.000Z",
+          "filename" : "ada-2",
+          "id" : "DD910092-9809-52C9-9B98-4E67CBE9813B",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/ada-2.jpg",
+          "tags" : [
+            "People/Ada Lovelace"
+          ]
+        },
+        {
+          "dateTaken" : "2022-01-07T10:00:00.000Z",
+          "filename" : "ada-3",
+          "id" : "70337C31-803C-55B6-AC38-5D8D6DD74D35",
+          "isVideo" : false,
+          "path" : "/fixtures/lib/ada-3.jpg",
+          "tags" : [
+            "People/Ada Lovelace"
+          ]
+        }
+      ],
+      "scheduled" : [
+        {
+          "dayOffset" : 3,
+          "memory" : {
+            "coverPhotoID" : "A1A962DB-FE54-5719-B32A-80EA27B0C423",
+            "dateRangeEnd" : "2019-06-11T12:22:00.000Z",
+            "dateRangeStart" : "2019-06-11T12:00:00.000Z",
+            "id" : "onThisDay-2024-06-10",
+            "photoCount" : 12,
+            "photoIDs" : [
+              "0EF0ED9A-7D9B-5170-A7DB-26E43C1F2D4C",
+              "1B82AADD-E32C-5D27-95B6-12166351D1C9",
+              "CCE6B15C-D0A1-5772-B686-0760BEA0180B",
+              "8DFC5DC4-C214-5CA4-857E-FB1D130D8C6D",
+              "1FB6BC4E-FAC4-50E6-89C8-5590E5E137BA",
+              "CEAE3192-D363-55CE-A2B5-3D7A9D5E48D1",
+              "A1A962DB-FE54-5719-B32A-80EA27B0C423",
+              "335D383A-E81D-5C4D-8C30-1F9B37844461",
+              "FD7A0931-B8CB-52F6-A36C-B8E1319DA19A",
+              "007C2B49-21B2-5A0C-8B59-A168EFDFEC8C",
+              "04521559-923C-5FD0-8E0E-EC19F8C93007",
+              "9CECA1FB-18EF-5A92-A597-551B845874DE"
+            ],
+            "score" : 55,
+            "subtitle" : "Jun 11, 2019 · 12 photos",
+            "title" : "On this day",
+            "type" : "onThisDay"
+          },
+          "validFrom" : "2024-06-10T15:00:00.000Z",
+          "validTo" : "2024-06-11T15:00:00.000Z"
+        },
+        {
+          "dayOffset" : 3,
+          "memory" : {
+            "coverPhotoID" : "A1A962DB-FE54-5719-B32A-80EA27B0C423",
+            "dateRangeEnd" : "2019-06-11T12:22:00.000Z",
+            "dateRangeStart" : "2019-06-11T12:00:00.000Z",
+            "id" : "yearsAgo-5-2024-06-10",
+            "photoCount" : 12,
+            "photoIDs" : [
+              "0EF0ED9A-7D9B-5170-A7DB-26E43C1F2D4C",
+              "1B82AADD-E32C-5D27-95B6-12166351D1C9",
+              "CCE6B15C-D0A1-5772-B686-0760BEA0180B",
+              "8DFC5DC4-C214-5CA4-857E-FB1D130D8C6D",
+              "1FB6BC4E-FAC4-50E6-89C8-5590E5E137BA",
+              "CEAE3192-D363-55CE-A2B5-3D7A9D5E48D1",
+              "A1A962DB-FE54-5719-B32A-80EA27B0C423",
+              "335D383A-E81D-5C4D-8C30-1F9B37844461",
+              "FD7A0931-B8CB-52F6-A36C-B8E1319DA19A",
+              "007C2B49-21B2-5A0C-8B59-A168EFDFEC8C",
+              "04521559-923C-5FD0-8E0E-EC19F8C93007",
+              "9CECA1FB-18EF-5A92-A597-551B845874DE"
+            ],
+            "score" : 40,
+            "subtitle" : "Jun 11, 2019 · 12 photos",
+            "title" : "On this day in 2019",
+            "type" : "yearsAgo",
+            "yearsAgo" : 5
+          },
+          "validFrom" : "2024-06-10T15:00:00.000Z",
+          "validTo" : "2024-06-11T15:00:00.000Z"
+        },
+        {
+          "dayOffset" : 4,
+          "memory" : {
+            "coverPhotoID" : "1A7C98FF-E550-5E43-A826-A358B07475C6",
+            "dateRangeEnd" : "2021-06-11T15:20:00.000Z",
+            "dateRangeStart" : "2021-06-11T15:00:00.000Z",
+            "id" : "onThisDay-2024-06-11",
+            "photoCount" : 11,
+            "photoIDs" : [
+              "A3E14540-823C-51A4-BED8-2F5EB7DDCB9A",
+              "A8ED4EDA-CC10-5D16-8A73-CDD2B4E7A4B6",
+              "A528BFAF-2330-543F-9E46-F9AF869B5B13",
+              "B80C6975-5A0B-5749-8E6A-428563112910",
+              "E9446DE3-1CBF-523C-95F3-073146D0E879",
+              "1A7C98FF-E550-5E43-A826-A358B07475C6",
+              "A3DA749D-00CA-5F74-B225-9362B4D8EEC2",
+              "810E803D-E597-5D6B-B0FD-A30F1989E7F7",
+              "88EBC04D-1F7E-58EB-84D0-58087CD8C442",
+              "C58B7FB9-EF1E-5ED0-BA8F-E6B9064C56B2",
+              "BABAC020-8F1B-5C88-AFAA-2F76804A0BD7"
+            ],
+            "score" : 55,
+            "subtitle" : "Jun 12, 2021 · 11 photos",
+            "title" : "On this day",
+            "type" : "onThisDay"
+          },
+          "validFrom" : "2024-06-11T15:00:00.000Z",
+          "validTo" : "2024-06-12T15:00:00.000Z"
+        },
+        {
+          "dayOffset" : 4,
+          "memory" : {
+            "coverPhotoID" : "1A7C98FF-E550-5E43-A826-A358B07475C6",
+            "dateRangeEnd" : "2021-06-11T15:20:00.000Z",
+            "dateRangeStart" : "2021-06-11T15:00:00.000Z",
+            "id" : "yearsAgo-3-2024-06-11",
+            "photoCount" : 11,
+            "photoIDs" : [
+              "A3E14540-823C-51A4-BED8-2F5EB7DDCB9A",
+              "A8ED4EDA-CC10-5D16-8A73-CDD2B4E7A4B6",
+              "A528BFAF-2330-543F-9E46-F9AF869B5B13",
+              "B80C6975-5A0B-5749-8E6A-428563112910",
+              "E9446DE3-1CBF-523C-95F3-073146D0E879",
+              "1A7C98FF-E550-5E43-A826-A358B07475C6",
+              "A3DA749D-00CA-5F74-B225-9362B4D8EEC2",
+              "810E803D-E597-5D6B-B0FD-A30F1989E7F7",
+              "88EBC04D-1F7E-58EB-84D0-58087CD8C442",
+              "C58B7FB9-EF1E-5ED0-BA8F-E6B9064C56B2",
+              "BABAC020-8F1B-5C88-AFAA-2F76804A0BD7"
+            ],
+            "score" : 35,
+            "subtitle" : "Jun 12, 2021 · 11 photos",
+            "title" : "On this day in 2021",
+            "type" : "yearsAgo",
+            "yearsAgo" : 3
+          },
+          "validFrom" : "2024-06-11T15:00:00.000Z",
+          "validTo" : "2024-06-12T15:00:00.000Z"
+        },
+        {
+          "dayOffset" : 5,
+          "memory" : {
+            "coverPhotoID" : "70337C31-803C-55B6-AC38-5D8D6DD74D35",
+            "dateRangeEnd" : "2022-01-07T10:00:00.000Z",
+            "dateRangeStart" : "2022-01-04T10:00:00.000Z",
+            "id" : "birthday-People/Ada Lovelace",
+            "personName" : "Ada Lovelace",
+            "photoCount" : 4,
+            "photoIDs" : [
+              "7B3EE740-FFC5-5B24-A96D-F41398A31D20",
+              "370F5870-0B04-562B-B3BC-033F9EE9C80E",
+              "DD910092-9809-52C9-9B98-4E67CBE9813B",
+              "70337C31-803C-55B6-AC38-5D8D6DD74D35"
+            ],
+            "score" : 100,
+            "subtitle" : "Jan 4, 2022 – Jan 7, 2022 · 4 photos",
+            "title" : "Happy birthday, Ada Lovelace",
+            "type" : "birthday"
+          },
+          "validFrom" : "2024-06-12T15:00:00.000Z",
+          "validTo" : "2024-06-13T15:00:00.000Z"
+        },
+        {
+          "dayOffset" : 6,
+          "memory" : {
+            "coverPhotoID" : "03B816F4-7543-5B4F-93A9-23569F41E5DA",
+            "dateRangeEnd" : "2023-06-14T09:20:00.000Z",
+            "dateRangeStart" : "2023-06-14T09:00:00.000Z",
+            "id" : "onThisDay-2024-06-13",
+            "photoCount" : 11,
+            "photoIDs" : [
+              "687A4026-8FDB-5F02-8DBD-4239DD010B0E",
+              "8EE58F9C-4BF7-5CB1-8A24-F77C578E52D4",
+              "26FE4AC9-6FE5-566F-9B6E-50DC93B5D617",
+              "20E215AA-BC6B-5A53-89C8-2DC56139FE1E",
+              "60EA956C-01E9-588D-95E6-F219F7101D98",
+              "03B816F4-7543-5B4F-93A9-23569F41E5DA",
+              "803CBBC6-FCA9-5A9F-B634-C43A645A49FB",
+              "3543355F-D7D5-5632-9A45-6610D40EC2B2",
+              "BFA11FE5-D435-55D3-87E3-651B82511D10",
+              "7FC8D1B4-5D8A-5ACF-951D-A9AB477E3F2C",
+              "4F79F5E3-B6D8-596C-A978-0D62652D1D89"
+            ],
+            "score" : 55,
+            "subtitle" : "Jun 14, 2023 · 11 photos",
+            "title" : "On this day",
+            "type" : "onThisDay"
+          },
+          "validFrom" : "2024-06-13T15:00:00.000Z",
+          "validTo" : "2024-06-14T15:00:00.000Z"
+        },
+        {
+          "dayOffset" : 6,
+          "memory" : {
+            "coverPhotoID" : "03B816F4-7543-5B4F-93A9-23569F41E5DA",
+            "dateRangeEnd" : "2023-06-14T09:20:00.000Z",
+            "dateRangeStart" : "2023-06-14T09:00:00.000Z",
+            "id" : "yearsAgo-1-2024-06-13",
+            "photoCount" : 11,
+            "photoIDs" : [
+              "687A4026-8FDB-5F02-8DBD-4239DD010B0E",
+              "8EE58F9C-4BF7-5CB1-8A24-F77C578E52D4",
+              "26FE4AC9-6FE5-566F-9B6E-50DC93B5D617",
+              "20E215AA-BC6B-5A53-89C8-2DC56139FE1E",
+              "60EA956C-01E9-588D-95E6-F219F7101D98",
+              "03B816F4-7543-5B4F-93A9-23569F41E5DA",
+              "803CBBC6-FCA9-5A9F-B634-C43A645A49FB",
+              "3543355F-D7D5-5632-9A45-6610D40EC2B2",
+              "BFA11FE5-D435-55D3-87E3-651B82511D10",
+              "7FC8D1B4-5D8A-5ACF-951D-A9AB477E3F2C",
+              "4F79F5E3-B6D8-596C-A978-0D62652D1D89"
+            ],
+            "score" : 35,
+            "subtitle" : "Jun 14, 2023 · 11 photos",
+            "title" : "On this day in 2023",
+            "type" : "yearsAgo",
+            "yearsAgo" : 1
+          },
+          "validFrom" : "2024-06-13T15:00:00.000Z",
+          "validTo" : "2024-06-14T15:00:00.000Z"
+        }
+      ],
+      "timeZone" : "Asia/Tokyo",
+      "today" : "2024-06-08T03:00:00.000Z"
+    }
+  ],
+  "schema" : 1
+}

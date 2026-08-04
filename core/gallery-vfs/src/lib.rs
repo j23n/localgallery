@@ -135,6 +135,18 @@ pub struct Entry {
     /// (`MetadataReader.earliestFilesystemDate`), which cannot be computed
     /// without it.
     pub created: Option<FileTime>,
+}
+
+/// What the platform knows about a file that a `stat` cannot say.
+///
+/// Deliberately *not* part of [`Entry`]. On iOS every field here costs one
+/// blocking XPC round trip to `fileproviderd` (~20 ms), and the scanner needs
+/// them for a small minority of the files it walks: a light scan that hits the
+/// cache for every photo asks for **none**. Folding them into the listing
+/// would make the cheap path pay the expensive path's bill — which is exactly
+/// `_plans/06` Finding 1, restated one layer down.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ProviderAttrs {
     /// Whether the entry belongs to a file provider (iCloud Drive, OneDrive,
     /// Dropbox, …) rather than to plain local storage.
     ///
@@ -152,18 +164,13 @@ pub struct Entry {
     /// (`SidecarCandidate.downloadStatus` is written and never inspected), so
     /// they collapse into "not local" here rather than adding a state the core
     /// cannot act on.
-    ///
-    /// Always `false` from [`StdVfs`], along with `is_file_provider`: provider
-    /// awareness needs the iOS `URLResourceKey`s, which arrive with the
-    /// Swift-side implementation.
     pub is_placeholder: bool,
     /// An opaque token that changes when the file's *content* changes.
     ///
     /// Mirrors `NSURLFileContentIdentifierKey`, which APFS populates and most
     /// providers do not. `None` means "no identifier available" — callers fall
     /// back to comparing `(modified, size)`, exactly like
-    /// `FileProviderDetector.ContentVersion.sameContent`. Never `Some` from
-    /// [`StdVfs`], for the same reason as `is_placeholder`.
+    /// `FileProviderDetector.ContentVersion.sameContent`.
     pub content_version: Option<String>,
 }
 
@@ -207,6 +214,29 @@ pub trait Vfs: Send + Sync {
     /// where the Swift baseline calls `dirURL.resourceValues(forKeys:)`.
     /// [`Stat`] cannot serve: it has no creation time and no sub-seconds.
     fn stat_entry(&self, path: &str) -> VfsResult<Entry>;
+
+    /// Provider attributes for a *batch* of paths, in one round trip.
+    ///
+    /// The batch is the whole point. On iOS each of these is a blocking XPC
+    /// call to `fileproviderd` that takes ~20 ms; run serially over a 20k
+    /// library that is 99.4% of a cold scan (`_plans/06` Finding 1). Given the
+    /// batch, the platform implementation is free to fan the calls out and
+    /// still emit the answers in order — which is what makes the scan both
+    /// fast and deterministic.
+    ///
+    /// # Contract
+    ///
+    /// Returns **exactly** `paths.len()` values, positionally matched. A path
+    /// that cannot be probed reports [`ProviderAttrs::default`] — "plain local
+    /// file" — rather than failing the batch, because that is what the Swift
+    /// baseline's `try?` did.
+    ///
+    /// The default implementation answers "everything is local, no content
+    /// identifier", which is correct for [`StdVfs`] and [`MemVfs`]: knowing
+    /// otherwise needs `URLResourceKey`s that only the platform layer has.
+    fn probe_provider(&self, paths: &[String]) -> Vec<ProviderAttrs> {
+        vec![ProviderAttrs::default(); paths.len()]
+    }
 
     /// Write `bytes` to `path` such that readers see either the old contents
     /// or the complete new contents — never anything in between.
@@ -300,7 +330,12 @@ mod tests {
             .expect("the file just written is missing from the listing");
         assert_eq!(entry.kind, EntryKind::File);
         assert_eq!(entry.size, 0);
-        assert!(!entry.is_placeholder);
+
+        // …and the default provider probe answers "plain local file", one row
+        // per path, whatever the paths are.
+        let probed = vfs.probe_provider(&[file.clone(), dir.to_string()]);
+        assert_eq!(probed.len(), 2);
+        assert!(probed.iter().all(|a| *a == ProviderAttrs::default()));
 
         // Listing a file, or something absent, is an error — never an empty
         // listing. The scanner tells "gone" from "unreadable" by that.

@@ -16,10 +16,94 @@
 //!    unqualified timestamp means. Both readings are pinned; neither is
 //!    negotiable here.
 
+use std::io::{Read, Seek, SeekFrom};
+
 use gallery_model::date::CivilDateTime;
+use gallery_vfs::Vfs;
 
 /// The `ftyp` major brand AVFoundation treats as QuickTime.
 const QUICKTIME_BRAND: &[u8; 4] = b"qt  ";
+
+/// Ceiling on the `moov` box this reader will pull into memory.
+///
+/// `moov` holds the sample tables, so it grows with duration rather than with
+/// pixels: a couple of MB for an hour of 4K. 64 is far past anything real and
+/// still small enough that a corrupt length cannot ask for the world.
+const MAX_MOOV_BYTES: u64 = 64 << 20;
+
+/// Ceiling on top-level boxes walked before giving up on a malformed file.
+const MAX_TOP_LEVEL_BOXES: usize = 4096;
+
+/// [`read_video_date`] without reading the whole file.
+///
+/// The enrichment pass runs this over every video in the library, and a video
+/// is the one file type in a photo library that is routinely gigabytes. Only
+/// two top-level boxes matter — `ftyp` for the brand check and `moov` for the
+/// date — and both are found by walking box *headers*, eight bytes at a time.
+/// `mdat`, which is all of the size, is never touched.
+///
+/// The extracted boxes are handed to [`read_video_date`] verbatim, so the
+/// pinned AVFoundation quirks (major brand only, no `mvhd` fallback, zone-less
+/// `©day` as UTC) are decided in exactly one place.
+pub fn read_video_date_at(vfs: &dyn Vfs, path: &str) -> Option<i64> {
+    let mut reader = vfs.open(path).ok()?;
+    let end = reader.seek(SeekFrom::End(0)).ok()?;
+    reader.seek(SeekFrom::Start(0)).ok()?;
+
+    let mut header = [0u8; 16];
+    let mut offset = 0u64;
+    let mut interesting: Vec<u8> = Vec::new();
+    let mut seen_moov = false;
+
+    for _ in 0..MAX_TOP_LEVEL_BOXES {
+        if offset + 8 > end {
+            break;
+        }
+        reader.seek(SeekFrom::Start(offset)).ok()?;
+        if reader.read_exact(&mut header[..8]).is_err() {
+            break;
+        }
+        let size32 = u32::from_be_bytes(header[0..4].try_into().ok()?) as u64;
+        let kind: [u8; 4] = header[4..8].try_into().ok()?;
+        let (header_len, size) = match size32 {
+            // 64-bit size in the eight bytes that follow the header.
+            1 => {
+                if reader.read_exact(&mut header[8..16]).is_err() {
+                    break;
+                }
+                (16u64, u64::from_be_bytes(header[8..16].try_into().ok()?))
+            }
+            // "to end of file" — always the last box.
+            0 => (8u64, end - offset),
+            n if n < 8 => break, // malformed; a zero-advance would spin
+            n => (8u64, n),
+        };
+        let available = end.saturating_sub(offset).saturating_sub(header_len);
+        let payload_len = size.saturating_sub(header_len).min(available);
+
+        let want = match &kind {
+            b"ftyp" => Some(payload_len.min(64)),
+            b"moov" => Some(payload_len.min(MAX_MOOV_BYTES)),
+            _ => None,
+        };
+        if let Some(want) = want {
+            let mut payload = vec![0u8; want as usize];
+            reader.seek(SeekFrom::Start(offset + header_len)).ok()?;
+            if reader.read_exact(&mut payload).is_err() {
+                break;
+            }
+            // Re-box it at its *real* length so `find_box` walks the copy the
+            // same way it would walk the original.
+            interesting.extend_from_slice(&((payload.len() + 8) as u32).to_be_bytes());
+            interesting.extend_from_slice(&kind);
+            interesting.extend_from_slice(&payload);
+            seen_moov |= &kind == b"moov";
+        }
+        offset = offset.checked_add(size)?;
+    }
+
+    seen_moov.then(|| read_video_date(&interesting)).flatten()
+}
 
 /// Creation date as **seconds since the Unix epoch, UTC**.
 ///
@@ -231,6 +315,81 @@ mod tests {
         assert_eq!(read_video_date(b"not a movie at all"), None);
         // A box claiming a size smaller than its own header must not loop.
         assert_eq!(read_video_date(&[0, 0, 0, 1, b'f', b't', b'y', b'p']), None);
+    }
+
+    /// The streaming reader must agree with the whole-file one on every shape
+    /// the fixtures pin — and must not read the payload to get there.
+    #[test]
+    fn the_streaming_reader_agrees_with_the_whole_file_one() {
+        use gallery_vfs::{StdVfs, Vfs};
+
+        let dir = tempfile::tempdir().unwrap();
+        let cases: Vec<(&str, Vec<u8>)> = vec![
+            ("utc.mov", movie(Some("2015-01-02T03:04:05+0000"), b"qt  ")),
+            ("offset.mov", movie(Some("2018-06-15T14:33:07+0530"), b"qt  ")),
+            ("naive.mov", movie(Some("2019-09-09T09:09:09"), b"qt  ")),
+            ("isom.mp4", movie(Some("2017-07-07T07:07:07+0000"), b"isom")),
+            ("nodate.mov", movie(None, b"qt  ")),
+            ("garbage.mov", b"not a movie at all".to_vec()),
+            ("empty.mov", Vec::new()),
+        ];
+        for (name, mut bytes) in cases {
+            // A fat `mdat` after `moov`, so a reader that slurps the file
+            // would be doing something visibly different from one that walks
+            // box headers.
+            if !bytes.is_empty() {
+                bytes.extend_from_slice(&boxed(b"mdat", &vec![0u8; 4 << 20]));
+            }
+            let path = dir.path().join(name);
+            std::fs::write(&path, &bytes).unwrap();
+            assert_eq!(
+                read_video_date_at(&StdVfs::new(), path.to_str().unwrap()),
+                read_video_date(&bytes),
+                "{name}"
+            );
+        }
+
+        // A file that does not exist is not a video.
+        assert_eq!(
+            read_video_date_at(&StdVfs::new(), "/definitely/not/here.mov"),
+            None
+        );
+        // …and neither is a directory the VFS refuses to open as a file.
+        assert!(StdVfs::new().exists(dir.path().to_str().unwrap()));
+    }
+
+    /// `moov` before `ftyp` is unusual and legal; the brand check still has to
+    /// see the `ftyp`, so the walk cannot stop at the first interesting box.
+    #[test]
+    fn a_movie_whose_moov_precedes_its_ftyp_still_has_its_brand_checked() {
+        use gallery_vfs::StdVfs;
+
+        let moov = boxed(
+            b"moov",
+            &boxed(
+                b"udta",
+                &boxed(
+                    &[0xA9, b'd', b'a', b'y'],
+                    &text_atom("2015-01-02T03:04:05+0000"),
+                ),
+            ),
+        );
+        let mut ftyp_payload = b"isom".to_vec();
+        ftyp_payload.extend_from_slice(&[0, 0, 0, 0]);
+        ftyp_payload.extend_from_slice(b"isom");
+
+        let mut bytes = moov;
+        bytes.extend_from_slice(&boxed(b"ftyp", &ftyp_payload));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reordered.mp4");
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(
+            read_video_date_at(&StdVfs::new(), path.to_str().unwrap()),
+            None,
+            "an ISO brand behind the moov must still disqualify the file"
+        );
+        assert_eq!(read_video_date_at(&StdVfs::new(), path.to_str().unwrap()), read_video_date(&bytes));
     }
 
     #[test]

@@ -5,7 +5,50 @@ import os
 /// `enrichedFileDate`. Pure detached-task work over a `[PhotoFile]`
 /// snapshot — the Store handles the gate, observed-state assignment,
 /// folder-tree merge, and cache write.
+///
+/// The reads themselves are the Rust core's (`gallery-meta`), reached through
+/// `readImageMetadata` / `readVideoDate`. This file owns the
+/// scheduling — the task group, the semaphore, the progress throttle, the
+/// placeholder skip — and nothing about parsing.
 enum EnrichmentService {
+
+    /// Pick the earlier of creation/modification dates.
+    ///
+    /// Handles AirDrop and chat-saved files where the original modDate is
+    /// preserved but `creationDate` reflects the download time on this volume.
+    /// Lived on `MetadataReader` until that type moved into the core; it stays
+    /// in Swift because the two dates it compares are read here, from
+    /// `URLResourceValues`, and shipping a `min()` across the FFI would be
+    /// theatre. The core has its own copy for the scanner path
+    /// (`AppleDate::earliest`), pinned to the same behaviour by the scanner
+    /// conformance fixture.
+    static func earliestFilesystemDate(creation: Date?, modification: Date?) -> Date? {
+        switch (creation, modification) {
+        case let (c?, m?): return min(c, m)
+        case let (c?, nil): return c
+        case let (nil, m?): return m
+        case (nil, nil): return nil
+        }
+    }
+
+    /// Resolve the core's zone-less EXIF wall clock in the **device** time
+    /// zone.
+    ///
+    /// EXIF capture dates carry no zone, so `MetadataReader.exifDateFormatter`
+    /// had none either and the device zone was the reading. The core cannot
+    /// make that call — it has no idea what zone the phone is in — so it hands
+    /// back the civil fields and the resolution happens here. Gregorian and
+    /// POSIX-locale for the same reason the formatter was: a device set to a
+    /// Buddhist or Japanese calendar would otherwise resolve the wrong year.
+    static func resolve(_ wallClock: WallClock) -> Date? {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.locale = Locale(identifier: "en_US_POSIX")
+        calendar.timeZone = TimeZone.current
+        return calendar.date(from: DateComponents(
+            year: Int(wallClock.year), month: Int(wallClock.month), day: Int(wallClock.day),
+            hour: Int(wallClock.hour), minute: Int(wallClock.minute), second: Int(wallClock.second)
+        ))
+    }
     /// Per-photo enrichment payload. The detached task collects these in
     /// parallel via a TaskGroup and the orchestrator merges them back into
     /// the photo array.
@@ -100,13 +143,21 @@ enum EnrichmentService {
                             // capture date) over filesystem dates, which often
                             // reflect the download/AirDrop time rather than
                             // when the video was actually recorded.
+                            //
+                            // The core reads `moov/udta/©day` itself rather
+                            // than opening an `AVURLAsset`, and only the
+                            // `ftyp`/`moov` boxes are pulled off disk — a 4 GB
+                            // `mdat` is never touched. Behaviour is pinned to
+                            // AVFoundation's by the metadata conformance
+                            // fixture, quirks included (QuickTime brand only,
+                            // zone-less `©day` as UTC).
                             var dateTaken = photo.dateTaken
                             var dateFromMetadata = false
-                            if let avDate = await MetadataReader.readVideoDate(url: photo.url) {
-                                dateTaken = avDate
+                            if let unixSeconds = readVideoDate(path: photo.url.path) {
+                                dateTaken = Date(timeIntervalSince1970: TimeInterval(unixSeconds))
                                 dateFromMetadata = true
                             } else if dateTaken == nil {
-                                dateTaken = MetadataReader.earliestFilesystemDate(
+                                dateTaken = earliestFilesystemDate(
                                     creation: attrs?.creationDate,
                                     modification: attrs?.contentModificationDate
                                 )
@@ -124,15 +175,27 @@ enum EnrichmentService {
                             )
                         }
 
-                        let metadata = MetadataReader.readImageMetadata(url: photo.url)
+                        // EXIF + embedded XMP + `.xmp` sidecar, merged by the
+                        // core. The per-field precedence between the two
+                        // sources is documented at the merge site in
+                        // `gallery_meta::media`, which is now its only copy.
+                        let metadata = readImageMetadata(path: photo.url.path)
+                        let tags = metadata.hierarchicalTags.map {
+                            HierarchicalTag(fullPath: $0.fullPath, namespace: $0.namespace,
+                                            displayName: $0.displayName)
+                        }
+                        let regions = metadata.faceRegions.map {
+                            FaceRegion(name: $0.name, centerX: $0.centerX, centerY: $0.centerY,
+                                       width: $0.width, height: $0.height)
+                        }
 
                         var dateTaken = photo.dateTaken
                         var dateFromMetadata = false
-                        if let date = metadata.date {
+                        if let date = metadata.captureWallClock.flatMap(resolve) {
                             dateTaken = date
                             dateFromMetadata = true
                         } else if dateTaken == nil {
-                            dateTaken = MetadataReader.earliestFilesystemDate(
+                            dateTaken = earliestFilesystemDate(
                                 creation: attrs?.creationDate,
                                 modification: attrs?.contentModificationDate
                             )
@@ -142,12 +205,12 @@ enum EnrichmentService {
                             index: idx,
                             dateTaken: dateTaken,
                             dateFromMetadata: dateFromMetadata,
-                            hierarchicalTags: metadata.hierarchicalTags.isEmpty ? photo.hierarchicalTags : metadata.hierarchicalTags,
+                            hierarchicalTags: tags.isEmpty ? photo.hierarchicalTags : tags,
                             countryCode: metadata.countryCode ?? photo.countryCode,
                             gpsLatitude: metadata.gpsLatitude ?? photo.gpsLatitude,
                             gpsLongitude: metadata.gpsLongitude ?? photo.gpsLongitude,
                             enrichedFileDate: modDate ?? Date(),
-                            faceRegions: metadata.faceRegions.isEmpty ? photo.faceRegions : metadata.faceRegions
+                            faceRegions: regions.isEmpty ? photo.faceRegions : regions
                         )
                     }
                 }

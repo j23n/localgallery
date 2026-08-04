@@ -438,8 +438,11 @@ dependencies = [
  "gallery-meta",
  "gallery-ml",
  "gallery-model",
+ "gallery-scan",
  "gallery-vfs",
+ "tempfile",
  "uniffi",
+ "uuid",
 ]
 
 [[package]]

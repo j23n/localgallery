@@ -501,13 +501,36 @@ fn library_snapshot_fixture_matches_the_documented_encoding() {
     // Envelope: version probed before the payload.
     assert_eq!(snapshot["version"], 20);
     let value = &snapshot["value"];
-    let keys: Vec<&String> = value.as_object().unwrap().keys().collect();
+    let mut keys: Vec<&str> = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
     assert_eq!(
-        keys.len(),
-        2,
-        "LibrarySnapshot has exactly two fields today"
+        keys,
+        vec!["allPhotos", "rootFolder", "sidecarManifest"],
+        "LibrarySnapshot's field set changed — regenerate the fixture and update the README"
     );
-    assert!(value.get("rootFolder").is_some() && value.get("allPhotos").is_some());
+
+    // The manifest row: `downloadStatus` is a bare string (a Swift enum with
+    // no raw value would synthesise `{\"local\": {}}`), and the content
+    // identifier is a string too, because SAF and every non-Apple provider
+    // vend opaque tokens rather than the `Int64` `fileContentIdentifierKey`
+    // hands back on APFS.
+    let manifest = value["sidecarManifest"].as_array().unwrap();
+    assert_eq!(manifest.len(), 1);
+    let row = &manifest[0];
+    assert_eq!(row["downloadStatus"], "local");
+    assert!(row["sidecarURL"]
+        .as_str()
+        .unwrap()
+        .starts_with("file:///fixtures/PhotoLibrary/"));
+    assert!(row["currentVersion"]["contentIdentifier"].is_string());
+    assert!(row["currentVersion"]["modificationDate"].is_number());
+    let photo_id = row["photoID"].as_str().unwrap();
+    assert_eq!(photo_id, photo_id.to_uppercase());
 
     let photos = value["allPhotos"].as_array().unwrap();
     assert_eq!(photos.len(), 5);

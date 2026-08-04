@@ -43,16 +43,16 @@ final class SidecarSyncService {
     // MARK: - Diff buckets
 
     private struct DiffResult {
-        var needsFetch: [FolderScanner.SidecarCandidate]
+        var needsFetch: [SidecarCandidate]
         var orphans: Set<UUID>
         var upToDate: Int
     }
 
     private func diff(
-        manifest: [FolderScanner.SidecarCandidate],
+        manifest: [SidecarCandidate],
         knownPhotoIDs: Set<UUID>
     ) -> DiffResult {
-        var needsFetch: [FolderScanner.SidecarCandidate] = []
+        var needsFetch: [SidecarCandidate] = []
         var upToDate = 0
         let manifestIDs = Set(manifest.map(\.photoID))
 
@@ -76,7 +76,7 @@ final class SidecarSyncService {
     /// kick off the sync immediately and return. If it crosses a threshold,
     /// move into `.awaitingPrompt` and wait for `confirmPrompt(_:)`.
     func plan(
-        manifest: [FolderScanner.SidecarCandidate],
+        manifest: [SidecarCandidate],
         allPhotoIDs: Set<UUID>,
         autoApprove: Bool
     ) {
@@ -104,7 +104,7 @@ final class SidecarSyncService {
     }
 
     /// User responded to the threshold prompt.
-    func confirmPrompt(_ approved: Bool, manifest: [FolderScanner.SidecarCandidate]) {
+    func confirmPrompt(_ approved: Bool, manifest: [SidecarCandidate]) {
         guard case .awaitingPrompt = state else { return }
         guard approved else {
             state = .idle
@@ -120,7 +120,7 @@ final class SidecarSyncService {
 
     // MARK: - Fetch loop
 
-    private func beginFetch(_ candidates: [FolderScanner.SidecarCandidate]) {
+    private func beginFetch(_ candidates: [SidecarCandidate]) {
         let total = candidates.count
         guard total > 0 else { state = .idle; return }
         state = .syncing(done: 0, total: total)
@@ -146,7 +146,7 @@ final class SidecarSyncService {
     /// Foreground worker — `Task.detached` parallel TaskGroup with concurrency
     /// 8. Cancels propagate from `activeTask.cancel()`.
     nonisolated private static func runFetch(
-        candidates: [FolderScanner.SidecarCandidate],
+        candidates: [SidecarCandidate],
         cache: SidecarCacheStore,
         progress: @MainActor @escaping (Int) -> Void,
         done: @MainActor @escaping (Int, Int) -> Void
@@ -188,12 +188,15 @@ final class SidecarSyncService {
     /// Coordinated read + parse for a single sidecar. Returns nil on failure
     /// (provider error, parse error, file vanished mid-fetch).
     nonisolated private static func fetchOne(
-        _ candidate: FolderScanner.SidecarCandidate
+        _ candidate: SidecarCandidate
     ) async -> SidecarCacheStore.CachedSidecar? {
         let url = candidate.sidecarURL
         do {
             let data = try await coordinatedSidecarRead(at: url)
-            let parsed = MetadataReader.parseXMPBytes(data)
+            // The core owns the XMP parser now — same code the scanner and
+            // the enrichment pass run, so a sidecar fetched from a provider
+            // and a sidecar read off disk can never disagree.
+            let parsed = parseXmpBytes(bytes: data)
 
             // Deduplicate hierarchical tags (mirrors readImageMetadata).
             var seen = Set<String>()
@@ -208,7 +211,10 @@ final class SidecarSyncService {
                 version: candidate.currentVersion,
                 hierarchicalTags: tags,
                 countryCode: parsed.countryCode,
-                faceRegions: parsed.faceRegions
+                faceRegions: parsed.faceRegions.map {
+                    FaceRegion(name: $0.name, centerX: $0.centerX, centerY: $0.centerY,
+                               width: $0.width, height: $0.height)
+                }
             )
         } catch {
             Log.cache.error("Sidecar fetch failed for \(Log.r.filename(url.lastPathComponent)): \(Log.r.error(error))")

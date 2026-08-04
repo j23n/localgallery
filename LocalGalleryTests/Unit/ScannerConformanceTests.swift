@@ -1,8 +1,13 @@
 import XCTest
 @testable import LocalGallery
 
-/// Pins the *current* `FolderScanner` output over the fixture library
-/// described by `core/fixtures/scan-conformance/scanner_tree.json`.
+/// Pins the scanner's output over the fixture library described by
+/// `core/fixtures/scan-conformance/scanner_tree.json`.
+///
+/// Generated from the shipping Swift `FolderScanner`; now run against the Rust
+/// core through `CoreScanner`, with **every assertion unchanged**. That is the
+/// point of the file: the same expectations, produced by a different
+/// implementation, reached through the same path the app uses.
 ///
 /// Four passes over one tree:
 ///
@@ -50,7 +55,7 @@ final class ScannerConformanceTests: XCTestCase {
 
     struct Pass: Codable, Equatable {
         let name: String
-        /// `FolderScanner.scan(reuseCached:)` — true is the light scan.
+        /// `CoreScanner.scan(reuseCached:)` — true is the light scan.
         let reuseCached: Bool
         /// Which pass's output seeded `cachedPhotos` / `cachedSidecarManifest`.
         let cacheFrom: String?
@@ -179,17 +184,18 @@ final class ScannerConformanceTests: XCTestCase {
         let root = try tree.materialize(in: temp.url)
 
         // Pass 1 — cold full scan over the pristine tree.
-        let pass1 = await FolderScanner.scan(at: root, reuseCached: false)
+        let scanner = CoreScanner()
+        let pass1 = await scanner.scan(at: root, reuseCached: false)
         let cachedPhotos = Dictionary(pass1.flatPhotos.map { ($0.url, $0) }, uniquingKeysWith: { _, b in b })
         let cachedManifest = Dictionary(pass1.sidecarManifest.map { ($0.photoID, $0) }, uniquingKeysWith: { _, b in b })
 
         lockedDirectories = try tree.mutate(root)
 
-        let pass2 = await FolderScanner.scan(
+        let pass2 = await scanner.scan(
             at: root, cachedPhotos: cachedPhotos,
             cachedSidecarManifest: cachedManifest, reuseCached: true
         )
-        let pass3 = await FolderScanner.scan(
+        let pass3 = await scanner.scan(
             at: root, cachedPhotos: cachedPhotos,
             cachedSidecarManifest: cachedManifest, reuseCached: false
         )
@@ -197,7 +203,7 @@ final class ScannerConformanceTests: XCTestCase {
         ScannerFixtureTree.unlock(lockedDirectories)
         lockedDirectories = []
 
-        let pass4 = await FolderScanner.scan(
+        let pass4 = await scanner.scan(
             at: root, cachedPhotos: cachedPhotos,
             cachedSidecarManifest: cachedManifest, reuseCached: true
         )
@@ -253,7 +259,7 @@ final class ScannerConformanceTests: XCTestCase {
     // MARK: - Recording
 
     private func record(
-        _ result: FolderScanner.Result,
+        _ result: CoreScanner.Result,
         name: String,
         reuseCached: Bool,
         cacheFrom: String?,
@@ -326,7 +332,7 @@ final class ScannerConformanceTests: XCTestCase {
         )
     }
 
-    private func row(_ candidate: FolderScanner.SidecarCandidate, rel: (URL) -> String) -> SidecarRow {
+    private func row(_ candidate: SidecarCandidate, rel: (URL) -> String) -> SidecarRow {
         // The manifest carries the photo *id*, not its URL; the sidecar is
         // always `<photo basename>.xmp`, so stripping the extension recovers
         // the photo path without a lookup table.
@@ -334,7 +340,7 @@ final class ScannerConformanceTests: XCTestCase {
         return SidecarRow(
             photoPath: String(sidecarPath.dropLast(".xmp".count)),
             sidecarPath: sidecarPath,
-            downloadStatus: "\(candidate.downloadStatus)",
+            downloadStatus: candidate.downloadStatus.rawValue,
             versionHasContentIdentifier: candidate.currentVersion.contentIdentifier != nil,
             versionModificationDate: ConformanceDate.utc(candidate.currentVersion.modificationDate),
             versionSize: candidate.currentVersion.size

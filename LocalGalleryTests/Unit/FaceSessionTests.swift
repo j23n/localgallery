@@ -83,8 +83,8 @@ final class FaceSessionTests: XCTestCase {
         temp.appending("\(name).xmp")
     }
 
-    private func parsed(_ name: String) throws -> (rawTags: [String], countryCode: String?, faceRegions: [FaceRegion]) {
-        MetadataReader.parseXMPBytes(try Data(contentsOf: sidecar(name)))
+    private func parsed(_ name: String) throws -> SidecarParseRecord {
+        parseXmpBytes(bytes: try Data(contentsOf: sidecar(name)))
     }
 
     // MARK: - Availability

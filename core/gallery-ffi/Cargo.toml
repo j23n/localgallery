@@ -17,5 +17,10 @@ crate-type = ["lib", "staticlib", "cdylib"]
 gallery-meta = { path = "../gallery-meta" }
 gallery-ml = { path = "../gallery-ml" }
 gallery-model = { path = "../gallery-model" }
+gallery-scan = { path = "../gallery-scan" }
 gallery-vfs = { path = "../gallery-vfs" }
 uniffi = { workspace = true }
+uuid = { version = "1", default-features = false }
+
+[dev-dependencies]
+tempfile = "3"

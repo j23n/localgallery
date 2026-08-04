@@ -36,4 +36,4 @@ pub mod scan;
 
 pub use classify::{classify, MediaKind};
 pub use order::localized_standard_compare;
-pub use scan::{scan, scan_with_progress, ScanInput, ScanOutcome};
+pub use scan::{scan, scan_with_hooks, scan_with_progress, ScanInput, ScanOutcome, ScanStats};

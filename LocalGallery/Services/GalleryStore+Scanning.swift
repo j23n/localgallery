@@ -205,7 +205,7 @@ extension GalleryStore {
     /// `isScanning` / `lastFullScanAt` / final progress teardown to
     /// `performScan`, which spans both passes.
     @discardableResult
-    private func runScanPass(at url: URL, light: Bool, silent: Bool) async -> FolderScanner.Result {
+    private func runScanPass(at url: URL, light: Bool, silent: Bool) async -> CoreScanner.Result {
         let startedAt = clock.now()
         self.scanProgress = ScanProgress(phase: .scanning, processed: 0, total: nil, startedAt: startedAt)
 
@@ -236,7 +236,7 @@ extension GalleryStore {
                 )
             }
         }
-        let result = await FolderScanner.scan(
+        let result = await coreScanner.scan(
             at: url,
             cachedPhotos: cachedPhotos,
             cachedSidecarManifest: cachedSidecarManifest,
@@ -244,6 +244,15 @@ extension GalleryStore {
             onProgress: progressCallback
         )
 
+        // Captured before the assignment: the manifest can change while the
+        // photo list does not — a new `.xmp` beside an untouched photo, or the
+        // very first pass after an upgrade, where the persisted snapshot had
+        // no manifest at all. That last case is the one that matters: without
+        // the explicit save below, the "no changes" branch would skip
+        // `saveCache()`, the manifest would never reach disk, and every launch
+        // would go on re-probing every sidecar — `_plans/06` Finding 2 fixed
+        // in memory only.
+        let manifestChanged = self.lastSidecarManifest != result.sidecarManifest
         self.lastSidecarManifest = result.sidecarManifest
         let remoteCount = result.flatPhotos.filter {
             if case .remote = $0.locality { return true } else { return false }
@@ -317,6 +326,12 @@ extension GalleryStore {
             apply(.scanResult(photos: [], root: finalRoot, persistCache: false))
         } else {
             Log.scan.info("\(scanKindLabel) scan complete, no changes (\(finalPhotos.count) photos)")
+            if manifestChanged {
+                // No `apply` on this path — nothing about the photos moved —
+                // so the cache write has to be asked for directly.
+                Log.scan.info("Persisting \(result.sidecarManifest.count) sidecar rows (photos unchanged)")
+                persistLibraryCache()
+            }
         }
 
         return result
@@ -387,7 +402,7 @@ extension GalleryStore {
     /// search/tags/country/face-regions surface for cloud photos before the
     /// next sync completes. Cached fields lose to existing in-memory values
     /// only when the photo already has them — fresh-from-disk metadata
-    /// (EXIF + sidecar in `MetadataReader.readImageMetadata`) wins on the
+    /// (EXIF + sidecar, read by the core's `readImageMetadata`) wins on the
     /// enrichment pass that runs after this.
     private func mergeCachedSidecars(into photos: [PhotoFile]) -> [PhotoFile] {
         var photos = photos

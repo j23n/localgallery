@@ -21,17 +21,50 @@ use gallery_model::file_url::{extension_lowercased, stem};
 ///
 /// Ordered by how often they turn up, not alphabetically — this is a linear
 /// scan on a hot path.
-const IMAGE_EXTENSIONS: &[&str] = &[
+///
+/// # Kept honest by a test, not by judgement
+///
+/// Every entry here is one `UTType(filenameExtension:)` answers `.image` to on
+/// a current OS, and the common ones UTType accepts are all present.
+/// `ExtensionTableDriftTests` (Swift) asserts both directions against the real
+/// `UTType`, because the two failure modes are silent and opposite:
+///
+/// * an extension **missing** here that UTType accepted is worse than it looks
+///   — those photos were in the library before the port, so the first scan
+///   after an upgrade reports them **removed** and takes their tags with them;
+/// * an extension **present** here that UTType rejects makes the core surface
+///   files the app never showed, which is a behaviour change in the other
+///   direction.
+///
+/// `jfif`, `kdc` and `x3f` were in this table and are deliberately gone:
+/// `UTType(filenameExtension:)` returns an undeclared `dyn.*` type for all
+/// three, which conforms to nothing, so the pre-port scanner skipped them.
+///
+/// # The reference platform is **iOS**, not macOS
+///
+/// The two disagree, and only one of them runs the app. macOS declares
+/// `hdr`, `pbm`, `pgm`, `ppm`, `dds`, `astc` and `ktx` as images; iOS returns
+/// undeclared `dyn.*` types for all seven, so they are not here.
+/// `ExtensionTableDriftTests` runs on the simulator, which is what makes that
+/// distinction enforceable rather than remembered.
+pub const IMAGE_EXTENSIONS: &[&str] = &[
     "jpg", "jpeg", "heic", "png", "heif", "dng", "tiff", "tif", "webp", "gif", "bmp", "jpe",
-    "jfif", "avif", "heics", "heifs", "avci", "avcs", "jp2", "j2k", "psd", "ico", "icns", "exr",
-    "cr2", "cr3", "nef", "arw", "orf", "rw2", "raf", "srw", "pef", "sr2", "erf", "3fr", "fff",
-    "mos", "iiq", "rwl", "dcr", "kdc", "mrw", "x3f", "svg",
+    "avif", "heics", "heifs", "avci", "avcs", "jp2", "j2k", "psd", "ico", "icns", "exr", "cr2",
+    "cr3", "crw", "nef", "nrw", "arw", "srf", "sr2", "orf", "rw2", "raw", "raf", "srw", "pef",
+    "erf", "3fr", "fff", "mos", "iiq", "rwl", "dcr", "mrw", "svg", "mpo", "jxl", "tga", "pict",
+    "sgi", "xbm",
 ];
 
-/// Extensions `UTType` reports as conforming to `public.movie`.
-const VIDEO_EXTENSIONS: &[&str] = &[
-    "mov", "mp4", "m4v", "qt", "avi", "mpg", "mpeg", "mpe", "m2v", "3gp", "3gpp", "3g2", "3gp2",
-    "mts", "m2ts", "ts", "dv", "vfw",
+/// Extensions `UTType` reports as conforming to `public.movie`. Same contract
+/// as [`IMAGE_EXTENSIONS`], same reference platform.
+///
+/// `mts` and `m2ts` — AVCHD — were in this table from the first port and are
+/// gone for the same reason `jfif` is: iOS declares neither, so the pre-port
+/// scanner never showed an AVCHD clip and neither should this. (macOS does
+/// declare them, which is presumably where they came from.)
+pub const VIDEO_EXTENSIONS: &[&str] = &[
+    "mov", "mp4", "m4v", "qt", "avi", "mpg", "mpeg", "mpe", "mpg4", "m2v", "3gp", "3gpp", "3g2",
+    "3gp2", "ts", "dv", "vfw", "webm", "wmv", "flv", "f4v", "mxf", "rm",
 ];
 
 /// The `.xmp` sidecar extension.
@@ -138,6 +171,66 @@ mod tests {
         assert_eq!(classify("readme.txt"), MediaKind::Skipped);
         assert_eq!(classify("data.xyz"), MediaKind::Skipped);
         assert_eq!(classify("noext"), MediaKind::Skipped);
+    }
+
+    /// The table used to drop extensions `UTType` accepts, and the cost of
+    /// that is asymmetric: a `.crw` or `.webm` already in a user's library was
+    /// scanned by the Swift baseline, so the first post-upgrade scan would
+    /// report it **removed** — deleting its row, its tags and its enrichment.
+    /// `ExtensionTableDriftTests` pins these against the real `UTType`; this
+    /// pins them here so a Rust-only edit cannot quietly undo it.
+    #[test]
+    fn the_raw_and_container_formats_uttype_accepts_are_all_classified() {
+        for ext in [
+            "crw", "nrw", "srf", "raw", "mpo", "jxl", "tga", "pict", "sgi", "xbm",
+        ] {
+            assert_eq!(classify(&format!("shot.{ext}")), MediaKind::Image, "{ext}");
+        }
+        for ext in ["webm", "wmv", "flv", "f4v", "mxf", "rm", "mpg4"] {
+            assert_eq!(classify(&format!("clip.{ext}")), MediaKind::Video, "{ext}");
+        }
+    }
+
+    /// The other direction. `UTType(filenameExtension:)` **on iOS** hands back
+    /// an undeclared `dyn.*` type for these, which conforms to neither
+    /// `.image` nor `.movie`, so the pre-port scanner walked past them.
+    /// Accepting them here would surface files the app has never shown.
+    ///
+    /// Most of the second group *are* declared on macOS, which is exactly the
+    /// trap this list exists for: the table has to track the platform the app
+    /// runs on, and a Mac is not it.
+    #[test]
+    fn extensions_ios_uttype_does_not_declare_stay_skipped() {
+        for ext in [
+            // Undeclared on both.
+            "jfif", "kdc", "x3f", "xyz", "bin",
+            // Declared on macOS, undeclared on iOS — `mts`/`m2ts` (AVCHD) were
+            // in the video table from the first port and never should have been.
+            "hdr", "pbm", "pgm", "ppm", "dds", "astc", "ktx", "mts", "m2ts",
+        ] {
+            assert_eq!(
+                classify(&format!("thing.{ext}")),
+                MediaKind::Skipped,
+                "{ext}"
+            );
+        }
+    }
+
+    /// A duplicate would make the linear scan do redundant work and, more to
+    /// the point, means the two tables were edited without being read.
+    #[test]
+    fn the_tables_are_disjoint_and_carry_no_duplicates() {
+        let mut all: Vec<&str> = IMAGE_EXTENSIONS
+            .iter()
+            .chain(VIDEO_EXTENSIONS)
+            .copied()
+            .collect();
+        let total = all.len();
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(all.len(), total, "duplicate or overlapping extension");
+        assert!(!all.contains(&SIDECAR_EXTENSION));
+        assert!(all.iter().all(|e| *e == e.to_lowercase()));
     }
 
     #[test]

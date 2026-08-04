@@ -95,6 +95,9 @@ pub struct Stat {
 /// scanner classifies by extension and never follows a link into a second
 /// subtree, and a resolved-then-followed link is how a traversal ends up in a
 /// cycle.
+///
+/// The *kind* is the only thing that stays unresolved. An entry's size and
+/// timestamps come from the link's target — see [`Entry::size`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EntryKind {
     /// A regular file.
@@ -125,8 +128,16 @@ pub struct Entry {
     /// File, directory, or symlink.
     pub kind: EntryKind,
     /// Size in bytes. 0 for directories.
+    ///
+    /// For a [`EntryKind::Symlink`] this is the **target's** size, not the
+    /// link's — `lstat` would report the length of the target path string, so
+    /// a symlinked photo would arrive claiming to be a dozen bytes and its
+    /// `(size, mtime)` change signal could never fire. The Swift baseline read
+    /// these through `resourceValues(forKeys:)`, which follows. A dangling
+    /// link falls back to the link's own values.
     pub size: u64,
-    /// Last-modified time, when the platform reports one.
+    /// Last-modified time, when the platform reports one. Followed through a
+    /// symlink, like [`Entry::size`].
     pub modified: Option<FileTime>,
     /// Creation ("birth") time, when the platform reports one.
     ///
@@ -172,6 +183,21 @@ pub struct ProviderAttrs {
     /// back to comparing `(modified, size)`, exactly like
     /// `FileProviderDetector.ContentVersion.sameContent`.
     pub content_version: Option<String>,
+    /// The size the file will have **once its bytes are here**
+    /// (`totalFileSizeKey`), where a `stat` reports how much of it is here now.
+    ///
+    /// The two differ for exactly one kind of file and it is the kind that
+    /// matters: a provider placeholder, whose `st_size` is a few hundred bytes
+    /// of stub and whose intended size is the real one. The sidecar manifest's
+    /// `ContentVersion.size` is compared against the sidecar cache to decide
+    /// whether an `.xmp` needs re-fetching, and the Swift baseline wrote
+    /// `totalFileSize ?? fileSize` there — so recording the stub size instead
+    /// makes every placeholder sidecar in the library look changed on the first
+    /// scan after an upgrade, and re-fetch.
+    ///
+    /// `None` when the platform does not vend one; callers fall back to the
+    /// listing's size, which is what the two agree on for a local file.
+    pub intended_size: Option<i64>,
 }
 
 /// The filesystem seam.
@@ -204,6 +230,13 @@ pub trait Vfs: Send + Sync {
     /// apart: an empty directory means "these photos are gone", a failed
     /// listing means "ask again later" (fixture landmine 20 — a transient I/O
     /// error must not look like a deletion).
+    ///
+    /// A single *entry* that cannot be read is the opposite case and must be
+    /// **skipped**, not propagated: a file unlinked between the `readdir` and
+    /// its `stat` is one row missing, and failing the directory over it would
+    /// report every photo beside it as removed. `contentsOfDirectory` had no
+    /// per-entry failure mode at all, and the baseline's per-file
+    /// `resourceValues` was wrapped in `try?`.
     fn list(&self, dir: &str) -> VfsResult<Vec<Entry>>;
 
     /// The same record [`Vfs::list`] returns, for a single path.

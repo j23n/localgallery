@@ -49,6 +49,120 @@ enum EnrichmentService {
             hour: Int(wallClock.hour), minute: Int(wallClock.minute), second: Int(wallClock.second)
         ))
     }
+    /// Where the blocking half of enrichment runs.
+    ///
+    /// Everything [`read(_:at:)`] does blocks a thread outright:
+    /// `resourceValues` is a syscall (an XPC round trip on a provider-backed
+    /// volume), and the two core reads open a file and parse it. Doing that on
+    /// a cooperative-pool thread parks one of the very few threads Swift
+    /// concurrency has — the pool is sized to the core count, the semaphore
+    /// allows 8 in flight, and on a 6-core phone that is most of it. The
+    /// symptom is not a slow enrichment, it is a *stalled app*: every other
+    /// `await` in the process, including the main actor's own continuations,
+    /// waits behind file reads.
+    ///
+    /// Concurrent, and bounded by the caller's `AsyncSemaphore(8)` rather than
+    /// by the queue — the same 8 the sidecar sync uses. `.utility` because
+    /// enrichment is background work that must not outrank the thumbnail
+    /// decodes the user is actually looking at. Same pattern, and the same
+    /// reason, as `CoreProviderProbe`'s queue.
+    private static let readQueue = DispatchQueue(
+        label: "com.j23n.localgallery.enrichment-read",
+        qos: .utility,
+        attributes: .concurrent
+    )
+
+    /// Run `work` on [`readQueue`] and suspend — rather than block — until it
+    /// answers.
+    private static func readOffPool<T: Sendable>(
+        _ work: @escaping @Sendable () -> T
+    ) async -> T {
+        await withCheckedContinuation { continuation in
+            readQueue.async { continuation.resume(returning: work()) }
+        }
+    }
+
+    /// The blocking half: filesystem dates plus whatever the core can read out
+    /// of the file. Synchronous on purpose — it is called through
+    /// [`readOffPool`], which is the only place that decides where it runs.
+    private static func read(_ photo: PhotoFile, at idx: Int) -> EnrichedResult {
+        // One resourceValues call covers both the staleness marker (modDate)
+        // and the filesystem-date fallback.
+        let attrs = try? photo.url.resourceValues(
+            forKeys: [.creationDateKey, .contentModificationDateKey]
+        )
+        let modDate = attrs?.contentModificationDate
+        let filesystemFallback = earliestFilesystemDate(
+            creation: attrs?.creationDate,
+            modification: attrs?.contentModificationDate
+        )
+
+        if photo.isVideo {
+            // Videos: prefer the embedded capture date over filesystem dates,
+            // which often reflect the download/AirDrop time rather than when
+            // the video was actually recorded.
+            //
+            // The core reads `moov/udta/©day` itself rather than opening an
+            // `AVURLAsset`, and only the `ftyp`/`moov` boxes are pulled off
+            // disk — a 4 GB `mdat` is never touched. Behaviour is pinned to
+            // AVFoundation's by the metadata conformance fixture, quirks
+            // included (QuickTime brand only, zone-less `©day` as UTC).
+            var dateTaken = photo.dateTaken
+            var dateFromMetadata = false
+            if let unixSeconds = readVideoDate(path: photo.url.path) {
+                dateTaken = Date(timeIntervalSince1970: TimeInterval(unixSeconds))
+                dateFromMetadata = true
+            } else if dateTaken == nil {
+                dateTaken = filesystemFallback
+            }
+            return EnrichedResult(
+                index: idx,
+                dateTaken: dateTaken,
+                dateFromMetadata: dateFromMetadata,
+                hierarchicalTags: photo.hierarchicalTags,
+                countryCode: photo.countryCode,
+                gpsLatitude: photo.gpsLatitude,
+                gpsLongitude: photo.gpsLongitude,
+                enrichedFileDate: modDate ?? Date(),
+                faceRegions: photo.faceRegions
+            )
+        }
+
+        // EXIF + embedded XMP + `.xmp` sidecar, merged by the core. The
+        // per-field precedence between the two sources is documented at the
+        // merge site in `gallery_meta::media`, which is now its only copy.
+        let metadata = readImageMetadata(path: photo.url.path)
+        let tags = metadata.hierarchicalTags.map {
+            HierarchicalTag(fullPath: $0.fullPath, namespace: $0.namespace,
+                            displayName: $0.displayName)
+        }
+        let regions = metadata.faceRegions.map {
+            FaceRegion(name: $0.name, centerX: $0.centerX, centerY: $0.centerY,
+                       width: $0.width, height: $0.height)
+        }
+
+        var dateTaken = photo.dateTaken
+        var dateFromMetadata = false
+        if let date = metadata.captureWallClock.flatMap(resolve) {
+            dateTaken = date
+            dateFromMetadata = true
+        } else if dateTaken == nil {
+            dateTaken = filesystemFallback
+        }
+
+        return EnrichedResult(
+            index: idx,
+            dateTaken: dateTaken,
+            dateFromMetadata: dateFromMetadata,
+            hierarchicalTags: tags.isEmpty ? photo.hierarchicalTags : tags,
+            countryCode: metadata.countryCode ?? photo.countryCode,
+            gpsLatitude: metadata.gpsLatitude ?? photo.gpsLatitude,
+            gpsLongitude: metadata.gpsLongitude ?? photo.gpsLongitude,
+            enrichedFileDate: modDate ?? Date(),
+            faceRegions: regions.isEmpty ? photo.faceRegions : regions
+        )
+    }
+
     /// Per-photo enrichment payload. The detached task collects these in
     /// parallel via a TaskGroup and the orchestrator merges them back into
     /// the photo array.
@@ -132,86 +246,16 @@ enum EnrichmentService {
 
                         await limiter.acquire()
                         defer { Task { await limiter.release() } }
+                        // Re-checked after the wait: on a 25k-photo library a
+                        // task can sit in the semaphore queue for minutes, and
+                        // the check before it says nothing about now.
+                        guard !Task.isCancelled else { return nil }
 
-                        // One resourceValues call covers both the staleness
-                        // marker (modDate) and the filesystem-date fallback.
-                        let attrs = try? photo.url.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
-                        let modDate = attrs?.contentModificationDate
-
-                        if photo.isVideo {
-                            // Videos: prefer AVAsset.creationDate (embedded
-                            // capture date) over filesystem dates, which often
-                            // reflect the download/AirDrop time rather than
-                            // when the video was actually recorded.
-                            //
-                            // The core reads `moov/udta/©day` itself rather
-                            // than opening an `AVURLAsset`, and only the
-                            // `ftyp`/`moov` boxes are pulled off disk — a 4 GB
-                            // `mdat` is never touched. Behaviour is pinned to
-                            // AVFoundation's by the metadata conformance
-                            // fixture, quirks included (QuickTime brand only,
-                            // zone-less `©day` as UTC).
-                            var dateTaken = photo.dateTaken
-                            var dateFromMetadata = false
-                            if let unixSeconds = readVideoDate(path: photo.url.path) {
-                                dateTaken = Date(timeIntervalSince1970: TimeInterval(unixSeconds))
-                                dateFromMetadata = true
-                            } else if dateTaken == nil {
-                                dateTaken = earliestFilesystemDate(
-                                    creation: attrs?.creationDate,
-                                    modification: attrs?.contentModificationDate
-                                )
-                            }
-                            return EnrichedResult(
-                                index: idx,
-                                dateTaken: dateTaken,
-                                dateFromMetadata: dateFromMetadata,
-                                hierarchicalTags: photo.hierarchicalTags,
-                                countryCode: photo.countryCode,
-                                gpsLatitude: photo.gpsLatitude,
-                                gpsLongitude: photo.gpsLongitude,
-                                enrichedFileDate: modDate ?? Date(),
-                                faceRegions: photo.faceRegions
-                            )
-                        }
-
-                        // EXIF + embedded XMP + `.xmp` sidecar, merged by the
-                        // core. The per-field precedence between the two
-                        // sources is documented at the merge site in
-                        // `gallery_meta::media`, which is now its only copy.
-                        let metadata = readImageMetadata(path: photo.url.path)
-                        let tags = metadata.hierarchicalTags.map {
-                            HierarchicalTag(fullPath: $0.fullPath, namespace: $0.namespace,
-                                            displayName: $0.displayName)
-                        }
-                        let regions = metadata.faceRegions.map {
-                            FaceRegion(name: $0.name, centerX: $0.centerX, centerY: $0.centerY,
-                                       width: $0.width, height: $0.height)
-                        }
-
-                        var dateTaken = photo.dateTaken
-                        var dateFromMetadata = false
-                        if let date = metadata.captureWallClock.flatMap(resolve) {
-                            dateTaken = date
-                            dateFromMetadata = true
-                        } else if dateTaken == nil {
-                            dateTaken = earliestFilesystemDate(
-                                creation: attrs?.creationDate,
-                                modification: attrs?.contentModificationDate
-                            )
-                        }
-
-                        return EnrichedResult(
-                            index: idx,
-                            dateTaken: dateTaken,
-                            dateFromMetadata: dateFromMetadata,
-                            hierarchicalTags: tags.isEmpty ? photo.hierarchicalTags : tags,
-                            countryCode: metadata.countryCode ?? photo.countryCode,
-                            gpsLatitude: metadata.gpsLatitude ?? photo.gpsLatitude,
-                            gpsLongitude: metadata.gpsLongitude ?? photo.gpsLongitude,
-                            enrichedFileDate: modDate ?? Date(),
-                            faceRegions: regions.isEmpty ? photo.faceRegions : regions
-                        )
+                        // Everything below is blocking — `resourceValues` is a
+                        // syscall and the two core reads open and parse a file
+                        // — so it runs on a queue of its own rather than on a
+                        // cooperative-pool thread. See `readOffPool`.
+                        return await Self.readOffPool { Self.read(photo, at: idx) }
                     }
                 }
                 // Throttle progress callbacks so a 25k-photo enrichment

@@ -11,6 +11,20 @@
 /// `CharacterSet.urlPathAllowed` = unreserved + sub-delims + `:@` + `/`.
 /// Notably **absent**: space, `?`, `#`, `[`, `]`, `%`, and everything
 /// non-ASCII — all of which appear in real photo libraries.
+///
+/// `:` really is in the set, however wrong that looks. Both spellings Foundation
+/// offers agree, checked against the shipping frameworks:
+///
+/// ```text
+/// URL(fileURLWithPath: "/a/b:c.jpg").absoluteString            // file:///a/b:c.jpg
+/// "/a/b:c.jpg".addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)
+///                                                             // /a/b:c.jpg
+/// CharacterSet.urlPathAllowed.contains(":")                    // true
+/// ```
+///
+/// Escaping it here would make every path containing a colon — `12:30 clip.mov`
+/// off a camcorder, anything copied from a Windows share — hash to a snapshot
+/// key Swift never writes, so every such photo would read as new on each launch.
 fn is_path_allowed(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=:@/".contains(&b)
 }
@@ -126,6 +140,24 @@ mod tests {
         assert_eq!(file_url_string("/a/b#c?d.jpg"), "file:///a/b%23c%3Fd.jpg");
     }
 
+    /// A colon is a *legal, unescaped* file-URL path character in Foundation,
+    /// and the encoder has to agree or every path containing one hashes to a
+    /// snapshot key Swift never writes. `CoreScannerBridgeTests` asserts the
+    /// same string on the Swift side, against the real `URL`.
+    #[test]
+    fn colons_stay_literal_because_foundation_leaves_them_literal() {
+        assert_eq!(
+            file_url_string("/a/12:30 clip.mov"),
+            "file:///a/12:30%20clip.mov"
+        );
+        assert_eq!(
+            path_from_file_url("file:///a/12:30%20clip.mov").as_deref(),
+            Some("/a/12:30 clip.mov")
+        );
+        // `@` is in the same allowed set and gets the same treatment.
+        assert_eq!(file_url_string("/a/b@c.jpg"), "file:///a/b@c.jpg");
+    }
+
     #[test]
     fn round_trips_through_a_url_string() {
         for path in [
@@ -133,6 +165,7 @@ mod tests {
             "/a/emoji \u{1F335} cactus.jpg",
             "/a/caf\u{65}\u{301}.jpg",
             "/a/100% real.jpg",
+            "/a/12:30 clip.mov",
         ] {
             let url = file_url_string(path);
             assert_eq!(path_from_file_url(&url).as_deref(), Some(path), "{url}");

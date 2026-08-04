@@ -34,6 +34,6 @@ pub mod order;
 pub mod path_form;
 pub mod scan;
 
-pub use classify::{classify, MediaKind};
+pub use classify::{classify, MediaKind, IMAGE_EXTENSIONS, VIDEO_EXTENSIONS};
 pub use order::localized_standard_compare;
 pub use scan::{scan, scan_with_hooks, scan_with_progress, ScanInput, ScanOutcome, ScanStats};

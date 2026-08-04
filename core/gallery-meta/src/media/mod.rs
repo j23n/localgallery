@@ -13,6 +13,7 @@
 pub mod container;
 pub mod embedded;
 pub mod exif_read;
+pub mod prefix;
 pub mod swift_xmp;
 pub mod video;
 
@@ -23,6 +24,7 @@ use gallery_vfs::Vfs;
 pub use container::extract_xmp;
 pub use embedded::{read_embedded_xmp, EmbeddedXmp};
 pub use exif_read::{parse_exif_datetime, read_exif_facts, ExifFacts};
+pub use prefix::read_metadata_prefix;
 pub use swift_xmp::{decode_xmp_text, parse_mwg_regions, parse_xmp_bytes, SwiftXmpParse};
 pub use video::{read_video_date, read_video_date_at};
 
@@ -61,8 +63,16 @@ pub struct ImageMetadata {
 /// The sidecar read is **unconditional**: it does not depend on the image
 /// opening, which is why a zero-byte JPEG still comes back tagged
 /// (`assets/containers/zero_byte.jpg`).
+///
+/// # The image itself is read in a bounded prefix, not whole
+///
+/// Enrichment runs this eight-wide, and a photo library contains 100 MB RAWs.
+/// [`prefix::read_metadata_prefix`] reads only as far as the container's
+/// metadata region can extend — the `SOS` marker for JPEG, the first `IDAT`
+/// for PNG, a fixed cap otherwise — which is where both parsers below stopped
+/// looking anyway. The narrow cases that changes are tabulated on that module.
 pub fn read_image_metadata(vfs: &dyn Vfs, path: &str) -> ImageMetadata {
-    let bytes = vfs.read(path).unwrap_or_default();
+    let bytes = read_metadata_prefix(vfs, path);
     let exif = read_exif_facts(&bytes);
     let embedded = extract_xmp(&bytes)
         .map(|packet| read_embedded_xmp(&packet))
@@ -247,6 +257,33 @@ mod tests {
         let out = read_image_metadata(&vfs, "/lib/zero_byte.jpg");
         assert_eq!(out.hierarchical_tags.len(), 1);
         assert_eq!(out.hierarchical_tags[0].display_name, "Void");
+    }
+
+    /// The enrichment pass runs this eight-wide over the library. Reading the
+    /// whole file made that eight concurrent copies of whatever the largest
+    /// files are — a 16 MB JPEG here, a 100 MB DNG in a real library.
+    #[test]
+    fn a_large_image_is_read_in_a_bounded_prefix_not_slurped() {
+        use super::prefix::tests::{fat_jpeg, CountingVfs};
+
+        let vfs = CountingVfs::new();
+        let packet = br#"<digiKam:TagsList><rdf:Seq><rdf:li>Scenes/Beach</rdf:li></rdf:Seq></digiKam:TagsList>"#;
+        vfs.insert("/lib/huge.jpg", fat_jpeg(packet, 16 << 20));
+
+        let out = read_image_metadata(&vfs, "/lib/huge.jpg");
+        assert_eq!(
+            out.hierarchical_tags
+                .iter()
+                .map(|t| t.full_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Scenes/Beach"],
+            "the bounded read still finds the packet"
+        );
+        assert!(
+            vfs.bytes_read() < (1 << 20),
+            "read {} bytes off a 16 MB image",
+            vfs.bytes_read()
+        );
     }
 
     #[test]

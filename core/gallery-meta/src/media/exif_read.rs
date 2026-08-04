@@ -129,13 +129,25 @@ pub fn parse_exif_datetime(raw: &str) -> Option<CivilDateTime> {
 /// **Both coordinates are required**: a lone latitude yields nothing at all,
 /// because the Swift reader binds them in one `guard` (`assets/gps/lat_only.jpg`).
 /// Altitude and its ref are never read — there is nowhere to put them.
+///
+/// # Non-finite coordinates are no coordinates
+///
+/// An EXIF rational is a raw numerator/denominator pair, and cameras do write
+/// `0/0` (NaN) and `1/0` (∞). Those propagate all the way to
+/// `PhotoFile.gpsLatitude`, and Swift's `JSONEncoder` **throws** on a
+/// non-finite `Double` — so one such photo makes every subsequent
+/// `JSONDiskCache.save` of the library snapshot fail, silently, forever: the
+/// error is logged and swallowed, and the app full-rescans on every launch
+/// from then on. A coordinate that is not a number is not a location, so it is
+/// dropped here, at the only place it can enter.
 fn read_gps(exif: &exif::Exif) -> (Option<f64>, Option<f64>) {
     let magnitude = |tag: Tag| -> Option<f64> {
         let field = exif.get_field(tag, In::PRIMARY)?;
         match &field.value {
             Value::Rational(parts) if !parts.is_empty() => {
                 let at = |i: usize| parts.get(i).map_or(0.0, |r| r.to_f64());
-                Some(at(0) + at(1) / 60.0 + at(2) / 3600.0)
+                let degrees = at(0) + at(1) / 60.0 + at(2) / 3600.0;
+                degrees.is_finite().then_some(degrees)
             }
             _ => None,
         }
@@ -233,5 +245,109 @@ mod tests {
     fn a_file_with_no_exif_reports_defaults_rather_than_failing() {
         assert_eq!(read_exif_facts(b""), ExifFacts::default());
         assert_eq!(read_exif_facts(b"not an image"), ExifFacts::default());
+    }
+
+    /// One coordinate as EXIF stores it: degrees, minutes and seconds, each a
+    /// `(numerator, denominator)` rational.
+    type Degrees = [(u32, u32); 3];
+
+    /// A little-endian TIFF carrying nothing but a GPS IFD, with both
+    /// coordinates built from the given rationals.
+    ///
+    /// Hand-assembled rather than fixtured because the interesting inputs —
+    /// `0/0`, `1/0` — are exactly the ones no camera will produce on demand.
+    fn tiff_with_gps(lat: Degrees, lon: Degrees) -> Vec<u8> {
+        const GPS_IFD: u32 = 26;
+        const LAT_VALUES: u32 = 80;
+        const LON_VALUES: u32 = 104;
+
+        let mut out: Vec<u8> = Vec::new();
+        out.extend_from_slice(b"II");
+        out.extend_from_slice(&0x002Au16.to_le_bytes());
+        out.extend_from_slice(&8u32.to_le_bytes());
+
+        // IFD0: one entry, the GPS IFD pointer.
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&0x8825u16.to_le_bytes()); // GPSInfo
+        out.extend_from_slice(&4u16.to_le_bytes()); // LONG
+        out.extend_from_slice(&1u32.to_le_bytes());
+        out.extend_from_slice(&GPS_IFD.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes()); // no IFD1
+        assert_eq!(out.len() as u32, GPS_IFD);
+
+        let entry = |tag: u16, kind: u16, count: u32, value: [u8; 4], out: &mut Vec<u8>| {
+            out.extend_from_slice(&tag.to_le_bytes());
+            out.extend_from_slice(&kind.to_le_bytes());
+            out.extend_from_slice(&count.to_le_bytes());
+            out.extend_from_slice(&value);
+        };
+        out.extend_from_slice(&4u16.to_le_bytes());
+        entry(0x0001, 2, 2, *b"N\0\0\0", &mut out); // GPSLatitudeRef
+        entry(0x0002, 5, 3, LAT_VALUES.to_le_bytes(), &mut out); // GPSLatitude
+        entry(0x0003, 2, 2, *b"E\0\0\0", &mut out); // GPSLongitudeRef
+        entry(0x0004, 5, 3, LON_VALUES.to_le_bytes(), &mut out); // GPSLongitude
+        out.extend_from_slice(&0u32.to_le_bytes()); // no next IFD
+
+        assert_eq!(out.len() as u32, LAT_VALUES);
+        for (num, den) in lat {
+            out.extend_from_slice(&num.to_le_bytes());
+            out.extend_from_slice(&den.to_le_bytes());
+        }
+        assert_eq!(out.len() as u32, LON_VALUES);
+        for (num, den) in lon {
+            out.extend_from_slice(&num.to_le_bytes());
+            out.extend_from_slice(&den.to_le_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn a_well_formed_gps_pair_still_reads() {
+        // 48°51'29.4"N, 2°17'40.2"E — the fixture's Paris coordinates, to
+        // prove the hand-built container is a container.
+        let facts = read_exif_facts(&tiff_with_gps(
+            [(48, 1), (51, 1), (294, 10)],
+            [(2, 1), (17, 1), (402, 10)],
+        ));
+        let lat = facts.gps_latitude.expect("latitude");
+        let lon = facts.gps_longitude.expect("longitude");
+        assert!((lat - 48.858_166).abs() < 1e-5, "{lat}");
+        assert!((lon - 2.294_5).abs() < 1e-4, "{lon}");
+    }
+
+    /// `0/0` is NaN and `1/0` is infinity, and both are things real cameras
+    /// write. Neither is a location, and a non-finite `Double` reaching
+    /// `PhotoFile.gpsLatitude` makes Swift's `JSONEncoder` throw — which
+    /// `JSONDiskCache.save` logs and swallows, so the library snapshot would
+    /// silently never be written again.
+    #[test]
+    fn non_finite_coordinates_are_dropped_rather_than_stored() {
+        let cases: [(Degrees, Degrees, &str); 4] = [
+            (
+                [(0, 0), (0, 1), (0, 1)],
+                [(2, 1), (17, 1), (0, 1)],
+                "lat NaN",
+            ),
+            (
+                [(48, 1), (51, 1), (0, 1)],
+                [(0, 0), (0, 1), (0, 1)],
+                "lon NaN",
+            ),
+            (
+                [(1, 0), (0, 1), (0, 1)],
+                [(2, 1), (0, 1), (0, 1)],
+                "lat inf",
+            ),
+            (
+                [(48, 1), (0, 1), (0, 1)],
+                [(1, 0), (0, 1), (0, 1)],
+                "lon inf",
+            ),
+        ];
+        for (lat, lon, label) in cases {
+            let facts = read_exif_facts(&tiff_with_gps(lat, lon));
+            assert_eq!(facts.gps_latitude, None, "{label}: latitude survived");
+            assert_eq!(facts.gps_longitude, None, "{label}: longitude survived");
+        }
     }
 }

@@ -424,10 +424,17 @@ final class GalleryStore {
             rootFolder: root,
             allPhotos: allPhotos,
             // Rides along so the next launch's light scan can skip the `.xmp`
-            // provider probe for every unchanged photo. Absent until the first
-            // scan of the session has run, which is also when it is worth
-            // anything.
-            sidecarManifest: lastSidecarManifest.isEmpty ? nil : lastSidecarManifest
+            // provider probe for every unchanged photo.
+            //
+            // `[]` is persisted as `[]`, not folded into `nil`. The two mean
+            // different things and only one of them is true here: `nil` is
+            // "written by a build from before this field existed", which makes
+            // the next launch pay a legacy re-probe of the whole library, and
+            // `[]` is "scanned, and this library has no sidecars" — the normal
+            // state for anyone not using digiKam. Collapsing them made every
+            // such library re-probe every launch, forever, to represent a fact
+            // it already knew.
+            sidecarManifest: lastSidecarManifest
         ))
     }
 
@@ -734,7 +741,12 @@ final class GalleryStore {
     /// Photos get bucketed by (month, day) once up-front so each day's
     /// onThisDay/yearsAgo filter walks a small candidate set instead of the
     /// full library — keeps the main-actor cost flat for large libraries.
-    private func computeScheduledMemories(photos: [PhotoFile]) -> [WidgetSnapshotExporter.ScheduledMemory] {
+    ///
+    /// Internal rather than private so `ScheduledMemoriesConformanceTests` can
+    /// pin the pre-publish horizon it produces (Phase-4 fixture
+    /// `scheduled_memories.json`). Not called from anywhere but
+    /// `exportWidgetSnapshot`.
+    func computeScheduledMemories(photos: [PhotoFile]) -> [WidgetSnapshotExporter.ScheduledMemory] {
         let cal = Calendar.current
         let today = cal.startOfDay(for: clock.now())
 

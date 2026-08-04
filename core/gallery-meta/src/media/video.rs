@@ -71,7 +71,15 @@ pub fn read_video_date_at(vfs: &dyn Vfs, path: &str) -> Option<i64> {
                 if reader.read_exact(&mut header[8..16]).is_err() {
                     break;
                 }
-                (16u64, u64::from_be_bytes(header[8..16].try_into().ok()?))
+                let size = u64::from_be_bytes(header[8..16].try_into().ok()?);
+                // A 64-bit size that does not cover its own 16-byte header is
+                // malformed, and a size of 0 here would advance the cursor by
+                // nothing — the walk would tread water until the box budget
+                // ran out. Stop instead.
+                if size < 16 {
+                    break;
+                }
+                (16u64, size)
             }
             // "to end of file" — always the last box.
             0 => (8u64, end - offset),
@@ -146,6 +154,10 @@ fn is_quicktime_branded(bytes: &[u8]) -> bool {
 /// Handles 64-bit sizes (`size == 1`) and "to end of file" (`size == 0`).
 /// Deliberately shallow: callers descend one level at a time, so a `udta`
 /// nested inside a `trak` can never be mistaken for the movie's own.
+///
+/// **Every arm must yield `size >= header`.** The walk advances by `size`, so a
+/// box claiming less than its own header advances by zero or wraps — a hang on
+/// a file the user merely put in a folder. Both size encodings are checked.
 fn find_box<'a>(data: &'a [u8], kind: &[u8; 4]) -> Option<&'a [u8]> {
     let mut i = 0usize;
     while i + 8 <= data.len() {
@@ -154,7 +166,11 @@ fn find_box<'a>(data: &'a [u8], kind: &[u8; 4]) -> Option<&'a [u8]> {
         let (header, size) = match size32 {
             1 => {
                 let raw = data.get(i + 8..i + 16)?;
-                (16, u64::from_be_bytes(raw.try_into().ok()?) as usize)
+                let size = u64::from_be_bytes(raw.try_into().ok()?) as usize;
+                if size < 16 {
+                    return None; // malformed; a zero-advance would spin
+                }
+                (16, size)
             }
             0 => (8, data.len() - i),
             n if n < 8 => return None, // malformed; a zero-advance would spin
@@ -176,10 +192,13 @@ fn find_box<'a>(data: &'a [u8], kind: &[u8; 4]) -> Option<&'a [u8]> {
 /// `09:03:07Z`, which is what the fixture records.
 fn parse_quicktime_date(raw: &str) -> Option<i64> {
     let s = raw.trim().trim_end_matches('\0');
-    if s.len() < 19 {
-        return None;
-    }
-    let (stamp, zone) = s.split_at(19);
+    // `str::split_at` panics when the index lands inside a multi-byte
+    // character, and a length check counts *bytes* — so `©day` text ending in
+    // an accented letter passed the check and then panicked. `get` returns
+    // `None` for a non-boundary instead, which is the same answer the
+    // separator check below would have given anyway.
+    let stamp = s.get(..19)?;
+    let zone = &s[19..];
     let b = stamp.as_bytes();
     if [b[4], b[7], b[13], b[16]] != *b"--::" || b[10] != b'T' {
         return None;
@@ -317,6 +336,68 @@ mod tests {
         assert_eq!(read_video_date(&[0, 0, 0, 1, b'f', b't', b'y', b'p']), None);
     }
 
+    /// A 64-bit box size (`size32 == 1`) smaller than the 16-byte header it
+    /// sits in advances the walk by nothing. `find_box` used to take it on
+    /// trust and spin forever on a file the user merely put in a folder; the
+    /// streaming walk treaded water until its box budget ran out.
+    #[test]
+    fn a_64_bit_box_size_smaller_than_its_header_terminates() {
+        /// `size32 == 1`, then an eight-byte size of `n`.
+        fn wide_box(kind: &[u8; 4], size64: u64, payload: &[u8]) -> Vec<u8> {
+            let mut out = 1u32.to_be_bytes().to_vec();
+            out.extend_from_slice(kind);
+            out.extend_from_slice(&size64.to_be_bytes());
+            out.extend_from_slice(payload);
+            out
+        }
+
+        for claimed in [0u64, 1, 8, 15] {
+            // In-memory: the whole-file parser walks top-level boxes itself.
+            let mut bytes = wide_box(b"ftyp", claimed, b"qt  \0\0\0\0qt  ");
+            bytes.extend_from_slice(&boxed(b"moov", &[]));
+            assert_eq!(
+                read_video_date(&bytes),
+                None,
+                "size64 = {claimed} must terminate the walk, not spin"
+            );
+
+            // …and through the streaming reader, which has its own arm.
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("wide.mov");
+            std::fs::write(&path, &bytes).unwrap();
+            assert_eq!(
+                read_video_date_at(&gallery_vfs::StdVfs::new(), path.to_str().unwrap()),
+                None,
+                "size64 = {claimed} through the streaming reader"
+            );
+        }
+    }
+
+    /// The `©day` text is byte-length-checked and was then split at byte 19.
+    /// A multi-byte character straddling that index panicked inside
+    /// `str::split_at` — on a video, during a background enrichment pass.
+    #[test]
+    fn a_non_ascii_day_atom_is_rejected_rather_than_panicking() {
+        for text in [
+            "2018-06-15T14:33:0é",       // the boundary lands inside 'é'
+            "é018-06-15T14:33:07+0000",  // …and at the front
+            "2018-06-15T14:33:07+05:3é", // …and in the zone
+            "ééééééééééééééééééé",
+        ] {
+            assert_eq!(
+                read_video_date(&movie(Some(text), b"qt  ")),
+                None,
+                "{text:?}"
+            );
+        }
+        // A well-formed stamp with non-ASCII *after* the 19 bytes is still
+        // rejected — by the offset parser, not by a panic.
+        assert_eq!(
+            read_video_date(&movie(Some("2018-06-15T14:33:07é"), b"qt  ")),
+            None
+        );
+    }
+
     /// The streaming reader must agree with the whole-file one on every shape
     /// the fixtures pin — and must not read the payload to get there.
     #[test]
@@ -326,7 +407,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cases: Vec<(&str, Vec<u8>)> = vec![
             ("utc.mov", movie(Some("2015-01-02T03:04:05+0000"), b"qt  ")),
-            ("offset.mov", movie(Some("2018-06-15T14:33:07+0530"), b"qt  ")),
+            (
+                "offset.mov",
+                movie(Some("2018-06-15T14:33:07+0530"), b"qt  "),
+            ),
             ("naive.mov", movie(Some("2019-09-09T09:09:09"), b"qt  ")),
             ("isom.mp4", movie(Some("2017-07-07T07:07:07+0000"), b"isom")),
             ("nodate.mov", movie(None, b"qt  ")),
@@ -389,7 +473,10 @@ mod tests {
             None,
             "an ISO brand behind the moov must still disqualify the file"
         );
-        assert_eq!(read_video_date_at(&StdVfs::new(), path.to_str().unwrap()), read_video_date(&bytes));
+        assert_eq!(
+            read_video_date_at(&StdVfs::new(), path.to_str().unwrap()),
+            read_video_date(&bytes)
+        );
     }
 
     #[test]

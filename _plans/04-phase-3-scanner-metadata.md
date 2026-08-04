@@ -245,6 +245,94 @@ read off disk cannot disagree.
 - [x] Simulator soak: nine scans over one session — cold full, relaunch light,
       two foreground lights, three pull-to-refresh lights, and a two-phase
       "Reload Library" — 20,000 photos on every one, no crash report.
+- [x] Review pass over the finished port (two independent reviewers), all
+      confirmed findings fixed with a regression test each. See below.
+
+## Post-port review fixes
+
+The port shipped, then two reviewers went through it. Nothing in the
+conformance fixtures moved — every fix is either a hang/panic the fixtures
+cannot reach, a behaviour the fixture tree does not contain, or a Swift-side
+seam the fixtures do not cover.
+
+**Robustness in the parsers.** A 64-bit ISO-BMFF box size smaller than its own
+16-byte header advanced the box walk by zero and hung `find_box` outright, on
+any file the user merely put in a folder. A `©day` atom whose text is not ASCII
+was byte-length-checked and then split at byte 19, panicking inside a
+multi-byte character. Both now terminate.
+
+**A non-finite GPS coordinate is no coordinate.** An EXIF rational is a raw
+numerator/denominator pair and cameras write `0/0` and `1/0`. That reached
+`PhotoFile.gpsLatitude` as NaN/∞, and Swift's `JSONEncoder` *throws* on those —
+which `JSONDiskCache.save` logs and swallows. One such photo and the library
+snapshot is never written again for the life of the install, silently, with a
+full rescan every launch. Dropped at the source (`read_gps`), written as absent
+by the snapshot encoder, and the swallowed-save log now names the consequence.
+
+**The extension table drifted from `UTType` in both directions.** It was
+missing 17 extensions `UTType` accepts — `crw`, `nrw`, `raw`, `jxl`, `mpo`,
+`tga`, `pict`, `sgi`, `xbm`, `webm`, `wmv`, `flv`, `f4v`, `mxf`, `rm`, `mpg4`,
+`srf` — and every one of those is a *deletion*: those files were scanned before
+the port, so the first scan after the upgrade reports them **removed** and takes
+their tags with them. It also carried five that iOS resolves to undeclared
+`dyn.*` types conforming to nothing (`jfif`, `kdc`, `x3f`, and the AVCHD pair
+`mts`/`m2ts`), which the pre-port scanner skipped.
+
+The tables are now exposed over FFI and `ExtensionTableDriftTests` diffs them
+against the real `UTType` in both directions. That test found the last one
+itself: **macOS and iOS do not declare the same set.** macOS calls `hdr`,
+`pbm`, `pgm`, `ppm`, `dds`, `astc`, `ktx`, `mts` and `m2ts` media; iOS declares
+none of the nine. A table checked on a Mac would have surfaced nine file types
+the app has never shown — which is why the test runs on the simulator.
+
+**Bounded metadata reads.** `read_image_metadata` read whole files, eight-wide,
+over a library that contains 100 MB RAWs. It now reads the prefix the metadata
+can occupy — to `SOS` for JPEG, to the first `IDAT` for PNG, a cap otherwise
+(`gallery_meta::media::prefix` tabulates what that narrows).
+
+**One bad dirent no longer loses a directory.** `StdVfs::list` propagated a
+failed per-entry `stat`, which fails the whole listing — and a failed listing
+means every photo in it is carried forward as "unreadable" while a *file*
+unlinked mid-walk should simply be one row missing. Symlinked media also took
+the link's own size and mtime (`lstat`), so a symlinked photo arrived claiming
+to be a dozen bytes with a change signal that could never fire; attributes now
+follow the link, as `resourceValues` did.
+
+**Positional probe contract, stated and enforced.** The `ProviderProbe` doc
+claimed the answers were "re-keyed by path"; they are zipped positionally. A
+mis-sized reply is now discarded whole rather than zipped into a
+silently-misaligned prefix, counted in `ScanTimings.probeMismatches`, and
+logged.
+
+**Cancellation is scoped to a run.** The cancel flag was a bare `bool` cleared
+on entry, so a `cancel()` between scans was swallowed and a `cancel()` just
+after one finished killed the *next*, unrelated scan. Each run now takes a
+generation and `cancel()` names the one in flight. `CoreScanner` wires it to
+its own `Task`'s cancellation, and a cancelled pass returns
+`Result.didNotComplete` — which `runScanPass` bails on **before** `apply(_:)`,
+because an empty outcome and an empty library have the same shape and the Store
+persists one of them.
+
+**Swift seams.** Tree ubiquity is resolved from the scan *root* rather than
+from whichever directory the first probe batch landed in, and a read that
+*threw* now reads as ubiquitous (fail closed — being slow is the recoverable
+failure; answering "local" loses every placeholder in the library). A read that
+*succeeds with the key absent* stays a no: on iOS that is what every non-iCloud
+URL reports, and treating it as unknown too would undo the whole 406 s → 2.3 s
+win. The two cases are one function with a test on each branch. The sidecar
+manifest's `ContentVersion.size` carries `totalFileSize ?? fileSize` again, so
+placeholder sidecars do not churn the cache after the upgrade. `[]` is
+persisted as `[]` rather than folded into `nil`, which was costing every
+sidecar-less library a legacy re-probe on every launch. Enrichment's blocking
+reads moved off the cooperative pool onto their own queue.
+
+**Known limitation, documented rather than fixed.** The ubiquity answer covers
+the whole tree. A mixed library — a local root with an iCloud folder inside it
+— resolves to the root's kind, and the ubiquitous subtree gets the cheap probe.
+Its placeholders are still found through `totalFileSize > fileSize`; what is
+lost is the `.downloading` / `.stale` distinction, which nothing reads today. A
+per-directory answer is the real fix and is a change to the probe's cost model,
+so it belongs with Phase 4.
 
 ## Risks
 

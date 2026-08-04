@@ -33,6 +33,12 @@
 //! path for a hash and all of them are written — the detection is shared, the
 //! files are not.
 //!
+//! The queue outlives any one library root, though, so "every queued path" can
+//! include a folder the user has since switched away from — outside the app's
+//! security scope, where the write fails. [`SyncScope::root_prefix`] confines a
+//! sync to the root in play; paths outside it are **skipped**, not failed, so
+//! nothing burns a retry over a file nobody asked about.
+//!
 //! # Auto-tagging
 //!
 //! A face that joins an already-named cluster during a run is written out
@@ -45,6 +51,37 @@
 //! Getting this wrong writes a stranger's name into somebody's photo, so the
 //! bar for touching disk is deliberately higher than the bar for grouping.
 //!
+//! # The quality floor is applied where disk is touched, not where a face joins
+//!
+//! [`FaceEngine::build_request`] drops every face below
+//! [`ClusteringConfig::min_quality`], on **all** paths — the auto pass and a
+//! user's `name_cluster` alike. Gating only the auto pass looks more
+//! permissive-to-the-user, and is wrong: the request is per *photo*, not per
+//! face, so a below-floor face would reach disk the moment any other face in
+//! the same photo triggered a write. Worse, the two paths would then disagree
+//! about what that photo should say, and each would undo the other's answer —
+//! the fixed point the whole sentinel design exists to reach would never
+//! arrive. One rule, one answer: the floor is what it takes to be written into
+//! somebody's file, whoever started the write. A face under it still shows in
+//! the cluster, and raising its quality is a matter of the pack, not of the UI.
+//!
+//! # Retraction needs a reason
+//!
+//! `gallery_meta::FaceWriteRequest` is a replace set, and this module cannot
+//! honestly produce one: the cluster table is derived data. A face-pack swap
+//! empties it; a re-detection can lose a face a previous pack found. A request
+//! built from what the cache can see today would then read as "these are the
+//! only people here", and retract a name the user typed because a model changed
+//! its mind.
+//!
+//! So every request this module builds is
+//! [`gallery_meta::Authority::Partial`]: it speaks for the people it names, and
+//! for the names it explicitly lists as retracted — the old name of a cluster
+//! being un-named, ignored or renamed. A claim for anybody else is left
+//! standing. The cost is a person who genuinely left a photo staying named
+//! until something un-names them; the alternative cost is losing names to a
+//! model update, which is not recoverable at all.
+//!
 //! # Idempotence
 //!
 //! Nothing here decides whether to write. It builds the request and hands it to
@@ -55,6 +92,8 @@
 //! being woken by a no-op.
 
 use gallery_meta::{write_faces, Area, FaceRegionWrite, FaceWriteRequest};
+
+use super::engine::normalize_root_prefix;
 
 use crate::cache::{ClusterState, NamedFace};
 use crate::engine::iso8601_utc_now;
@@ -99,6 +138,49 @@ pub struct SidecarWritePlan {
     pub failed: Vec<FailedWrite>,
 }
 
+/// What a sidecar sync is allowed to touch.
+///
+/// Both fields answer a question the cache DB cannot: it holds rows from every
+/// root the app has ever pointed at, and it cannot tell a person it has
+/// forgotten from a person who has left the photo.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SyncScope {
+    /// Confine writes to paths under this directory. `None` writes every queued
+    /// path for the hash, which is only right when the caller genuinely has no
+    /// root (tests, and tools that own the whole filesystem).
+    ///
+    /// Paths outside land in [`SidecarWritePlan::skipped`].
+    pub root_prefix: Option<String>,
+    /// Names this operation is deliberately taking back — the former name of a
+    /// cluster being un-named, ignored or re-named. Everything else the sidecar
+    /// claims and this sync cannot see is left standing; see the module docs.
+    pub retracting: Vec<String>,
+}
+
+impl SyncScope {
+    /// A scope confined to `root`, retracting nothing.
+    pub fn under(root: Option<&str>) -> SyncScope {
+        SyncScope {
+            root_prefix: root.map(|r| r.to_string()),
+            retracting: Vec::new(),
+        }
+    }
+
+    /// The same scope, taking back `name` if there is one to take back.
+    fn retracting(mut self, name: Option<String>) -> SyncScope {
+        self.retracting.extend(name);
+        self
+    }
+
+    /// Whether `path` is inside this scope.
+    fn covers(&self, path: &str) -> bool {
+        match &self.root_prefix {
+            Some(root) => path.starts_with(&normalize_root_prefix(root)),
+            None => true,
+        }
+    }
+}
+
 impl SidecarWritePlan {
     /// Whether any file on disk changed.
     pub fn touched_disk(&self) -> bool {
@@ -129,11 +211,15 @@ impl FaceEngine {
     ///
     /// `tagged_at` is the ISO 8601 UTC stamp for the sentinel; `None` reads the
     /// system clock. Callers that need reproducible bytes pass their own.
+    ///
+    /// `root_prefix` confines the writes to one library root — see
+    /// [`SyncScope`].
     pub fn name_cluster(
         &self,
         cluster_id: i64,
         name: &str,
         tagged_at: Option<&str>,
+        root_prefix: Option<&str>,
     ) -> MlResult<SidecarWritePlan> {
         let name = gallery_meta::normalize_person(name)?;
         let cluster = self
@@ -148,7 +234,16 @@ impl FaceEngine {
             self.cache()
                 .set_cluster_state(cluster_id, ClusterState::Named, Some(&name))?;
         }
-        self.sync_sidecars(&hashes, tagged_at)
+        // Naming a cluster that already carried a *different* name is a rename
+        // of this group: the old name is retracted, and saying so explicitly is
+        // the only thing that distinguishes it from a name the cache has simply
+        // lost sight of.
+        let previous = cluster.person_name.filter(|p| *p != name);
+        self.sync_sidecars(
+            &hashes,
+            tagged_at,
+            &SyncScope::under(root_prefix).retracting(previous),
+        )
     }
 
     /// Take a cluster's name off and retract it from every affected sidecar.
@@ -160,8 +255,9 @@ impl FaceEngine {
         &self,
         cluster_id: i64,
         tagged_at: Option<&str>,
+        root_prefix: Option<&str>,
     ) -> MlResult<SidecarWritePlan> {
-        self.clear_cluster(cluster_id, ClusterState::Unlabeled, tagged_at)
+        self.clear_cluster(cluster_id, ClusterState::Unlabeled, tagged_at, root_prefix)
     }
 
     /// Dismiss a cluster ("not a person") and retract anything it had written.
@@ -172,8 +268,9 @@ impl FaceEngine {
         &self,
         cluster_id: i64,
         tagged_at: Option<&str>,
+        root_prefix: Option<&str>,
     ) -> MlResult<SidecarWritePlan> {
-        self.clear_cluster(cluster_id, ClusterState::Ignored, tagged_at)
+        self.clear_cluster(cluster_id, ClusterState::Ignored, tagged_at, root_prefix)
     }
 
     fn clear_cluster(
@@ -181,6 +278,7 @@ impl FaceEngine {
         cluster_id: i64,
         state: ClusterState,
         tagged_at: Option<&str>,
+        root_prefix: Option<&str>,
     ) -> MlResult<SidecarWritePlan> {
         let cluster = self
             .cache()
@@ -190,7 +288,12 @@ impl FaceEngine {
         if cluster.state != state || cluster.person_name.is_some() {
             self.cache().set_cluster_state(cluster_id, state, None)?;
         }
-        self.sync_sidecars(&hashes, tagged_at)
+        // The name this cluster carried is the one thing being taken back.
+        self.sync_sidecars(
+            &hashes,
+            tagged_at,
+            &SyncScope::under(root_prefix).retracting(cluster.person_name),
+        )
     }
 
     /// Rename a person everywhere: every cluster carrying `old`, and every
@@ -205,6 +308,7 @@ impl FaceEngine {
         old: &str,
         new: &str,
         tagged_at: Option<&str>,
+        root_prefix: Option<&str>,
     ) -> MlResult<SidecarWritePlan> {
         let old = gallery_meta::normalize_person(old)?;
         let new = gallery_meta::normalize_person(new)?;
@@ -217,7 +321,12 @@ impl FaceEngine {
                     .set_cluster_state(*id, ClusterState::Named, Some(&new))?;
             }
         }
-        self.sync_sidecars(&hashes, tagged_at)
+        let retracting = (old != new).then(|| old.clone());
+        self.sync_sidecars(
+            &hashes,
+            tagged_at,
+            &SyncScope::under(root_prefix).retracting(retracting),
+        )
     }
 
     /// Re-derive and write the sidecars of every photo carrying one of these
@@ -231,6 +340,7 @@ impl FaceEngine {
         &self,
         hashes: &[[u8; 32]],
         tagged_at: Option<&str>,
+        scope: &SyncScope,
     ) -> MlResult<SidecarWritePlan> {
         let stamp = match tagged_at {
             Some(s) => s.to_string(),
@@ -244,22 +354,34 @@ impl FaceEngine {
 
         let mut plan = SidecarWritePlan::default();
         for hash in &unique {
-            plan.absorb(self.sync_one_hash(hash, &stamp)?);
+            plan.absorb(self.sync_one_hash(hash, &stamp, scope)?);
         }
         Ok(plan)
     }
 
-    fn sync_one_hash(&self, hash: &[u8; 32], tagged_at: &str) -> MlResult<SidecarWritePlan> {
+    fn sync_one_hash(
+        &self,
+        hash: &[u8; 32],
+        tagged_at: &str,
+        scope: &SyncScope,
+    ) -> MlResult<SidecarWritePlan> {
         let named = self.cache().named_faces_for_hash(hash)?;
         let paths = self.cache().face_paths_for_hash(hash)?;
         let mut plan = SidecarWritePlan::default();
         if paths.is_empty() {
             return Ok(plan);
         }
-        let request = self.build_request(&named, tagged_at);
+        let request = self.build_request(&named, tagged_at, scope);
         let has_content = !request.regions.is_empty() || !request.extra_people.is_empty();
 
         for path in paths {
+            if !scope.covers(&path) {
+                // A row from a root the app is no longer inside. Writing it
+                // would fail outside the security scope, and failing it would
+                // burn a retry on a file nobody asked about.
+                plan.skipped.push(path);
+                continue;
+            }
             if !has_content && !self.sidecar_claims_faces(&path) {
                 // Nothing to say and nothing of ours to take back. Writing here
                 // would create (or touch) a sidecar to record that we found
@@ -287,15 +409,28 @@ impl FaceEngine {
     /// but no region: the person really is in the photo, and dropping the
     /// keyword because the rectangle is unusable would lose the more valuable
     /// half of the answer.
-    fn build_request(&self, named: &[NamedFace], tagged_at: &str) -> FaceWriteRequest {
+    fn build_request(
+        &self,
+        named: &[NamedFace],
+        tagged_at: &str,
+        scope: &SyncScope,
+    ) -> FaceWriteRequest {
         let mut regions = Vec::with_capacity(named.len());
         let mut extra_people = Vec::new();
         let mut size: Option<(u32, u32)> = None;
 
         for entry in named {
             let face = &entry.face;
+            // The image size is read even from a face that will not be written:
+            // it describes the *photo*, and `AppliedToDimensions` should not
+            // depend on which faces cleared the floor.
             if size.is_none() && face.image_w > 0 && face.image_h > 0 {
                 size = Some((face.image_w, face.image_h));
+            }
+            // The quality floor, applied once, where disk is touched. See the
+            // module docs for why the user-initiated path pays it too.
+            if face.quality < self.clustering().min_quality {
+                continue;
             }
             let corners = [
                 f64::from(face.bbox[0]),
@@ -312,7 +447,8 @@ impl FaceEngine {
             }
         }
 
-        let mut request = FaceWriteRequest::new(regions, self.face_pack_key(), tagged_at);
+        let mut request = FaceWriteRequest::new(regions, self.face_pack_key(), tagged_at)
+            .speaking_partially(scope.retracting.iter().cloned());
         request.extra_people = extra_people;
         request.image_size = size;
         request

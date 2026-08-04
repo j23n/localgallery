@@ -111,6 +111,15 @@ final class FaceService {
     /// Faces can run: a pack is installed and it ships face models.
     var isAvailable: Bool { installedPack?()?.hasFaces == true }
 
+    /// Biggest first, id breaking the tie.
+    ///
+    /// `sorted(by:)` is not a stable sort, so size alone lets two equal-sized
+    /// clusters swap places on every re-read — a list that shuffles under the
+    /// user's finger between one refresh and the next.
+    nonisolated static func biggestFirst(_ a: Cluster, _ b: Cluster) -> Bool {
+        (a.size, b.id) > (b.size, a.id)
+    }
+
     /// Unlabeled clusters big enough to be worth reviewing, biggest first.
     ///
     /// The entry point on the People screen appears exactly when this is
@@ -118,13 +127,27 @@ final class FaceService {
     var reviewableClusters: [Cluster] {
         allClusters
             .filter { $0.state == .unlabeled && $0.size >= Self.reviewMinimumFaces }
-            .sorted { ($0.size, $1.id) > ($1.size, $0.id) }
+            .sorted(by: Self.biggestFirst)
     }
 
     /// Named clusters, for the "already reviewed" half of the screen.
+    ///
+    /// Id breaks the size tie: `sorted(by:)` is not stable, so two clusters of
+    /// the same size could swap places on every re-read and shuffle the list
+    /// under the user's finger.
     var namedClusters: [Cluster] {
-        allClusters.filter { $0.state == .named }.sorted { $0.size > $1.size }
+        allClusters.filter { $0.state == .named }.sorted(by: Self.biggestFirst)
     }
+
+    /// Whether *any* core engine is busy.
+    ///
+    /// Naming is refused while a face run is in flight, and has to be refused
+    /// while a **tagging** run is too: the two engines share one cache file and
+    /// one sidecar per photo, so a naming landing mid-tagging-run has the two
+    /// of them read-modify-writing the same `.xmp`. The core's own guard only
+    /// covers its own session — this is the app-side half that makes the
+    /// exclusion mutual.
+    var isCoreBusy: Bool { isRunning || (otherEngineIsRunning?() ?? false) }
 
     // MARK: - Injected
 
@@ -133,6 +156,18 @@ final class FaceService {
     /// Reading it from there rather than repeating the search keeps a Settings
     /// appearance from SHA-256-ing a 40 MB ONNX twice.
     @ObservationIgnored var installedPack: (@MainActor () -> TaggingService.PackStatus?)?
+    /// Makes sure somebody has looked for an installed pack at least once.
+    ///
+    /// `installedPack` reads `TaggingService.pack`, which stays `nil` until
+    /// `refreshAvailability()` runs — and its only caller used to be Settings'
+    /// `.task`. On a cold launch where the user never opened Settings, the
+    /// People screen therefore asked "is a pack installed?", was told no, and
+    /// the whole review entry point failed to appear. Every faces surface funnels
+    /// through `refreshClusters()`/`startScan()`, so those ask here first.
+    @ObservationIgnored var ensurePackChecked: (@MainActor () async -> Void)?
+    /// Whether the *other* core engine (tagging) has a run in flight. See
+    /// `isCoreBusy`.
+    @ObservationIgnored var otherEngineIsRunning: (@MainActor () -> Bool)?
     /// Supplies the photos a run should consider. Set by `GalleryStore`.
     @ObservationIgnored var eligiblePhotos: (@MainActor () -> [PhotoFile])?
     /// The library root a run is confined to. Same reason as tagging's: the
@@ -148,13 +183,38 @@ final class FaceService {
     @ObservationIgnored private var session: FaceSession?
     /// Which pack `session` was opened against, so a pack change reopens it.
     @ObservationIgnored private var sessionPackDirectory: URL?
-    @ObservationIgnored private let refresh = SidecarRefreshCoalescer(interval: refreshInterval)
+    /// The in-flight `openSession`, and the pack it is opening.
+    ///
+    /// Two callers reaching `openSession` at once (Settings pressing "Tag
+    /// Library Now" while the People screen's `.task` refreshes clusters) each
+    /// built their own `FaceSession`: two ONNX loads, two SQLite connections,
+    /// and — the part that actually breaks — two run locks, so `cancel()` went
+    /// to whichever session `self.session` happened to end up holding while the
+    /// *other* one owned the run.
+    ///
+    /// Keyed by directory so the "is this the open I wanted?" question is
+    /// answered from the slot itself. Answering it from `sessionPackDirectory`
+    /// instead cannot work: the waiter can resume before the opener has
+    /// assigned it.
+    @ObservationIgnored private var opening: (directory: URL, task: Task<FaceSession, any Error>)?
+    /// Coalesces + drains the rescans this service's writes trigger. Injected,
+    /// and **shared with `TaggingService`**: the 30 s window is a budget for
+    /// interrupting the user with a rescan, and two engines each spending it
+    /// separately is two rescans, which is what the window exists to prevent.
+    @ObservationIgnored private let refresh: SidecarRefreshCoalescer
     @ObservationIgnored var refreshTask: Task<Void, Never>? { refresh.task }
     /// `cancel()` arrived before the core had a run to cancel.
     @ObservationIgnored private var cancelRequested = false
+    /// How many `FaceSession`s this service has actually built.
+    ///
+    /// Not observed state and not shown anywhere: it exists because "two
+    /// concurrent callers share one session" — the whole point of `opening` —
+    /// is otherwise unobservable from outside the service.
+    @ObservationIgnored private(set) var sessionsOpened = 0
 
-    init(cacheDatabaseURL: URL) {
+    init(cacheDatabaseURL: URL, refresh: SidecarRefreshCoalescer) {
         self.cacheDatabaseURL = cacheDatabaseURL
+        self.refresh = refresh
     }
 
     // MARK: - Running
@@ -164,6 +224,7 @@ final class FaceService {
     /// No-op when a run is already in flight.
     func startScan() async {
         guard !isRunning else { return }
+        await ensurePackChecked?()
         guard let pack = installedPack?(), pack.hasFaces else {
             lastError = .noFaceModels
             return
@@ -287,6 +348,8 @@ final class FaceService {
     /// per cluster in SQL, so this is bounded by the cluster count rather than
     /// by the face count.
     func refreshClusters() async {
+        // The one place a cold launch can discover that faces exist at all.
+        await ensurePackChecked?()
         guard let pack = installedPack?(), pack.hasFaces else {
             allClusters = []
             return
@@ -319,26 +382,32 @@ final class FaceService {
     /// affected photo's sidecar, then the app rescans so the person appears.
     @discardableResult
     func name(cluster id: Int64, as name: String) async -> Bool {
-        await mutate("naming cluster \(id)") { try $0.nameCluster(clusterId: id, name: name) }
+        await mutate("naming cluster \(id)") { session, root in
+            try session.nameCluster(clusterId: id, name: name, rootPrefix: root)
+        }
     }
 
     /// Take a cluster's name off and retract it from the sidecars it reached.
     @discardableResult
     func unname(cluster id: Int64) async -> Bool {
-        await mutate("un-naming cluster \(id)") { try $0.unnameCluster(clusterId: id) }
+        await mutate("un-naming cluster \(id)") { session, root in
+            try session.unnameCluster(clusterId: id, rootPrefix: root)
+        }
     }
 
     /// Dismiss a cluster as "not a person".
     @discardableResult
     func ignore(cluster id: Int64) async -> Bool {
-        await mutate("ignoring cluster \(id)") { try $0.ignoreCluster(clusterId: id) }
+        await mutate("ignoring cluster \(id)") { session, root in
+            try session.ignoreCluster(clusterId: id, rootPrefix: root)
+        }
     }
 
     /// Rename a person everywhere the core has written them.
     @discardableResult
     func rename(person old: String, to new: String) async -> Bool {
-        await mutate("renaming \(Log.r.person(old))") {
-            try $0.renamePerson(old: old, new: new)
+        await mutate("renaming \(Log.r.person(old))") { session, root in
+            try session.renamePerson(old: old, new: new, rootPrefix: root)
         }
     }
 
@@ -347,8 +416,8 @@ final class FaceService {
     /// Unlabeled cluster ids do not survive this, so the cluster list is
     /// re-read rather than patched.
     func recluster() async {
-        guard !isRunning, let pack = installedPack?(), pack.hasFaces else {
-            if isRunning { lastError = .alreadyRunning }
+        guard !isCoreBusy, let pack = installedPack?(), pack.hasFaces else {
+            if isCoreBusy { lastError = .alreadyRunning }
             return
         }
         do {
@@ -367,18 +436,34 @@ final class FaceService {
         await refreshClusters()
     }
 
-    /// The shape every naming action shares: refuse mid-run, call the core off
-    /// the actor, refresh the cluster list, and pull the new sidecars in.
+    /// How many failed sidecar paths one naming action puts in the log.
     ///
-    /// The core refuses these calls while a run is in flight (it will not
+    /// A rename can touch every photo of a person, and a permissions problem
+    /// fails all of them — so "log each failure" is thousands of main-actor
+    /// `os_log` calls describing one cause. The core itself hands back counts
+    /// for exactly this reason; a short sample plus the total is what a reader
+    /// of the log actually needs.
+    static let loggedFailurePathLimit = 20
+
+    /// The shape every naming action shares: refuse while the core is busy,
+    /// call it off the actor, refresh the cluster list, and pull the new
+    /// sidecars in.
+    ///
+    /// The core refuses these calls while a face run is in flight (it will not
     /// re-derive a sidecar from a cluster table a run is mutating), so this
     /// checks first and reports it as a typed error rather than letting the
-    /// user press a button that silently does nothing.
+    /// user press a button that silently does nothing. It checks the *tagging*
+    /// run too — see `isCoreBusy`; the core cannot, because that run belongs to
+    /// a different session.
+    ///
+    /// `body` is handed the root prefix as well as the session: the cache DB
+    /// outlives any one library root, so a naming that did not say which root
+    /// it meant would try to write sidecars outside the app's security scope.
     private func mutate(
         _ what: String,
-        _ body: @escaping @Sendable (FaceSession) throws -> SidecarWriteReport
+        _ body: @escaping @Sendable (FaceSession, String?) throws -> SidecarWriteReport
     ) async -> Bool {
-        guard !isRunning else {
+        guard !isCoreBusy else {
             lastError = .alreadyRunning
             return false
         }
@@ -386,23 +471,34 @@ final class FaceService {
             lastError = .noFaceModels
             return false
         }
+        let rootPrefix = libraryRoot?()?.standardizedFileURL.path
         do {
             let session = try await openSession(packDirectory: pack.directory)
             let report = try await Task.detached(priority: .userInitiated) {
                 () -> Result<SidecarWriteReport, FaceServiceError> in
                 do {
-                    return .success(try body(session))
+                    return .success(try body(session, rootPrefix))
                 } catch {
                     return .failure(FaceServiceError(error))
                 }
             }.value.get()
-            lastError = nil
             Log.ml.info(
-                "\(what): \(report.written) written, \(report.unchanged) unchanged, \(report.failed) failed"
+                "\(what): \(report.written) written, \(report.unchanged) unchanged, \(report.skipped) skipped, \(report.failed) failed"
             )
-            for path in report.failedPaths {
+            for path in report.failedPaths.prefix(Self.loggedFailurePathLimit) {
                 Log.ml.error("Sidecar write failed: \(Log.r.path(URL(fileURLWithPath: path)))")
             }
+            if report.failedPaths.count > Self.loggedFailurePathLimit {
+                Log.ml.error(
+                    "…and \(report.failedPaths.count - Self.loggedFailurePathLimit) more sidecar writes failed"
+                )
+            }
+            // A partial failure is still a failure the user has to be told
+            // about: the core reports it in the count, not by throwing, and
+            // clearing `lastError` unconditionally used to swallow it whole —
+            // the review screen showed nothing and stayed open with no
+            // explanation.
+            lastError = report.failed > 0 ? .sidecarWritesFailed(Int(report.failed)) : nil
             await refreshClusters()
             // Unconditional: the point of a naming action is that the person
             // shows up now, and `written == 0` still happens on a re-name to
@@ -438,8 +534,18 @@ final class FaceService {
         allClusters = []
     }
 
+    /// The open session for `packDirectory`, opening one if there is none.
+    ///
+    /// The open is memoized as a `Task` so concurrent callers await the *same*
+    /// one. Without that, two callers both saw `session == nil`, both built a
+    /// session, and the second overwrote `self.session` — leaving the first
+    /// session holding the run that `cancel()` could no longer reach, two ONNX
+    /// model loads, and two connections to one SQLite file.
     private func openSession(packDirectory: URL) async throws -> FaceSession {
         if let session, sessionPackDirectory == packDirectory { return session }
+        if let opening, opening.directory == packDirectory {
+            return try await opening.task.value
+        }
         if session != nil { await releaseSession() }
 
         let cacheURL = cacheDatabaseURL
@@ -447,17 +553,25 @@ final class FaceService {
             at: cacheURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        let opened = try await Task.detached(priority: .userInitiated) {
-            () -> Result<FaceSession, FaceServiceError> in
-            do {
-                return .success(try FaceSession(
-                    cacheDbPath: cacheURL.path,
-                    modelPackDir: packDirectory.path
-                ))
-            } catch {
-                return .failure(FaceServiceError(error))
-            }
-        }.value.get()
+        let task = Task { @MainActor () -> FaceSession in
+            try await Task.detached(priority: .userInitiated) {
+                () -> Result<FaceSession, FaceServiceError> in
+                do {
+                    return .success(try FaceSession(
+                        cacheDbPath: cacheURL.path,
+                        modelPackDir: packDirectory.path
+                    ))
+                } catch {
+                    return .failure(FaceServiceError(error))
+                }
+            }.value.get()
+        }
+        opening = (packDirectory, task)
+        // Only clear the slot if it is still ours — a pack change mid-open
+        // replaces it, and that open owns its own cleanup.
+        defer { if opening?.task == task { opening = nil } }
+        let opened = try await task.value
+        sessionsOpened += 1
         session = opened
         sessionPackDirectory = packDirectory
         return opened
@@ -609,6 +723,12 @@ enum FaceServiceError: Error, Sendable, Equatable {
     case inference(String)
     case io(String)
     case sidecar(String)
+    /// Some — possibly all — of a naming action's sidecar writes failed.
+    ///
+    /// Its own case because the core reports this in a *count* rather than by
+    /// throwing: the action partly succeeded, and the review screen has to say
+    /// so instead of dismissing as though nothing went wrong.
+    case sidecarWritesFailed(Int)
     /// The name the user typed cannot be a person's name. Shown next to the
     /// field, not as a banner.
     case invalidName(String)
@@ -678,9 +798,13 @@ enum FaceServiceError: Error, Sendable, Equatable {
         case .inference(let d): return "Face detection failed: \(d)"
         case .io(let d): return "File error: \(d)"
         case .sidecar(let d): return "Sidecar write failed: \(d)"
+        case .sidecarWritesFailed(let n):
+            return n == 1
+                ? "1 photo's sidecar could not be written."
+                : "\(n) photos' sidecars could not be written."
         case .invalidName(let d): return "That name can't be used: \(d)"
         case .clusterGone: return "That group no longer exists — pull to refresh."
-        case .alreadyRunning: return "A face scan is running."
+        case .alreadyRunning: return "A scan is running — try again when it finishes."
         case .cancelled: return "The face scan was cancelled."
         }
     }

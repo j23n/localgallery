@@ -12,7 +12,7 @@
 //! mechanics are shared.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 use std::thread::JoinHandle;
 
 /// Take a lock, ignoring poisoning.
@@ -64,6 +64,15 @@ pub(crate) struct RunLock {
     /// The in-flight (or just-finished) run thread, joined on the next `start`
     /// and on drop so a session never outlives its worker.
     thread: Mutex<Option<JoinHandle<()>>>,
+    /// Held for the whole of a mutator, and across the `start` handshake.
+    ///
+    /// `running` alone cannot express "a run must not start *and* a mutator
+    /// must not begin". A mutator that only reads `running` and then works is
+    /// check-then-act: a `start` landing in the gap gets its run, the mutator
+    /// gets its writes, and the two derive the same photo's sidecar from two
+    /// views of the cluster table. This mutex is what makes the check and the
+    /// act one step.
+    gate: Mutex<()>,
 }
 
 impl RunLock {
@@ -72,7 +81,29 @@ impl RunLock {
             running: Arc::new(AtomicBool::new(false)),
             cancel: Arc::new(AtomicBool::new(false)),
             thread: Mutex::new(None),
+            gate: Mutex::new(()),
         }
+    }
+
+    /// Take the gate for a mutating call, or say why not.
+    ///
+    /// `try_lock`, never `lock`: these calls come from the app's main actor, and
+    /// blocking one behind a whole inference would freeze the UI. Refusing is
+    /// the honest answer, and the app already has to handle it — a run can
+    /// re-partition the very clusters the button refers to.
+    ///
+    /// The returned guard must be held for as long as the mutation runs.
+    pub(crate) fn try_mutate(&self) -> Result<MutexGuard<'_, ()>, StartError> {
+        let guard = match self.gate.try_lock() {
+            Ok(g) => g,
+            // Another mutator is in flight, or a `start` is mid-handshake.
+            Err(TryLockError::WouldBlock) => return Err(StartError::AlreadyRunning),
+            Err(TryLockError::Poisoned(p)) => p.into_inner(),
+        };
+        if self.is_running() {
+            return Err(StartError::AlreadyRunning);
+        }
+        Ok(guard)
     }
 
     /// Whether a run is in flight.
@@ -94,6 +125,15 @@ impl RunLock {
     where
         F: FnOnce(Arc<AtomicBool>, Arc<AtomicBool>) + Send + 'static,
     {
+        // The gate first, and without blocking: a mutator holding it is doing
+        // exactly what a run must not happen underneath. `AlreadyRunning` is
+        // the right answer — from the app's point of view the core is busy,
+        // which is the only thing the UI does with it.
+        let _gate = match self.gate.try_lock() {
+            Ok(g) => g,
+            Err(TryLockError::WouldBlock) => return Err(StartError::AlreadyRunning),
+            Err(TryLockError::Poisoned(p)) => p.into_inner(),
+        };
         // Acquire the run lock before touching anything else: two concurrent
         // `start` calls must not both get as far as spawning.
         if self
@@ -267,6 +307,48 @@ mod tests {
         });
         join_unless_current(handle);
         assert!(done.load(Ordering::SeqCst), "the join did not wait");
+    }
+
+    /// The check-then-act hole: a mutator that only *read* `running` could be
+    /// overtaken by a `start` between the read and the work. The gate makes the
+    /// two one step, in both directions.
+    #[test]
+    fn a_start_cannot_slip_in_beside_a_mutator() {
+        let run = RunLock::new();
+        let guard = run.try_mutate().expect("nothing is running");
+        assert_eq!(
+            run.start("test-run", |_, _| {}).unwrap_err(),
+            StartError::AlreadyRunning,
+            "a run started underneath a mutation"
+        );
+        // And a second mutator waits its turn rather than interleaving.
+        assert_eq!(run.try_mutate().unwrap_err(), StartError::AlreadyRunning);
+
+        drop(guard);
+        run.start("test-run", |_cancel, running| {
+            let _guard = FinishGuard::new(running, |_: Option<()>| {});
+        })
+        .expect("the gate did not come back");
+        run.shutdown();
+    }
+
+    #[test]
+    fn a_mutator_is_refused_while_a_run_is_in_flight() {
+        let run = RunLock::new();
+        let release = Arc::new(AtomicBool::new(false));
+        let gate = Arc::clone(&release);
+        run.start("test-run", move |_cancel, running| {
+            let _guard = FinishGuard::new(running, |_: Option<()>| {});
+            while !gate.load(Ordering::Acquire) {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        })
+        .expect("first start");
+
+        assert_eq!(run.try_mutate().unwrap_err(), StartError::AlreadyRunning);
+        release.store(true, Ordering::Release);
+        run.shutdown();
+        assert!(run.try_mutate().is_ok(), "the gate stayed shut");
     }
 
     #[test]

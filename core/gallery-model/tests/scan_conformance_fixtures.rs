@@ -217,7 +217,11 @@ fn metadata_fixture_still_records_the_known_oddities() {
         vec!["People/Alice", "Objects/Car", "Scenes/Beach"],
         "union, embedded first, and the EMBEDDED spelling wins a case conflict"
     );
-    assert_eq!(conflict.country_code.as_deref(), Some("IT"), "embedded wins");
+    assert_eq!(
+        conflict.country_code.as_deref(),
+        Some("IT"),
+        "embedded wins"
+    );
     assert_eq!(
         conflict
             .face_regions
@@ -374,8 +378,8 @@ fn scanner_fixture_deserializes_and_pins_the_light_scan_blind_spot() {
         .as_array()
         .unwrap()
         .is_empty());
-    for i in 1..=3 {
-        let removed = strings(&passes[i]["removedPaths"]);
+    for (i, pass) in passes.iter().enumerate().take(4).skip(1) {
+        let removed = strings(&pass["removedPaths"]);
         assert_eq!(removed, vec!["Nested/nested1.jpg"], "pass {}", i + 1);
     }
 
@@ -448,8 +452,14 @@ fn scanner_fixture_pins_both_normalization_forms() {
         let form = p["pathNormalization"].as_str().unwrap();
         let has_combining = path.chars().any(|c| ('\u{0300}'..='\u{036F}').contains(&c));
         match form {
-            "NFD" => assert!(has_combining, "{path} is tagged NFD but carries no combining mark"),
-            "NFC" => assert!(!has_combining, "{path} is tagged NFC but carries a combining mark"),
+            "NFD" => assert!(
+                has_combining,
+                "{path} is tagged NFD but carries no combining mark"
+            ),
+            "NFC" => assert!(
+                !has_combining,
+                "{path} is tagged NFC but carries a combining mark"
+            ),
             "ascii" => assert!(path.is_ascii() || !has_combining, "{path}"),
             other => panic!("{path}: unexpected normalization token {other}"),
         }
@@ -492,7 +502,11 @@ fn library_snapshot_fixture_matches_the_documented_encoding() {
     assert_eq!(snapshot["version"], 20);
     let value = &snapshot["value"];
     let keys: Vec<&String> = value.as_object().unwrap().keys().collect();
-    assert_eq!(keys.len(), 2, "LibrarySnapshot has exactly two fields today");
+    assert_eq!(
+        keys.len(),
+        2,
+        "LibrarySnapshot has exactly two fields today"
+    );
     assert!(value.get("rootFolder").is_some() && value.get("allPhotos").is_some());
 
     let photos = value["allPhotos"].as_array().unwrap();
@@ -532,8 +546,12 @@ fn library_snapshot_fixture_matches_the_documented_encoding() {
         .iter()
         .find(|p| p["filename"] == "IMG_0002")
         .expect("IMG_0002");
-    let bare_keys: std::collections::BTreeSet<&str> =
-        bare.as_object().unwrap().keys().map(|s| s.as_str()).collect();
+    let bare_keys: std::collections::BTreeSet<&str> = bare
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|s| s.as_str())
+        .collect();
     assert_eq!(
         bare_keys,
         [
@@ -550,7 +568,12 @@ fn library_snapshot_fixture_matches_the_documented_encoding() {
         .collect::<std::collections::BTreeSet<_>>(),
         "an all-nil photo carries only the non-optional keys"
     );
-    for key in ["dateTaken", "countryCode", "gpsLatitude", "livePhotoVideoURL"] {
+    for key in [
+        "dateTaken",
+        "countryCode",
+        "gpsLatitude",
+        "livePhotoVideoURL",
+    ] {
         assert!(bare.get(key).is_none(), "{key} must be omitted, not null");
     }
     // Nested optionals behave the same way.

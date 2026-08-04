@@ -70,12 +70,46 @@ pub fn root_of(tag: &str) -> &str {
 /// the deliberate door.
 pub const PEOPLE_ROOT: &str = "People";
 
+/// Characters that occupy no space when rendered.
+///
+/// Not stripped — a zero-width joiner between two Devanagari letters, or
+/// between the parts of an emoji sequence, is part of the text and removing it
+/// changes the word. They are only *counted*: a "name" made of nothing else is
+/// a name the user cannot see, cannot retype, and cannot tell apart from the
+/// next one, so it is refused rather than turned into an invisible `People/`
+/// tag.
+///
+/// Whitespace counts as invisible here too. `split_whitespace` has already
+/// removed the runs that Unicode calls whitespace by the time this is asked,
+/// but the bidi and format characters below are *not* whitespace and survive it.
+fn is_invisible(c: char) -> bool {
+    c.is_whitespace()
+        || matches!(c,
+            '\u{00AD}'                 // soft hyphen
+            | '\u{200B}'..='\u{200F}'  // zero-width space/NJ/J, LRM, RLM
+            | '\u{202A}'..='\u{202E}'  // bidi embedding and override
+            | '\u{2060}'..='\u{2064}'  // word joiner, invisible operators
+            | '\u{2066}'..='\u{2069}'  // bidi isolates
+            | '\u{FEFF}'               // zero-width no-break space / BOM
+        )
+}
+
 /// Normalize a person's name for the `People/<Name>` root.
 ///
-/// NFC-composes, trims, and collapses internal whitespace runs. Rejects an
-/// empty name, control characters, and `/` — a slash would silently create a
-/// deeper path (`People/Alice/Smith`), which is a different tag and a different
-/// person as far as every consumer is concerned.
+/// NFC-composes, trims, and collapses internal whitespace runs. Rejects:
+///
+/// * an empty name, and one with nothing visible left in it ([`is_invisible`]);
+/// * control characters;
+/// * `/` — a slash would silently create a deeper path
+///   (`People/Alice/Smith`), which is a different tag and a different person as
+///   far as every consumer is concerned;
+/// * `|` — the separator [`to_lr_path`] uses. `Alice|Bob` would go into
+///   `lr:hierarchicalSubject` as `People|Alice|Bob`, which Lightroom reads as a
+///   *person named Bob under a category named Alice*. The name would be one
+///   person to digiKam and another to Lightroom, from one keystroke.
+///
+/// Everything else Unicode offers is a legal name: CJK, diacritics, RTL scripts
+/// and the joiners the scripts that need them are written with.
 ///
 /// # Why this does not titlecase
 ///
@@ -97,10 +131,16 @@ pub fn normalize_person(name: &str) -> MetaResult<String> {
     if name.contains('/') {
         return Err(reject("a person name cannot contain '/'"));
     }
+    if name.contains('|') {
+        return Err(reject("a person name cannot contain '|'"));
+    }
     let composed = nfc(name);
     let collapsed = composed.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.is_empty() {
         return Err(reject("empty after normalization"));
+    }
+    if collapsed.chars().all(is_invisible) {
+        return Err(reject("no visible characters"));
     }
     Ok(collapsed)
 }
@@ -289,8 +329,41 @@ mod tests {
 
     #[test]
     fn person_names_reject_what_would_change_their_identity() {
-        for bad in ["", "   ", "Alice/Smith", "Ali\u{0}ce"] {
+        for bad in [
+            "",
+            "   ",
+            "Alice/Smith",
+            "Ali\u{0}ce",
+            // A forged Lightroom hierarchy: `People|Alice|Bob` reads as "Bob,
+            // inside Alice" to every reader of `lr:hierarchicalSubject`.
+            "Alice|Bob",
+            "|",
+            // Nothing anybody can see, retype, or tell from the next one.
+            "\u{200B}",
+            "\u{200B}\u{200C}\u{FEFF}",
+            "\u{202E}\u{2066}",
+            "\u{00AD}",
+        ] {
             assert!(normalize_person(bad).is_err(), "{bad:?} should be rejected");
+        }
+    }
+
+    /// The rejection above must not take the world's actual names with it.
+    #[test]
+    fn person_names_in_every_script_are_still_names() {
+        for good in [
+            "李明",
+            "Ægir Þórsson",
+            "José María",
+            "أحمد بن سعيد",
+            "דוד בן-גוריון",
+            "Ольга",
+            // A zero-width joiner *between* letters is part of the word, not a
+            // way to write an invisible name.
+            "क\u{200D}ष",
+            "bell hooks",
+        ] {
+            assert!(normalize_person(good).is_ok(), "{good:?} was rejected");
         }
     }
 

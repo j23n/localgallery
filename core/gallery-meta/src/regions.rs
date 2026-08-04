@@ -11,6 +11,10 @@
 //! and a claim is matched against a region in the file **geometrically**, at
 //! [`REGION_MATCH_IOU`].
 //!
+//! The match is **one claim to one region** ([`bind_claims`]): we wrote one box
+//! per claim, so at most one box in the file can be that claim's. Anything else
+//! overlapping it is a second tool's box on the same face, and stays.
+//!
 //! Geometry rather than name, on purpose. A name can be edited by the tool that
 //! owns the file next (digiKam correcting a spelling), and matching on it would
 //! orphan our claim: the region would then be nobody's, and the next write
@@ -245,10 +249,51 @@ pub fn parse_claim(entry: &str) -> Option<RegionClaim> {
     })
 }
 
-/// Whether any claim covers this region.
-pub fn is_claimed(claims: &[RegionClaim], region: &FaceRegion) -> bool {
-    let area = Area::of(region);
-    claims.iter().any(|c| c.area.matches(&area))
+/// Bind claims to regions **one to one**, and say which claim owns each region.
+///
+/// Returns one entry per element of `regions`: the index of the claim that owns
+/// it, or `None` for a region nobody claimed.
+///
+/// The one-to-one part is the whole point. Two tools boxing the same face
+/// produce two regions that both clear [`REGION_MATCH_IOU`] against our single
+/// claim, and a per-region "does any claim match" test answers *yes* for both —
+/// which makes digiKam's box look like ours and hands it to the retraction
+/// path. We wrote one region, so at most one region can be ours: each claim is
+/// consumed once, by the region it overlaps best, and everything left over is
+/// somebody else's.
+///
+/// Greedy by descending overlap, ties broken by index, so the binding is a
+/// function of its inputs and not of the sort's stability. Greedy rather than
+/// optimal (Hungarian): the inputs are a handful of boxes, ties above 0.5 IoU
+/// mean two near-identical rectangles either of which is the right answer, and
+/// an assignment algorithm here would be precision nobody can observe.
+pub fn bind_claims(claims: &[RegionClaim], regions: &[FaceRegion]) -> Vec<Option<usize>> {
+    let mut pairs: Vec<(f64, usize, usize)> = Vec::new();
+    for (ci, claim) in claims.iter().enumerate() {
+        for (ri, region) in regions.iter().enumerate() {
+            let iou = claim.area.iou(&Area::of(region));
+            if iou > REGION_MATCH_IOU {
+                pairs.push((iou, ci, ri));
+            }
+        }
+    }
+    pairs.sort_by(|a, b| {
+        b.0.partial_cmp(&a.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
+
+    let mut owner: Vec<Option<usize>> = vec![None; regions.len()];
+    let mut claim_taken = vec![false; claims.len()];
+    for (_, ci, ri) in pairs {
+        if claim_taken[ci] || owner[ri].is_some() {
+            continue;
+        }
+        claim_taken[ci] = true;
+        owner[ri] = Some(ci);
+    }
+    owner
 }
 
 // ---------------------------------------------------------------------------
@@ -566,6 +611,61 @@ mod tests {
         ] {
             assert!(parse_claim(bad).is_none(), "{bad:?} should not parse");
         }
+    }
+
+    fn face_at(x: f64, y: f64, w: f64, h: f64) -> FaceRegion {
+        FaceRegion {
+            name: None,
+            kind: Some("Face".into()),
+            center_x: x,
+            center_y: y,
+            width: w,
+            height: h,
+        }
+    }
+
+    /// The bug this function exists for: our box and digiKam's box over one
+    /// face both clear the IoU bar against our single claim. Only one of them
+    /// can be ours.
+    #[test]
+    fn one_claim_binds_to_one_region_not_to_every_overlapping_one() {
+        let claim = parse_claim("0.400000,0.350000,0.120000,0.160000 Alice").unwrap();
+        let ours = face_at(0.4, 0.35, 0.12, 0.16);
+        let digikam = face_at(0.405, 0.352, 0.125, 0.163);
+        assert!(
+            Area::of(&digikam).matches(&claim.area),
+            "the fixture must actually overlap, or it tests nothing"
+        );
+
+        let owner = bind_claims(
+            std::slice::from_ref(&claim),
+            &[ours.clone(), digikam.clone()],
+        );
+        assert_eq!(owner, vec![Some(0), None], "the better overlap wins");
+
+        // And the order the regions appear in the file cannot change the answer.
+        let owner = bind_claims(&[claim], &[digikam, ours]);
+        assert_eq!(owner, vec![None, Some(0)]);
+    }
+
+    #[test]
+    fn two_claims_over_two_faces_bind_to_their_own_boxes() {
+        let a = parse_claim("0.200000,0.200000,0.100000,0.100000 Alice").unwrap();
+        let b = parse_claim("0.800000,0.800000,0.100000,0.100000 Bob").unwrap();
+        let owner = bind_claims(
+            &[a, b],
+            &[face_at(0.8, 0.8, 0.1, 0.1), face_at(0.2, 0.2, 0.1, 0.1)],
+        );
+        assert_eq!(owner, vec![Some(1), Some(0)]);
+    }
+
+    #[test]
+    fn a_claim_whose_region_is_gone_binds_to_nothing() {
+        let a = parse_claim("0.200000,0.200000,0.100000,0.100000 Alice").unwrap();
+        assert_eq!(
+            bind_claims(&[a], &[face_at(0.8, 0.8, 0.1, 0.1)]),
+            vec![None]
+        );
     }
 
     #[test]

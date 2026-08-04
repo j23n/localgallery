@@ -12,6 +12,7 @@
 pub mod date;
 pub mod file_url;
 pub mod photo;
+pub mod rng;
 pub mod snapshot;
 pub mod stable_uuid;
 pub mod swift_json;
@@ -21,6 +22,7 @@ pub use photo::{
     FaceRegion, FileUrl, HierarchicalTag, PhotoFile, PhotoFolder, PhotoLocality, SidecarStatus,
     StableId,
 };
+pub use rng::SeededRng;
 pub use snapshot::{
     ContentVersion, DownloadStatus, LibrarySnapshot, SidecarCandidate, SnapshotError,
     LIBRARY_SNAPSHOT_VERSION,

@@ -5,6 +5,8 @@ members = [
     "gallery-vfs",
     "gallery-meta",
     "gallery-scan",
+    "gallery-index",
+    "gallery-memories",
     "gallery-ml",
     "gallery-ffi",
     "uniffi-bindgen",

@@ -446,6 +446,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "gallery-index"
+version = "0.1.0"
+dependencies = [
+ "gallery-model",
+ "serde",
+ "serde_json",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "gallery-memories"
+version = "0.1.0"
+dependencies = [
+ "gallery-model",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "gallery-meta"
 version = "0.1.0"
 dependencies = [

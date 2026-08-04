@@ -1,0 +1,18 @@
+[package]
+name = "gallery-index"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+gallery-model = { path = "../gallery-model" }
+# Swift's `String.contains` matches by CANONICAL EQUIVALENCE, not bytes: a
+# precomposed query finds a decomposed filename. Normalising both sides to NFC
+# is how that survives the port — see `text::match_key`.
+unicode-normalization = "0.1"
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

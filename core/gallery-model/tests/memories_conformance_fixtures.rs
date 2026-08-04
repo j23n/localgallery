@@ -12,10 +12,12 @@
 //! recorded. When `gallery-memories` / `gallery-index` land, their tests
 //! replace these assertions with real comparisons against real output.
 //!
-//! The one exception is `SeededRNG`, which is small enough to implement inline:
-//! the vectors are checked against a real Rust implementation right now, so the
-//! port starts from working code rather than from a description of it.
+//! The one exception is `SeededRNG`: its vectors are checked against the real
+//! implementation, [`gallery_model::SeededRng`], rather than against a
+//! description of it. Everything else in Phase 4 depends on that generator, so
+//! it landed first and lives in the library, not in this file.
 
+use gallery_model::SeededRng;
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -150,40 +152,6 @@ struct DaySeed {
     seed: String,
 }
 
-/// `Shared/SeededRNG.swift`, ported. FNV-1a over the seed's UTF-8 bytes into a
-/// SplitMix64 state.
-struct SeededRng {
-    state: u64,
-}
-
-impl SeededRng {
-    fn new(seed: &str) -> Self {
-        let mut s: u64 = 0xcbf2_9ce4_8422_2325;
-        for b in seed.as_bytes() {
-            s = (s ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        SeededRng {
-            state: if s == 0 { 0xdead_beef } else { s },
-        }
-    }
-
-    fn next(&mut self) -> u64 {
-        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.state;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
-
-    /// Swift's `Double.random(in: 0..<width, using:)`: one `next()`, its LOW 53
-    /// bits, scaled by 2^-53, then multiplied by the range width — in that
-    /// order, because the order is observable in the last bit.
-    fn next_double(&mut self, width: f64) -> f64 {
-        let rand = self.next() & ((1u64 << 53) - 1);
-        width * (rand as f64 * f64::from_bits(0x3CA0_0000_0000_0000))
-    }
-}
-
 #[test]
 fn seeded_rng_vectors_match_a_rust_implementation() {
     let dump: RngDump = parse("seeded_rng.json");
@@ -207,14 +175,16 @@ fn seeded_rng_vectors_match_a_rust_implementation() {
 
         let rng = SeededRng::new(&v.seed);
         assert_eq!(
-            rng.state.to_string(),
+            rng.state().to_string(),
             v.initial_state,
             "seed '{}': FNV-1a state mismatch",
             v.seed
         );
 
         let mut raw = SeededRng::new(&v.seed);
-        let observed: Vec<String> = (0..v.next.len()).map(|_| raw.next().to_string()).collect();
+        let observed: Vec<String> = (0..v.next.len())
+            .map(|_| raw.next_u64().to_string())
+            .collect();
         assert_eq!(observed, v.next, "seed '{}': SplitMix64 mismatch", v.seed);
 
         // Compare BIT PATTERNS, not the decimals: serde_json parses at least

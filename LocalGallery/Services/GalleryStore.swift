@@ -616,6 +616,14 @@ final class GalleryStore {
     /// because `CoreLibraryIndex` is `@Observable`.
     var sortedPhotos: [PhotoFile] { index.sortedPhotos }
 
+    /// Whether `sortedPhotos` is an answer yet.
+    ///
+    /// It is empty both before the first rebuild publishes and when the library
+    /// genuinely is, and a view cannot tell those apart from the array alone —
+    /// which is why a cold launch used to flash "No photos match." over a full
+    /// library for the length of the first index build.
+    var hasSortedPhotos: Bool { index.hasEverPublished }
+
     /// O(1) photo lookup by ID. The id → `PhotoFile` table is the app's own —
     /// the core answers in ids and the app holds the structs.
     func photo(byID id: UUID) -> PhotoFile? { index.photo(byID: id) }

@@ -9,21 +9,50 @@
 //!
 //! ## What a zone is, here
 //!
-//! A **fixed offset from UTC**, not an IANA zone. The workspace has no tz
-//! database and no date dependency (see `gallery_model::date`), and shipping
-//! one to get `Europe/Berlin`'s DST transitions right would be a large
-//! dependency for a small correctness gain: every quantity the engine derives
-//! from the calendar is a *day bucket*, and a DST shift moves a day boundary by
-//! an hour twice a year. The visible consequence is that a photo taken within
-//! an hour of local midnight on a transition day can land in the adjacent day
-//! bucket. Both fixture zones (`UTC`, `Asia/Tokyo`) are fixed-offset, so the
-//! conformance suite does not exercise the difference.
+//! A **fixed offset from UTC**, not an IANA zone — but *which* fixed offset is
+//! resolved per instant by the caller, not once per run. The workspace has no
+//! tz database and no date dependency (see `gallery_model::date`), so a
+//! [`LocalCalendar`] is one offset; a [`Zone`] is the offsets the platform's
+//! real calendar returned, one per photo plus one for `now`.
 //!
-//! **For the FFI layer:** pass the offset that `TimeZone.current.secondsFromGMT(for:)`
-//! returns *for `now`*. That makes the horizon and today's generation exact,
-//! and leaves only historical photo bucketing approximate. If that ever stops
-//! being good enough, the fix is a zone parameter carrying a transition table,
-//! not a change to any of the ladder code.
+//! That split exists because resolving a single offset at `now` and applying it
+//! to the whole library is wrong for every DST user, in a way that is invisible
+//! until it corrupts the daily rail's own history:
+//!
+//! > Berlin. A photo taken 2019-07-15 00:30 CEST (UTC+2) is 2019-07-14 22:30Z.
+//! > Generate in July and the run's offset is +2, so the photo buckets on
+//! > **July 15**. Generate the same library in January and the offset is +1, so
+//! > it buckets on **July 14**. The density memory's id flips between
+//! > `density-2019-7-15` and `density-2019-7-14`, a trip starting that morning
+//! > flips its `trip-<y>-<m>-<d>` key and therefore its **cluster key**, and the
+//! > seen (−30) and cool-down (−25) penalties stop matching the history the
+//! > user's own taps wrote. Twice a year, for half the world.
+//!
+//! So: **photo day-bucketing uses the photo's own offset** ([`Zone::at`]) and
+//! **today / horizon math uses the offset at `now`** ([`Zone::now`]).
+//!
+//! ### What is still approximate
+//!
+//! *Rendering.* Subtitles ([`crate::locale::format_date_range`]) format a
+//! memory's date range with the `now` calendar, because `finalize` sees the
+//! range's two instants and not the photos they came from. A Berlin user
+//! reading a July memory in January sees the same one-hour skew in the printed
+//! date that the bucketing no longer has. Fixing it means carrying the range's
+//! offsets on `Memory` itself, which is a wire change for a one-hour label
+//! error on two days a year.
+//!
+//! *Instants derived from a day.* [`LocalCalendar::instant_at_midnight`] and
+//! [`LocalCalendar::start_of_day`] are always the `now` calendar's. Both are
+//! only ever compared against `now`, so there is nothing per-photo about them.
+//!
+//! **For the FFI layer:** pass `time_zone_offset_seconds` =
+//! `Calendar.current.timeZone.secondsFromGMT(for: now)` and one
+//! `secondsFromGMT(for: photo.dateTaken)` per photo. Passing no per-photo
+//! offsets is allowed and means "use the `now` offset for everything" — the
+//! pre-fix behaviour, and what a caller with no real calendar can still do.
+//! Both fixture zones (`UTC`, `Asia/Tokyo`) have no DST, so every per-photo
+//! offset there equals the constant and the conformance suite cannot tell the
+//! two apart.
 
 use gallery_model::{AppleDate, CivilDateTime};
 
@@ -49,6 +78,64 @@ impl UtcOffset {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalCalendar {
     pub offset: UtcOffset,
+}
+
+/// The offsets a run works in: one for `now`, and one per photo.
+///
+/// Cheap to carry and cheap to ask — [`Self::at`] is an index into a `Vec<i32>`
+/// and returns a `Copy` calendar, so a per-photo call site costs the same as
+/// the shared-calendar one it replaced. See the module docs for why the
+/// distinction exists at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Zone {
+    at_now: LocalCalendar,
+    /// Parallel to the run's photo table. **May be empty**, meaning "no
+    /// per-photo information available, use `at_now` for everything" — the
+    /// behaviour before per-photo offsets existed, and still what a caller
+    /// without a real calendar passes.
+    per_photo: Vec<i32>,
+}
+
+impl Zone {
+    /// One offset for everything. What a fixed-offset zone (`UTC`, `Asia/Tokyo`)
+    /// collapses to, and the shape every Rust unit test uses.
+    pub fn fixed(offset: UtcOffset) -> Self {
+        Zone {
+            at_now: LocalCalendar::new(offset),
+            per_photo: Vec::new(),
+        }
+    }
+
+    /// `at_now` plus the platform-resolved offset of each photo's own instant.
+    pub fn new(at_now: UtcOffset, per_photo: Vec<i32>) -> Self {
+        Zone {
+            at_now: LocalCalendar::new(at_now),
+            per_photo,
+        }
+    }
+
+    /// The calendar for `now`: today's day, the horizon's days, the six-month
+    /// and three-day penalty windows, and every rendered date.
+    pub fn now(&self) -> LocalCalendar {
+        self.at_now
+    }
+
+    /// The calendar a photo's own wall clock was on. Falls back to [`Self::now`]
+    /// for an index the caller supplied no offset for, so a short or empty
+    /// table degrades to the old behaviour instead of panicking.
+    pub fn at(&self, photo_index: u32) -> LocalCalendar {
+        match self.per_photo.get(photo_index as usize) {
+            Some(offset) => LocalCalendar::new(UtcOffset(*offset)),
+            None => self.at_now,
+        }
+    }
+
+    /// Whether any per-photo offset differs from `now`'s — i.e. whether this
+    /// run can bucket a photo differently than a single-offset run would.
+    /// Diagnostics only.
+    pub fn has_per_photo_offsets(&self) -> bool {
+        self.per_photo.iter().any(|o| *o != self.at_now.offset.0)
+    }
 }
 
 /// A local calendar day, the granularity nearly every generator groups by.
@@ -218,6 +305,48 @@ mod tests {
         assert_eq!(cal.ymd(cal.adding_months(march31, -1)).day, 29);
         assert_eq!(cal.ymd(cal.adding_months(march31, -6)).month, 9);
         assert_eq!(cal.ymd(cal.adding_months(march31, -6)).year, 2023);
+    }
+
+    /// The exact scenario the per-photo offset exists for. A single offset
+    /// resolved at `now` buckets a July photo on a different day depending on
+    /// which season the generation runs in; the per-photo offset does not.
+    #[test]
+    fn a_berlin_summer_photo_buckets_the_same_in_january_and_in_july() {
+        // 2019-07-14T22:30Z is 2019-07-15 00:30 CEST (UTC+2).
+        let photo = utc(2019, 7, 14, 22, 30);
+        let cest = 2 * 3600;
+        let cet = 3600;
+
+        // The bug: one offset for the whole run.
+        let summer_run = Zone::fixed(UtcOffset(cest));
+        let winter_run = Zone::fixed(UtcOffset(cet));
+        assert_eq!(summer_run.at(0).ymd(photo).day, 15);
+        assert_eq!(
+            winter_run.at(0).ymd(photo).day,
+            14,
+            "precondition: a winter-resolved offset moves the photo a day back"
+        );
+
+        // The fix: the photo carries the offset that was in force when it was
+        // taken, whichever season the run happens in.
+        let summer = Zone::new(UtcOffset(cest), vec![cest]);
+        let winter = Zone::new(UtcOffset(cet), vec![cest]);
+        assert_eq!(summer.at(0).ymd(photo), winter.at(0).ymd(photo));
+        assert_eq!(winter.at(0).ymd(photo).day, 15);
+        // …while `now` still uses the run's own offset, which is what the
+        // horizon and the penalty windows need.
+        assert_eq!(winter.now().offset, UtcOffset(cet));
+    }
+
+    /// An empty per-photo table is the documented "no calendar available"
+    /// input, not a bug: it degrades to the single-offset behaviour.
+    #[test]
+    fn a_missing_per_photo_offset_falls_back_to_now() {
+        let zone = Zone::new(UtcOffset::hours(9), vec![3600]);
+        assert_eq!(zone.at(0).offset, UtcOffset(3600));
+        assert_eq!(zone.at(7).offset, UtcOffset::hours(9), "past the table");
+        assert!(zone.has_per_photo_offsets());
+        assert!(!Zone::fixed(UtcOffset::hours(9)).has_per_photo_offsets());
     }
 
     #[test]

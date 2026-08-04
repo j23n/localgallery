@@ -12,9 +12,13 @@ use std::collections::{HashMap, HashSet};
 
 use gallery_model::{AppleDate, PhotoFile};
 
+use gallery_model::text;
+
 use crate::locale::country_name;
-use crate::time::{LocalCalendar, YearMonthDay};
-use crate::{dedup_by_time_window, ids_of, sorted_ascending, DatedPhoto, Memory, MemoryType};
+use crate::time::{YearMonthDay, Zone};
+use crate::{
+    dedup_by_time_window, ids_of, sorted_ascending, DatedPhoto, Memory, MemoryType, PersonKeys,
+};
 
 /// A trip needs this many photos after dedup, parent and sub-trip alike.
 const MIN_TRIP_PHOTOS: usize = 15;
@@ -81,11 +85,8 @@ fn gps(photo: &PhotoFile) -> Option<(f64, f64)> {
 /// a 3-month trip has wide span but few distinct days; a busy week at home has
 /// many distinct days but no span. Both criteria adapt downward for a library
 /// younger than ~360 days.
-pub fn detect_home_regions(
-    cal: &LocalCalendar,
-    photos: &[PhotoFile],
-    geo: &[DatedPhoto],
-) -> HomeRegions {
+pub fn detect_home_regions(zone: &Zone, photos: &[PhotoFile], geo: &[DatedPhoto]) -> HomeRegions {
+    let cal = zone.now();
     struct CellStat {
         first: AppleDate,
         last: AppleDate,
@@ -97,7 +98,7 @@ pub fn detect_home_regions(
             continue;
         };
         let cell = GridCell::at(lat, lon);
-        let day = cal.ymd(*date);
+        let day = zone.at(*idx).ymd(*date);
         stats
             .entry(cell)
             .and_modify(|s| {
@@ -122,7 +123,7 @@ pub fn detect_home_regions(
     let total_span_days = cal.day_difference(first.1, last.1);
     let total_distinct_days = geo
         .iter()
-        .map(|e| cal.ymd(e.1))
+        .map(|e| zone.at(e.0).ymd(e.1))
         .collect::<HashSet<_>>()
         .len() as i64;
     let min_span_days = 180.min(30.max(total_span_days / 2));
@@ -150,12 +151,11 @@ pub fn detect_home_regions(
 /// `generateTripMemories`: split the GPS-tagged run into away-from-home
 /// stretches and turn each into a trip (plus its sub-trips).
 pub fn generate_trip_memories(
-    cal: &LocalCalendar,
+    zone: &Zone,
     photos: &[PhotoFile],
     dated: &[DatedPhoto],
     today: AppleDate,
-    me_person_path: &str,
-    hidden_people: &HashSet<String>,
+    keys: &PersonKeys,
 ) -> Vec<Memory> {
     let geo = sorted_ascending(
         dated
@@ -168,7 +168,7 @@ pub fn generate_trip_memories(
         return Vec::new();
     }
 
-    let home = detect_home_regions(cal, photos, &geo);
+    let home = detect_home_regions(zone, photos, &geo);
     // Fallback for libraries too sparse to surface a stable home cluster.
     // NOT covered by any fixture — see the module docs.
     let median_home = if home.is_empty() {
@@ -200,54 +200,28 @@ pub fn generate_trip_memories(
     let mut current: Vec<DatedPhoto> = Vec::new();
     for entry in &geo {
         if is_at_home(&photos[entry.0 as usize]) {
-            flush_trip(
-                cal,
-                photos,
-                &current,
-                today,
-                me_person_path,
-                hidden_people,
-                &mut candidates,
-            );
+            flush_trip(zone, photos, &current, today, keys, &mut candidates);
             current.clear();
         } else {
             if let Some(last) = current.last() {
                 if entry.1 .0 - last.1 .0 > TRIP_GAP_SECONDS {
-                    flush_trip(
-                        cal,
-                        photos,
-                        &current,
-                        today,
-                        me_person_path,
-                        hidden_people,
-                        &mut candidates,
-                    );
+                    flush_trip(zone, photos, &current, today, keys, &mut candidates);
                     current.clear();
                 }
             }
             current.push(*entry);
         }
     }
-    flush_trip(
-        cal,
-        photos,
-        &current,
-        today,
-        me_person_path,
-        hidden_people,
-        &mut candidates,
-    );
+    flush_trip(zone, photos, &current, today, keys, &mut candidates);
     candidates
 }
 
-#[allow(clippy::too_many_arguments)]
 fn flush_trip(
-    cal: &LocalCalendar,
+    zone: &Zone,
     photos: &[PhotoFile],
     entries: &[DatedPhoto],
     today: AppleDate,
-    me_person_path: &str,
-    hidden_people: &HashSet<String>,
+    keys: &PersonKeys,
     candidates: &mut Vec<Memory>,
 ) {
     if entries.len() < MIN_TRIP_PHOTOS {
@@ -258,22 +232,26 @@ fn flush_trip(
         return;
     }
     let (first, last) = (sorted[0].1, sorted[sorted.len() - 1].1);
+    let cal = zone.now();
 
     let today_civil = cal.civil(today);
-    let last_civil = cal.civil(last);
+    // The trip's own days are read in the photos' offsets: `trip_key` is the
+    // memory id AND the cluster key, and an id that shifted with the season
+    // would orphan its own cool-down history every March and October.
+    let last_civil = zone.at(sorted[sorted.len() - 1].0).civil(last);
     if (last_civil.month, last_civil.year) == (today_civil.month, today_civil.year) {
         return;
     }
 
     let days = cal.day_difference(first, last).max(1);
     let ids = ids_of(photos, &sorted);
-    let start = cal.civil(first);
+    let start = zone.at(sorted[0].0).civil(first);
     // Density-style, not ISO: no zero padding (landmine 5).
     let trip_key = format!("{}-{}-{}", start.year, start.month, start.day);
 
     let trip_photos: Vec<u32> = sorted.iter().map(|e| e.0).collect();
     let location = trip_label(photos, &trip_photos);
-    let people = trip_people_suffix(photos, &trip_photos, me_person_path, hidden_people, 3);
+    let people = trip_people_suffix(photos, &trip_photos, keys, 3);
     candidates.push(Memory {
         id: format!("trip-{trip_key}"),
         kind: MemoryType::Trip,
@@ -310,7 +288,7 @@ fn flush_trip(
 
         let seg_ids = ids_of(photos, &seg.entries);
         let seg_indices: Vec<u32> = seg.entries.iter().map(|e| e.0).collect();
-        let seg_people = trip_people_suffix(photos, &seg_indices, me_person_path, hidden_people, 3);
+        let seg_people = trip_people_suffix(photos, &seg_indices, keys, 3);
         candidates.push(Memory {
             id: format!("subtrip-{trip_key}-{}", seg.key),
             kind: MemoryType::Trip,
@@ -486,13 +464,22 @@ fn consecutive_places_segments(
 // ---------------------------------------------------------------------------
 
 /// An insertion-ordered counter. Replaces the Swift `[String: Int]` walks so
-/// nothing downstream depends on hash order.
+/// nothing downstream depends on hash order — first-seen order, which is what
+/// makes `max(by:)`'s keeps-the-first tie behaviour reproducible here.
+///
+/// The `HashMap` is the index, the `Vec` is the order: a linear `find` per
+/// occurrence made this O(occurrences × distinct values), which on a trip whose
+/// photos each carry a country code is quadratic in the trip's size.
 fn counted(values: impl Iterator<Item = String>) -> Vec<(String, usize)> {
     let mut out: Vec<(String, usize)> = Vec::new();
+    let mut slots: HashMap<String, usize> = HashMap::new();
     for v in values {
-        match out.iter_mut().find(|(k, _)| *k == v) {
-            Some((_, n)) => *n += 1,
-            None => out.push((v, 1)),
+        match slots.get(&v) {
+            Some(slot) => out[*slot].1 += 1,
+            None => {
+                slots.insert(v.clone(), out.len());
+                out.push((v, 1));
+            }
         }
     }
     out
@@ -577,28 +564,36 @@ pub fn compose_trip_title(location: Option<&str>, people_suffix: Option<&str>) -
 
 /// The `"with"` suffix: the top contributors to a trip's `People/*` tags,
 /// minus the user's own tag and the hidden set, reduced to first names.
+///
+/// Both exclusions go through [`PersonKeys`], so a decomposed `People/Jos\u{00E9}`
+/// tag is still recognised as the user's own tag or as hidden — Swift's `==`
+/// and `Set.contains` matched canonically and a byte compare does not.
 pub fn trip_people_suffix(
     photos: &[PhotoFile],
     indices: &[u32],
-    me_person_path: &str,
-    excluded_paths: &HashSet<String>,
+    keys: &PersonKeys,
     max_names: usize,
 ) -> Option<String> {
-    let mut counts: Vec<(String, String, usize)> = Vec::new(); // path, name, count
+    let mut counts: Vec<(String, usize)> = Vec::new(); // display name, count
+                                                       // Insertion-ordered: the `Vec` is the order, the map is the index. A linear
+                                                       // `find` per tag occurrence made this quadratic in the number of tagged
+                                                       // faces on a trip, which is exactly the trip a title wants to name.
+    let mut slots: HashMap<String, usize> = HashMap::new();
     for idx in indices {
         for tag in &photos[*idx as usize].hierarchical_tags {
             if tag.namespace.as_deref().map(str::to_lowercase).as_deref() != Some("people") {
                 continue;
             }
-            if !me_person_path.is_empty() && tag.full_path == me_person_path {
+            let key = PersonKeys::key(&tag.full_path);
+            if keys.is_me(&key) || keys.is_hidden(&key) {
                 continue;
             }
-            if excluded_paths.contains(&tag.full_path) {
-                continue;
-            }
-            match counts.iter_mut().find(|(p, _, _)| *p == tag.full_path) {
-                Some((_, _, n)) => *n += 1,
-                None => counts.push((tag.full_path.clone(), tag.display_name.clone(), 1)),
+            match slots.get(&key) {
+                Some(slot) => counts[*slot].1 += 1,
+                None => {
+                    slots.insert(key, counts.len());
+                    counts.push((tag.display_name.clone(), 1));
+                }
             }
         }
     }
@@ -606,16 +601,24 @@ pub fn trip_people_suffix(
         return None;
     }
 
-    // `localizedCaseInsensitiveCompare` stands in as a case-folded byte
-    // comparison: the trip suffix is at most three names and no fixture
-    // exercises a collation-sensitive pair.
+    // The tiebreak is `localizedCaseInsensitiveCompare`, which collates as if
+    // the accents were not there: ICU puts `Émile` before `Eve`, `Özlem` before
+    // `Peter` and `åsa` before `Bob`, while a lowercased byte compare puts all
+    // three the other way round (the precomposed code points are above ASCII).
+    // With equal counts that decides which names reach the title, so
+    // `text::collation_key` folds the accents away first.
+    //
+    // It is **not** full ICU collation: no locale tailorings (Swedish sorts `å`
+    // after `z`), no `ß` → `ss` expansion, and non-Latin scripts fall back to
+    // code-point order. It agrees with ICU on the Latin-script names this
+    // suffix is made of, which is as far as a dependency-free port goes.
     counts.sort_by(|a, b| {
-        b.2.cmp(&a.2)
-            .then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase()))
+        b.1.cmp(&a.1)
+            .then_with(|| text::collation_key(&a.0).cmp(&text::collation_key(&b.0)))
     });
     counts.truncate(max_names);
 
-    let display = disambiguate_first_names(&counts.iter().map(|c| c.1.clone()).collect::<Vec<_>>());
+    let display = disambiguate_first_names(&counts.iter().map(|c| c.0.clone()).collect::<Vec<_>>());
     if display.is_empty() {
         return None;
     }
@@ -744,6 +747,66 @@ mod tests {
             disambiguate_first_names(&names(&["Anna", "Anna Meyer"])),
             names(&["Anna", "Anna"]),
             "a mononym has no initial to disambiguate with"
+        );
+    }
+
+    /// One photo per name, so every name has count 1 and the **tiebreak alone**
+    /// decides which two reach the title.
+    fn people_photos(names: &[&str]) -> Vec<PhotoFile> {
+        names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                let mut p = PhotoFile::new(&format!("/lib/{i}.jpg"), "x".to_string(), 1);
+                p.hierarchical_tags =
+                    vec![gallery_model::HierarchicalTag::new(&format!("People/{n}"))];
+                p
+            })
+            .collect()
+    }
+
+    /// The three pairs a lowercased **byte** compare gets backwards. With equal
+    /// counts the tiebreak decides which names make the title, so this is not
+    /// cosmetic: `Émile & Eve` and `Eve & Émile` are different titles, and only
+    /// one of them is what `localizedCaseInsensitiveCompare` produced.
+    #[test]
+    fn the_people_tiebreak_collates_accented_names_the_way_icu_does() {
+        let keys = PersonKeys::default();
+        for (accented, plain) in [("Émile", "Eve"), ("Özlem", "Peter"), ("åsa", "Bob")] {
+            let photos = people_photos(&[plain, accented]);
+            assert_eq!(
+                trip_people_suffix(&photos, &[0, 1], &keys, 2).as_deref(),
+                Some(format!("{accented} & {plain}").as_str()),
+                "{accented} must precede {plain}"
+            );
+        }
+    }
+
+    /// …and the truncation to `max_names` runs *after* that sort, so a wrong
+    /// tiebreak does not merely reorder the title — it drops a name from it.
+    #[test]
+    fn the_tiebreak_decides_which_names_survive_the_truncation() {
+        let photos = people_photos(&["Eve", "Émile", "Zoe"]);
+        assert_eq!(
+            trip_people_suffix(&photos, &[0, 1, 2], &PersonKeys::default(), 1).as_deref(),
+            Some("Émile")
+        );
+    }
+
+    /// Counts still win over the tiebreak — the accented-name fix must not
+    /// reorder a name that simply appears more often.
+    #[test]
+    fn a_higher_count_still_beats_the_collation_order() {
+        let mut photos = people_photos(&["Zoe", "Émile"]);
+        photos.push(photos[0].clone());
+        photos[2] = {
+            let mut p = PhotoFile::new("/lib/2.jpg", "x".to_string(), 1);
+            p.hierarchical_tags = vec![gallery_model::HierarchicalTag::new("People/Zoe")];
+            p
+        };
+        assert_eq!(
+            trip_people_suffix(&photos, &[0, 1, 2], &PersonKeys::default(), 2).as_deref(),
+            Some("Zoe & Émile")
         );
     }
 

@@ -80,16 +80,128 @@ final class CoreLibraryBridgeTests: XCTestCase {
     /// must be the one that publishes, whatever order the detached tasks
     /// finish in — otherwise a fast rescan behind a slow one restores a
     /// library the user already replaced.
+    ///
+    /// The published Swift arrays were never the whole story: `search` and
+    /// `photos(forTag:)` are answered by the **core**, which swaps its own
+    /// index when its build finishes rather than when the Swift side decides to
+    /// publish. A generation counter alone cannot order those two swaps, so a
+    /// big stale build finishing after a small fresh one left the app showing
+    /// one library and querying another. Asserting only `sortedPhotos` could
+    /// not see it.
     func testAStaleRebuildCannotPublishOverAFreshOne() async {
         let index = CoreLibraryIndex()
         let big = library(400)
         let small = [PhotoFile.fixture(url: URL(fileURLWithPath: "/lib/only.jpg"),
-                                       dateTaken: date(2024, 1, 1))]
+                                       dateTaken: date(2024, 1, 1),
+                                       tags: ["Scenes/Beach"])]
         index.build(allPhotos: big)
         index.build(allPhotos: small)
         await index.settle()
         XCTAssertEqual(index.sortedPhotos.map(\.id), small.map(\.id))
         XCTAssertNil(index.photo(byID: big[0].id), "the id table is the new library's")
+
+        // The core's own index, reached through the two query paths. A stale
+        // core would answer these with 400 ids that no longer resolve — i.e.
+        // an empty list — or with the big library's tag buckets.
+        XCTAssertEqual(index.search(query: "").map(\.id), small.map(\.id),
+                       "the core is answering from the library that was published")
+        guard let beach = index.allTags.first(where: { $0.id == "scenes/beach" }) else {
+            return XCTFail("the fresh build's tag is missing: \(index.allTags.map(\.id))")
+        }
+        XCTAssertEqual(index.photos(forTag: beach).map(\.id), small.map(\.id))
+        XCTAssertEqual(beach.count, 1, "the aggregation is the fresh build's too")
+        // The stale library's distinctive tag is gone from both the aggregated
+        // list and the core's buckets.
+        XCTAssertNil(index.allTags.first { $0.id == "places/italy/lazio/rome" })
+        XCTAssertTrue(index.search(query: "places/italy").isEmpty)
+    }
+
+    /// The reverse order, to prove the serialisation rather than the timing: a
+    /// *small* build started first and a *big* one second must still leave the
+    /// big one in the core, even though it takes far longer to finish.
+    func testTheLastStartedRebuildIsAlwaysTheOneTheCoreHolds() async {
+        let index = CoreLibraryIndex()
+        let big = library(400)
+        index.build(allPhotos: [PhotoFile.fixture(url: URL(fileURLWithPath: "/lib/only.jpg"),
+                                                  dateTaken: date(2024, 1, 1))])
+        index.build(allPhotos: big)
+        await index.settle()
+        XCTAssertEqual(index.search(query: "").count, big.count)
+        XCTAssertEqual(index.photos(forTag: index.allTags.first { $0.id == "scenes/beach" }!).count,
+                       big.filter { $0.hierarchicalTags.contains { $0.fullPath == "Scenes/Beach" } }.count)
+    }
+
+    /// A query issued **during** a rebuild must not outlive it.
+    ///
+    /// The memos were cleared when a rebuild *started*, which left a window —
+    /// the whole ~400 ms of the core build — in which `photoByID` already held
+    /// the new library while the core still held the old one. A query in that
+    /// window resolves the old index's ids against the new table, gets nothing,
+    /// and cached that nothing *after* the clear had already happened. The
+    /// result survived until the next rebuild: blank `PersonCard`s and an empty
+    /// `TagGridView` on a library that was fully loaded.
+    ///
+    /// Deterministic without any timing games: `build` is synchronous up to the
+    /// `Task` it spawns, and this suite is `@MainActor`, so the query below
+    /// provably runs before the rebuild's first suspension point.
+    func testAQueryDuringARebuildDoesNotSurviveThePublish() async {
+        let index = CoreLibraryIndex()
+        let first = (0..<30).map { i in
+            PhotoFile.fixture(url: URL(fileURLWithPath: "/lib/a-\(i).jpg"),
+                              dateTaken: date(2020, 1, 1).addingTimeInterval(Double(i) * 3600),
+                              tags: ["People/Alice Anderson"])
+        }
+        let second = (0..<7).map { i in
+            PhotoFile.fixture(url: URL(fileURLWithPath: "/lib/b-\(i).jpg"),
+                              dateTaken: date(2021, 1, 1).addingTimeInterval(Double(i) * 3600),
+                              tags: ["People/Alice Anderson"])
+        }
+        index.build(allPhotos: first)
+        await index.settle()
+        guard let alice = index.allTags.first(where: { $0.id == "people/alice anderson" }) else {
+            return XCTFail("no people tag in the first build")
+        }
+        XCTAssertEqual(index.photos(forTag: alice).count, 30)
+
+        index.build(allPhotos: second)
+        // Mid-rebuild: whatever these answer is allowed to be wrong. What is
+        // not allowed is for the answer to be remembered.
+        _ = index.photos(forTag: alice)
+        _ = index.search(query: "alice")
+        await index.settle()
+
+        XCTAssertEqual(index.photos(forTag: alice).map(\.id), second.map(\.id),
+                       "the mid-rebuild answer was memoised past the publish")
+        XCTAssertEqual(index.search(query: "alice").count, 7)
+    }
+
+    /// Cold launch: `sortedPhotos` is empty before the first publish, and empty
+    /// again for a genuinely empty library. `AllPhotosView` needs to tell those
+    /// apart or it renders `PhotoGridScreen`'s "No photos match." over a
+    /// library that is merely still sorting.
+    func testTheIndexSaysWhetherItHasPublishedYet() async {
+        let index = CoreLibraryIndex()
+        XCTAssertFalse(index.hasEverPublished, "nothing has been built yet")
+        XCTAssertTrue(index.sortedPhotos.isEmpty)
+
+        index.build(allPhotos: library(50))
+        XCTAssertFalse(index.hasEverPublished, "still building — this is the flash window")
+        await index.settle()
+        XCTAssertTrue(index.hasEverPublished)
+
+        // A later rebuild must not take the flag back: the grid already has an
+        // order to render, and dropping to a spinner mid-session would be a
+        // worse flash than the one this fixes.
+        index.build(allPhotos: library(10))
+        XCTAssertTrue(index.hasEverPublished)
+        await index.settle()
+        XCTAssertTrue(index.hasEverPublished)
+
+        // An empty library still publishes, so the empty state is reachable.
+        index.build(allPhotos: [])
+        await index.settle()
+        XCTAssertTrue(index.hasEverPublished)
+        XCTAssertTrue(index.sortedPhotos.isEmpty)
     }
 
     /// Search latency, at the scale the do-not-regress list cares about.
@@ -210,6 +322,169 @@ final class CoreLibraryBridgeTests: XCTestCase {
         XCTAssertEqual(liveSame.photoIDs, item.memory.photoIDs)
         XCTAssertEqual(liveSame.coverPhotoID, item.memory.coverPhotoID)
         XCTAssertEqual(liveSame.subtitle, item.memory.subtitle)
+    }
+
+    /// The fence under `GalleryStore.scheduledInputs`.
+    ///
+    /// That snapshot deliberately fills in only the calendar half of
+    /// `CoreMemories.Inputs` — no `seed`, no `leafFolders`, no seen/cool-down
+    /// maps, and **no `mePersonPath`** — on the grounds that the horizon runs
+    /// only `onThisDay` / `yearsAgo` / birthdays, none of which read them. That
+    /// is true of today's engine and is not enforced anywhere: `mePersonPath`
+    /// is read by trip titles, and a future ladder change that consulted it
+    /// from a calendar generator would make every widget-scheduled memory
+    /// differ from the one the app generates live on its day, silently, with no
+    /// test going red.
+    ///
+    /// So: run the horizon with a non-empty `mePersonPath` and assert it
+    /// changes nothing, and that the day-N item still equals the live run.
+    func testTheScheduledInputsSubsetIsSafeToOmitMePersonPath() async {
+        let photos = (0..<12).map { i in
+            PhotoFile.fixture(
+                url: URL(fileURLWithPath: "/fixtures/lib/me-\(i).jpg"),
+                dateTaken: MemoriesConformance.utc(2019, 6, 11, 12, i * 2),
+                tags: ["People/Alice Anderson"]
+            )
+        }
+        let base = CoreMemories.Inputs(
+            photos: photos,
+            contacts: [],
+            now: MemoriesConformance.utc(2024, 6, 8, 12, 0)
+        )
+        var withMe = base
+        withMe.mePersonPath = "People/Alice Anderson"
+
+        let plain = await CoreMemories.computeScheduled(base, hiddenMemoryIDs: [])
+        let tagged = await CoreMemories.computeScheduled(withMe, hiddenMemoryIDs: [])
+        XCTAssertFalse(plain.isEmpty)
+        XCTAssertEqual(plain.map(\.memory.id), tagged.map(\.memory.id),
+                       "the horizon started reading mePersonPath — scheduledInputs must now supply it")
+        XCTAssertEqual(plain.map(\.memory.photoIDs), tagged.map(\.memory.photoIDs))
+        XCTAssertEqual(plain.map(\.memory.coverPhotoID), tagged.map(\.memory.coverPhotoID))
+
+        // …and the day-N parity the widget deep links rest on still holds with
+        // the field set, so the omission is not merely self-consistent.
+        guard let item = tagged.first(where: { $0.memory.id == "onThisDay-2024-06-11" }) else {
+            return XCTFail("the horizon did not reach June 11: \(tagged.map(\.memory.id))")
+        }
+        let live = await CoreMemories.generate(CoreMemories.Inputs(
+            photos: photos,
+            mePersonPath: "People/Alice Anderson",
+            now: MemoriesConformance.utc(2024, 6, 11, 12, 0),
+            seed: WidgetDayKey.string(for: MemoriesConformance.utc(2024, 6, 11, 0, 0))
+        ))
+        guard let liveSame = live.first(where: { $0.id == item.memory.id }) else {
+            return XCTFail("the live run did not produce \(item.memory.id)")
+        }
+        XCTAssertEqual(liveSame.photoIDs, item.memory.photoIDs)
+        XCTAssertEqual(liveSame.coverPhotoID, item.memory.coverPhotoID)
+    }
+
+    // MARK: - Folder events and cloud placeholders
+
+    /// A leaf folder whose photos are mostly non-downloaded cloud placeholders.
+    ///
+    /// The engine's scored pool excludes them (no bytes, no sidecar, so no
+    /// tags/GPS/date worth trusting), but the folder-event ladder must still
+    /// see them — the deleted Swift read `folder.photos`, the folder's own
+    /// array, which that filter never touched:
+    ///
+    /// ```swift
+    /// for folder in leafFolders {
+    ///     let withDatesRaw = folder.photos.compactMap { photo -> (PhotoFile, Date)? in
+    ///         guard let date = photo.dateTaken else { return nil }
+    ///         return (photo, date)
+    ///     }.sorted { $0.1 < $1.1 }
+    /// ```
+    ///
+    /// Resolving the members through the filtered pool alone drops this folder
+    /// below the 15-photo floor entirely, so the memory disappears — and a
+    /// folder that stayed above it would come back with a different photo list,
+    /// a different `ids[count / 3]` cover and a different subtitle under an
+    /// unchanged `folder-<id>` id.
+    private func novemberFolder() -> (all: [PhotoFile], live: [PhotoFile], placeholders: [PhotoFile], folder: PhotoFolder) {
+        let all = (0..<20).map { i -> PhotoFile in
+            var photo = PhotoFile.fixture(
+                url: URL(fileURLWithPath: "/fixtures/lib/November/\(String(format: "%02d", i)).jpg"),
+                dateTaken: MemoriesConformance.utc(2019, 11, 5, 10, i * 2)
+            )
+            // Interleaved rather than appended: the folder's listing order is
+            // what `photoIDs` records, so a placeholder in the middle is what
+            // moves the `count / 3` cover.
+            photo.locality = i % 5 < 2 ? .local : .remote(downloaded: false)
+            return photo
+        }
+        let folder = PhotoFolder.fixture(
+            url: URL(fileURLWithPath: "/fixtures/lib/November"),
+            name: "November",
+            photos: all
+        )
+        return (all,
+                all.filter { $0.locality == .local },
+                all.filter { $0.locality != .local },
+                folder)
+    }
+
+    func testAFolderEventKeepsItsCloudPlaceholders() async {
+        let f = novemberFolder()
+        XCTAssertEqual(f.live.count, 8, "under the 15-photo floor on its own")
+        let memories = await CoreMemories.generate(CoreMemories.Inputs(
+            photos: f.live,
+            folderPlaceholderPhotos: f.placeholders,
+            leafFolders: [f.folder],
+            now: MemoriesConformance.utc(2020, 3, 1, 12, 0),
+            seed: "2020-03-01"
+        ))
+        guard let event = memories.first(where: { $0.type == .folderEvent }) else {
+            return XCTFail("the folder event was dropped: \(memories.map(\.id))")
+        }
+        XCTAssertEqual(event.photoIDs, f.all.map(\.id), "membership is the folder's own")
+        XCTAssertEqual(event.coverPhotoID, f.all[f.all.count / 3].id)
+        XCTAssertEqual(event.subtitle, "Nov 5, 2019 · 20 photos")
+    }
+
+    /// The same call without the placeholders — the shape the bridge had before
+    /// this fix — produces no folder event at all.
+    func testWithholdingThePlaceholdersDeletesTheFolderEvent() async {
+        let f = novemberFolder()
+        let memories = await CoreMemories.generate(CoreMemories.Inputs(
+            photos: f.live,
+            leafFolders: [f.folder],
+            now: MemoriesConformance.utc(2020, 3, 1, 12, 0),
+            seed: "2020-03-01"
+        ))
+        XCTAssertFalse(memories.contains { $0.type == .folderEvent })
+    }
+
+    /// And the coordinator is the thing that has to supply them, so the split
+    /// is asserted where it is actually made rather than only at the FFI.
+    func testTheCoordinatorRoutesPlaceholdersToTheFolderLadder() async {
+        let f = novemberFolder()
+        let harness = TestGalleryStore.make(
+            clock: FixedClock(date: MemoriesConformance.utc(2020, 3, 1, 12, 0))
+        )
+        defer { harness.teardown() }
+        let coordinator = harness.store.memories
+        coordinator.makeInputs = {
+            MemoryCoordinator.GenerationInputs(
+                photos: f.all,
+                leafFolders: [f.folder],
+                contacts: [],
+                personContactLinks: [:],
+                mePersonPath: "",
+                hiddenPeople: []
+            )
+        }
+        coordinator.forceRegenerate()
+        // `forceRegenerate` is fire-and-forget; give the detached generation a
+        // turn to land rather than asserting on a race.
+        for _ in 0..<200 where coordinator.all.isEmpty {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        guard let event = coordinator.all.first(where: { $0.type == .folderEvent }) else {
+            return XCTFail("the coordinator dropped the folder event: \(coordinator.all.map(\.id))")
+        }
+        XCTAssertEqual(event.photoIDs.count, 20)
     }
 
     /// The scheduled horizon on a 20k library — `_plans/06` Finding 3's gate.

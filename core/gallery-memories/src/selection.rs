@@ -6,7 +6,9 @@
 //! got the ladder right and the RNG wrong fails — on **order alone**, because
 //! `Memory.score` never carries the jitter.
 
-use gallery_model::SeededRng;
+use std::collections::{HashMap, HashSet};
+
+use gallery_model::{text, AppleDate, SeededRng};
 
 use crate::time::LocalCalendar;
 use crate::{GenerationInputs, Memory, MemoryType};
@@ -39,24 +41,37 @@ pub fn cluster_key(memory_id: &str) -> String {
 ///
 /// Compared on `title.lowercased()` and applied **after** `finalize`, so the
 /// 75-photo cap can change which folder wins. The survivor keeps its own
-/// spelling (landmine 10). Ties keep the earlier candidate.
+/// spelling (landmine 10). Ties keep the earlier candidate — `>` rather than
+/// `>=`, and that is load-bearing: it mirrors Swift's `max(by:)`, which returns
+/// the first maximal element.
+///
+/// The key is [`text::match_key`], not a bare `lowercased()`: Swift compared
+/// two `String`s, which matches a folder named `Jos\u{00E9}` against one named
+/// `Jose\u{0301}` — and on Apple platforms both spellings genuinely occur,
+/// because `URL(fileURLWithPath:)` decomposes what the user typed precomposed.
+///
+/// Insertion order is irrelevant to the output (the filter below walks the
+/// original candidate order), which is what lets the index be a plain
+/// `HashMap` — the linear `find` it replaces was O(folders²) and folder events
+/// are the one candidate class with no upper bound.
 fn dedupe_folder_names(candidates: Vec<Memory>) -> Vec<Memory> {
-    let mut best: Vec<(String, usize)> = Vec::new();
+    let mut best: HashMap<String, usize> = HashMap::new();
     for (idx, c) in candidates.iter().enumerate() {
         if c.kind != MemoryType::FolderEvent {
             continue;
         }
-        let key = c.title.to_lowercase();
-        match best.iter_mut().find(|(k, _)| *k == key) {
-            Some((_, slot)) => {
-                if c.photo_ids.len() > candidates[*slot].photo_ids.len() {
-                    *slot = idx;
+        match best.entry(text::match_key(&c.title)) {
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                if c.photo_ids.len() > candidates[*slot.get()].photo_ids.len() {
+                    slot.insert(idx);
                 }
             }
-            None => best.push((key, idx)),
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(idx);
+            }
         }
     }
-    let keep: Vec<usize> = best.into_iter().map(|(_, i)| i).collect();
+    let keep: HashSet<usize> = best.into_values().collect();
     candidates
         .into_iter()
         .enumerate()
@@ -83,19 +98,38 @@ pub(crate) fn select(
     let six_months_ago = cal.adding_months(inputs.now, -6);
     let cool_down_threshold = cal.adding_days(inputs.now, -3);
 
+    // Both penalty maps are keyed by strings that **embed a `People/*` path**:
+    // `birthday-People/Jos\u{00E9}` is a memory id, and `clusterKey` passes it
+    // through unchanged. The keys were written by a Swift `Dictionary` and are
+    // read back from JSON, so they carry whatever spelling the tag had when the
+    // user tapped — while the id generated today carries whatever spelling the
+    // sidecar has now. Swift matched the two; byte keys do not. `nfc` (not
+    // `match_key`) because case is part of an id: `birthday-People/alice` and
+    // `birthday-People/Alice` were two Swift keys and stay two here.
+    let seen: HashMap<String, AppleDate> = inputs
+        .seen_memory_ids
+        .iter()
+        .map(|(k, v)| (text::nfc(k), *v))
+        .collect();
+    let surfaced: HashMap<String, AppleDate> = inputs
+        .surfaced_clusters
+        .iter()
+        .map(|(k, v)| (text::nfc(k), *v))
+        .collect();
+
     let jittered: Vec<f64> = candidates
         .iter()
         .map(|mem| {
             let mut s = mem.score + rng.next_double(12.0);
             // The seen penalty is keyed by memory ID…
-            if let Some(last_seen) = inputs.seen_memory_ids.get(&mem.id) {
+            if let Some(last_seen) = seen.get(&text::nfc(&mem.id)) {
                 if last_seen.0 > six_months_ago.0 {
                     s -= 30.0;
                 }
             }
             // …and the cool-down by CLUSTER, so it hits a trip parent and every
             // sub-trip at once (landmine 8).
-            if let Some(last) = inputs.surfaced_clusters.get(&cluster_key(&mem.id)) {
+            if let Some(last) = surfaced.get(&text::nfc(&cluster_key(&mem.id))) {
                 if last.0 > cool_down_threshold.0 {
                     s -= 25.0;
                 }
@@ -129,6 +163,101 @@ pub(crate) fn select(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gallery_model::StableId;
+
+    /// A folder event titled `title` with `count` photos.
+    fn folder(title: &str, count: usize) -> Memory {
+        let ids: Vec<StableId> = (0..count)
+            .map(|i| StableId::for_photo(&format!("/lib/{title}/{i}.jpg")))
+            .collect();
+        Memory {
+            id: format!("folder-{}", StableId::for_folder(&format!("/lib/{title}"))),
+            kind: MemoryType::FolderEvent,
+            title: title.to_string(),
+            subtitle: None,
+            cover_photo_id: ids[0],
+            photo_ids: ids,
+            date_range: None,
+            score: 10.0,
+            years_ago: None,
+            person_name: None,
+        }
+    }
+
+    fn titles(memories: Vec<Memory>) -> Vec<String> {
+        memories.into_iter().map(|m| m.title).collect()
+    }
+
+    /// Landmine 10, restated as the property the `HashMap` rewrite had to keep:
+    /// the survivor is the one with the most photos, ties go to the **earlier**
+    /// candidate, and the survivor keeps its own spelling.
+    #[test]
+    fn same_name_folders_collapse_to_the_biggest_and_ties_keep_the_earlier() {
+        assert_eq!(
+            titles(dedupe_folder_names(vec![
+                folder("Holiday", 20),
+                folder("holiday", 30),
+                folder("Other", 5),
+            ])),
+            vec!["holiday".to_string(), "Other".to_string()],
+            "the bigger one wins and keeps its own casing"
+        );
+        // Equal counts: `>` not `>=`, so the first candidate holds the slot.
+        assert_eq!(
+            titles(dedupe_folder_names(vec![
+                folder("Holiday", 20),
+                folder("HOLIDAY", 20),
+                folder("holiday", 20),
+            ])),
+            vec!["Holiday".to_string()]
+        );
+        // A later, *smaller* duplicate must not displace an earlier winner.
+        assert_eq!(
+            titles(dedupe_folder_names(vec![
+                folder("Holiday", 30),
+                folder("holiday", 20),
+            ])),
+            vec!["Holiday".to_string()]
+        );
+    }
+
+    /// The key is a canonical fold, not a byte-wise `lowercased()`: two folders
+    /// whose names differ only in Unicode normalisation are the same name to
+    /// Swift, and both spellings genuinely occur on Apple platforms because
+    /// `URL(fileURLWithPath:)` decomposes.
+    #[test]
+    fn folder_titles_dedupe_across_normalisation_forms() {
+        let out = dedupe_folder_names(vec![
+            folder("Jose\u{0301}", 10), // NFD, as read from disk
+            folder("Jos\u{00E9}", 25),  // NFC, as typed
+        ]);
+        assert_eq!(titles(out), vec!["Jos\u{00E9}".to_string()]);
+        // Genuinely different names still survive side by side.
+        assert_eq!(
+            titles(dedupe_folder_names(vec![
+                folder("Jose", 10),
+                folder("Jos\u{00E9}", 25)
+            ]))
+            .len(),
+            2
+        );
+    }
+
+    /// Only folder events take part, and the survivors keep their position in
+    /// the candidate array — which the jitter draw sequence depends on
+    /// (landmine 7).
+    #[test]
+    fn the_dedupe_preserves_candidate_order_and_ignores_other_kinds() {
+        let mut trip = folder("Holiday", 40);
+        trip.kind = MemoryType::Trip;
+        let out = dedupe_folder_names(vec![folder("Holiday", 5), trip, folder("holiday", 9)]);
+        assert_eq!(
+            titles(out),
+            // The trip keeps its slot and its name even though a folder event
+            // shares it; the smaller of the two folders is the only casualty.
+            vec!["Holiday".to_string(), "holiday".to_string()]
+        );
+    }
 
     #[test]
     fn subtrips_collapse_onto_their_parent() {

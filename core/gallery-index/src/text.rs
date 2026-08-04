@@ -27,28 +27,11 @@
 //! lowercases to a plain `istanbul`. No Turkish-specific case folding is
 //! involved, and adding any would be a divergence.
 
-use unicode_normalization::UnicodeNormalization;
-
-/// Swift's `lowercased()`: the full, **locale-independent** Unicode lowercase
-/// mapping. Rust's `str::to_lowercase` is the same mapping, including the
-/// special case that sends `İ` (U+0130) to `i` + U+0307.
-pub fn lowercased(s: &str) -> String {
-    s.to_lowercase()
-}
-
-/// The form substring matching runs against: lowercased, then NFC.
-///
-/// Applied to both the corpus and the query, so `contains` is a plain byte
-/// search on strings that are already in one canonical spelling.
-pub fn match_key(s: &str) -> String {
-    s.to_lowercase().nfc().collect()
-}
-
-/// NFC without the case fold — for keys that must keep their spelling
-/// (`url.path` sort keys, where case is meaningful).
-pub fn nfc(s: &str) -> String {
-    s.nfc().collect()
-}
+/// The fold itself lives in [`gallery_model::text`], because
+/// `gallery-memories` needs the identical one for its hidden-people set and
+/// contact lookup and two copies would eventually disagree. Re-exported here so
+/// every call site in this crate still reads `text::match_key`.
+pub use gallery_model::text::{lowercased, match_key, nfc};
 
 #[cfg(test)]
 mod tests {

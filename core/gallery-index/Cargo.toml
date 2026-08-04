@@ -7,11 +7,11 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-gallery-model = { path = "../gallery-model" }
 # Swift's `String.contains` matches by CANONICAL EQUIVALENCE, not bytes: a
 # precomposed query finds a decomposed filename. Normalising both sides to NFC
-# is how that survives the port — see `text::match_key`.
-unicode-normalization = "0.1"
+# is how that survives the port — `gallery_model::text`, re-exported as this
+# crate's `text`.
+gallery-model = { path = "../gallery-model" }
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }

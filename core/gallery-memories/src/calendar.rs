@@ -7,7 +7,7 @@
 use gallery_model::{AppleDate, PhotoFile};
 use std::collections::HashSet;
 
-use crate::time::LocalCalendar;
+use crate::time::{LocalCalendar, Zone};
 use crate::{dedup_by_time_window, ids_of, sorted_ascending, DatedPhoto, Memory, MemoryType};
 
 /// The milestones a "years ago" memory is allowed to sit on. **Exactly**
@@ -15,18 +15,22 @@ use crate::{dedup_by_time_window, ids_of, sorted_ascending, DatedPhoto, Memory, 
 pub const MILESTONES: [i64; 7] = [1, 2, 3, 5, 10, 15, 20];
 
 /// Every entry from `day`'s month/day in a *different* year.
+///
+/// `day` is today (or a horizon day) and is read in the run's own calendar;
+/// each photo is read in **its own**, so a DST user's July photo does not join
+/// or leave the bucket depending on which season the generation runs in.
 fn same_month_day_other_years(
-    cal: &LocalCalendar,
+    zone: &Zone,
     day: AppleDate,
     dated: &[DatedPhoto],
     year_filter: impl Fn(i32) -> bool,
 ) -> Vec<DatedPhoto> {
-    let target = cal.month_day(day);
+    let target = zone.now().month_day(day);
     let matched: Vec<DatedPhoto> = dated
         .iter()
         .copied()
-        .filter(|(_, date)| {
-            let c = cal.civil(*date);
+        .filter(|(idx, date)| {
+            let c = zone.at(*idx).civil(*date);
             c.month == target.month && c.day == target.day && year_filter(c.year)
         })
         .collect();
@@ -41,19 +45,19 @@ fn same_month_day_other_years(
 /// on-this-day memory. The date in it is rendered in **GMT** while the day it
 /// selects is local — see [`LocalCalendar::iso_day_gmt`], landmine 2.
 pub fn generate_on_this_day(
-    cal: &LocalCalendar,
+    zone: &Zone,
     photos: &[PhotoFile],
     day: AppleDate,
     dated: &[DatedPhoto],
     min_photos: usize,
 ) -> Option<Memory> {
-    let current_year = cal.year(day);
-    let deduped = same_month_day_other_years(cal, day, dated, |y| y != current_year);
+    let current_year = zone.now().year(day);
+    let deduped = same_month_day_other_years(zone, day, dated, |y| y != current_year);
     if deduped.len() < min_photos {
         return None;
     }
     // The score counts distinct YEARS, not photos.
-    let years: HashSet<i32> = deduped.iter().map(|e| cal.year(e.1)).collect();
+    let years: HashSet<i32> = deduped.iter().map(|e| zone.at(e.0).year(e.1)).collect();
     let ids = ids_of(photos, &deduped);
     Some(Memory {
         id: format!("onThisDay-{}", LocalCalendar::iso_day_gmt(day)),
@@ -73,16 +77,17 @@ pub fn generate_on_this_day(
 /// milestone order. That order is part of the contract: it decides which jitter
 /// draw each candidate receives.
 pub fn generate_years_ago(
-    cal: &LocalCalendar,
+    zone: &Zone,
     photos: &[PhotoFile],
     day: AppleDate,
     dated: &[DatedPhoto],
     min_photos: usize,
 ) -> Vec<Memory> {
+    let cal = zone.now();
     let mut out = Vec::new();
     for milestone in MILESTONES {
         let target_year = cal.year(cal.adding_years(day, -milestone));
-        let deduped = same_month_day_other_years(cal, day, dated, |y| y == target_year);
+        let deduped = same_month_day_other_years(zone, day, dated, |y| y == target_year);
         if deduped.len() < min_photos {
             continue;
         }
@@ -141,8 +146,8 @@ mod tests {
             .collect()
     }
 
-    fn cal() -> LocalCalendar {
-        LocalCalendar::new(UtcOffset::UTC)
+    fn cal() -> Zone {
+        Zone::fixed(UtcOffset::UTC)
     }
 
     #[test]
@@ -160,8 +165,14 @@ mod tests {
         let dated = photos_with_dates(&photos);
         let memory = generate_on_this_day(&cal(), &photos, today, &dated, 3).expect("a memory");
         assert_eq!(memory.photo_ids.len(), 3);
-        assert!(!memory.photo_ids.contains(&photos[3].id), "current year leaked in");
-        assert!(!memory.photo_ids.contains(&photos[4].id), "June 12 leaked in");
+        assert!(
+            !memory.photo_ids.contains(&photos[3].id),
+            "current year leaked in"
+        );
+        assert!(
+            !memory.photo_ids.contains(&photos[4].id),
+            "June 12 leaked in"
+        );
         // Three distinct years → 50 + 15.
         assert_eq!(memory.score, 65.0);
     }

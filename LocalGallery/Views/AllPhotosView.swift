@@ -13,6 +13,16 @@ struct AllPhotosView: View {
                 } else {
                     emptyState
                 }
+            } else if !store.hasSortedPhotos {
+                // The library is loaded but the core has not published its sort
+                // yet — a few hundred milliseconds on a cold launch with a warm
+                // cache. `PhotoGridScreen` would render `sortedPhotos == []` as
+                // "No photos match.", which is a *filter* message and reads as
+                // if the user's library had gone missing. A spinner is the
+                // honest state; showing the photos unsorted would be worse,
+                // because the grid would then visibly reshuffle under the
+                // user's thumb the moment the sort lands.
+                ProgressView()
             } else {
                 PhotoGridScreen(
                     title: "Photos",

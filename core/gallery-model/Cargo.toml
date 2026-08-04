@@ -10,6 +10,9 @@ publish.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+# Swift `String` hashes and compares by CANONICAL EQUIVALENCE. `text` folds to
+# NFC so a Rust `HashMap` key agrees with the Swift `Dictionary` it replaces.
+unicode-normalization = "0.1"
 uuid = "1"
 
 [dev-dependencies]

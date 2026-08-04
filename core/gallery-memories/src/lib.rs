@@ -46,11 +46,12 @@ pub mod trips;
 
 use std::collections::{HashMap, HashSet};
 
+use gallery_model::text;
 use gallery_model::{AppleDate, PhotoFile, StableId};
 
 pub use scheduled::{compute_scheduled, ScheduledMemory, SCHEDULED_MEMORY_HORIZON_DAYS};
 pub use selection::cluster_key;
-pub use time::{LocalCalendar, UtcOffset};
+pub use time::{LocalCalendar, UtcOffset, Zone};
 
 // ---------------------------------------------------------------------------
 // Output
@@ -163,23 +164,37 @@ pub struct LeafFolder {
 
 /// `MemoryCoordinator.GenerationInputs` plus the clock, zone, seed and the
 /// seen/cool-down state — everything `MemoryEngine.generate` reads.
-///
-/// `photos` is already past the coordinator's cloud-placeholder filter; that
-/// filter stays in Swift (plan non-goal).
 #[derive(Debug, Clone)]
 pub struct GenerationInputs {
+    /// The photo table.
+    ///
+    /// The **first [`Self::ladder_photo_count`]** entries are the scored pool:
+    /// the coordinator's cloud-placeholder filter has already run over them,
+    /// and every ladder stage draws from them alone. Anything after that is a
+    /// placeholder appended for the **folder-event ladder only** — see
+    /// [`Self::ladder_photos`].
     pub photos: Vec<PhotoFile>,
+    /// How many leading entries of `photos` the score ladder may draw from.
+    ///
+    /// Equal to `photos.len()` for a caller with no placeholders, which is
+    /// every caller except `MemoryCoordinator`.
+    pub ladder_photo_count: usize,
+    /// `Calendar.current.timeZone.secondsFromGMT(for: photo.dateTaken)`, one
+    /// per entry of `photos`. **May be empty**, meaning "use the offset at
+    /// `now` for every photo" — see [`crate::time`] for why per-photo offsets
+    /// exist and what an empty table costs.
+    pub photo_time_zone_offsets: Vec<i32>,
     pub leaf_folders: Vec<LeafFolder>,
     pub contacts: Vec<Contact>,
     /// `People/*` tag path → explicit link.
     pub person_contact_links: HashMap<String, PersonLink>,
-    /// `ContactLinker.index`: lowercased full name → contact, first write wins.
-    pub contacts_by_lower_name: HashMap<String, Contact>,
     pub birthdays_enabled: bool,
     /// The user's own `People/*` tag, dropped from trip titles. Empty = unset.
     pub me_person_path: String,
     pub hidden_people: HashSet<String>,
     pub now: AppleDate,
+    /// The offset at `now`. Today, the horizon and the penalty windows are all
+    /// computed in it.
     pub time_zone: UtcOffset,
     /// Drives the daily jitter. The day key for a normal run, a time-based
     /// value for force-regenerate.
@@ -195,10 +210,11 @@ impl GenerationInputs {
     pub fn empty(now: AppleDate, time_zone: UtcOffset, seed: impl Into<String>) -> Self {
         GenerationInputs {
             photos: Vec::new(),
+            ladder_photo_count: 0,
+            photo_time_zone_offsets: Vec::new(),
             leaf_folders: Vec::new(),
             contacts: Vec::new(),
             person_contact_links: HashMap::new(),
-            contacts_by_lower_name: HashMap::new(),
             birthdays_enabled: true,
             me_person_path: String::new(),
             hidden_people: HashSet::new(),
@@ -207,6 +223,31 @@ impl GenerationInputs {
             seed: seed.into(),
             seen_memory_ids: HashMap::new(),
             surfaced_clusters: HashMap::new(),
+        }
+    }
+
+    /// Replace the scored pool. Keeps `ladder_photo_count` and `photos` in step
+    /// so a caller with no placeholders cannot get the invariant wrong.
+    pub fn with_photos(mut self, photos: Vec<PhotoFile>) -> Self {
+        self.ladder_photo_count = photos.len();
+        self.photos = photos;
+        self
+    }
+
+    /// The scored pool: every stage but folder events sees only these.
+    ///
+    /// Clamped rather than indexed, so a caller that sets the count wrong gets
+    /// fewer memories instead of a panic in the middle of a background task.
+    pub fn ladder_photos(&self) -> &[PhotoFile] {
+        &self.photos[..self.ladder_photo_count.min(self.photos.len())]
+    }
+
+    /// The offsets this run works in.
+    pub fn zone(&self) -> Zone {
+        if self.photo_time_zone_offsets.is_empty() {
+            Zone::fixed(self.time_zone)
+        } else {
+            Zone::new(self.time_zone, self.photo_time_zone_offsets.clone())
         }
     }
 
@@ -219,6 +260,83 @@ impl GenerationInputs {
     /// touch a photo.
     pub(crate) fn any_birthday_on(&self, month: u32, day: u32) -> bool {
         self.contacts.iter().any(|c| c.birthday_is(month, day))
+    }
+}
+
+/// The inputs' person-keyed lookups, in the form Swift compared them.
+///
+/// Swift's `Set<String>` and `Dictionary` hash by **canonical equivalence**: a
+/// `People/Jos\u{00E9}` tag matches a `People/Jose\u{0301}` hidden entry and a
+/// contact spelled either way. A byte-keyed Rust `HashMap` splits the two
+/// silently, and only for the users whose names carry accents — the ones most
+/// likely to have both spellings in play, because Foundation's
+/// `URL(fileURLWithPath:)` decomposes while a typed contact name does not.
+///
+/// Every key is folded once here, per generation, so the lookups downstream
+/// stay O(1). Case is **preserved** for tag paths (`nfc`) because Swift kept
+/// `People/alice` and `People/Alice` apart, and folded for contact names
+/// (`match_key`) because `ContactLinker.index` lowercased them itself.
+///
+/// Contact **identifiers** are deliberately not folded anywhere: they are
+/// opaque `CNContact.identifier` strings, ASCII by construction, and folding
+/// them would be pretending a normalisation question exists where it does not.
+#[derive(Debug, Clone, Default)]
+pub struct PersonKeys {
+    hidden_people: HashSet<String>,
+    me_person_path: String,
+    person_contact_links: HashMap<String, PersonLink>,
+    /// `ContactLinker.index`: lowercased full name → contact, first write wins.
+    ///
+    /// Derived from `contacts` here rather than shipped across the FFI, which
+    /// is what stops the app's copy and the core's from disagreeing.
+    contacts_by_name: HashMap<String, Contact>,
+}
+
+impl PersonKeys {
+    pub fn build(inputs: &GenerationInputs) -> Self {
+        let mut contacts_by_name: HashMap<String, Contact> =
+            HashMap::with_capacity(inputs.contacts.len());
+        for c in &inputs.contacts {
+            contacts_by_name
+                .entry(text::match_key(&c.full_name()))
+                .or_insert_with(|| c.clone());
+        }
+        PersonKeys {
+            hidden_people: inputs.hidden_people.iter().map(|p| text::nfc(p)).collect(),
+            me_person_path: text::nfc(&inputs.me_person_path),
+            person_contact_links: inputs
+                .person_contact_links
+                .iter()
+                .map(|(k, v)| (text::nfc(k), v.clone()))
+                .collect(),
+            contacts_by_name,
+        }
+    }
+
+    /// `person_path` folded to the form the three lookups below take. Fold once
+    /// per person, not once per lookup.
+    pub fn key(person_path: &str) -> String {
+        text::nfc(person_path)
+    }
+
+    pub fn is_hidden(&self, key: &str) -> bool {
+        self.hidden_people.contains(key)
+    }
+
+    /// Is this the user's own tag? Always `false` when no "me" tag is set —
+    /// an unset `me_person_path` must not match a photo tagged with the empty
+    /// string.
+    pub fn is_me(&self, key: &str) -> bool {
+        !self.me_person_path.is_empty() && self.me_person_path == key
+    }
+
+    pub fn link_for(&self, key: &str) -> Option<&PersonLink> {
+        self.person_contact_links.get(key)
+    }
+
+    /// The auto-match: a contact whose full name equals the tag's leaf.
+    pub fn contact_named(&self, display_name: &str) -> Option<&Contact> {
+        self.contacts_by_name.get(&text::match_key(display_name))
     }
 }
 
@@ -354,25 +472,29 @@ pub fn generate_cancellable(
     inputs: &GenerationInputs,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Vec<Memory> {
-    let cal = inputs.calendar();
+    let zone = inputs.zone();
+    let cal = zone.now();
+    // The **whole** table, placeholders included. Only the folder-event stage
+    // below indexes past `ladder_photo_count`; everything else works off
+    // `dated`, which is built from the scored pool alone.
     let photos = &inputs.photos;
     let today = inputs.now;
     let today_md = cal.month_day(today);
     let current_month_year = (cal.civil(today).month, cal.civil(today).year);
 
-    let dated = photos_with_dates(photos);
+    let dated = photos_with_dates(inputs.ladder_photos());
     let mut candidates: Vec<Memory> = Vec::new();
 
     // === 1. On This Day ===
     if let Some(memory) =
-        calendar::generate_on_this_day(&cal, photos, today, &dated, MIN_ON_THIS_DAY_PHOTOS)
+        calendar::generate_on_this_day(&zone, photos, today, &dated, MIN_ON_THIS_DAY_PHOTOS)
     {
         candidates.push(memory);
     }
 
     // === 2. X Years Ago ===
     candidates.extend(calendar::generate_years_ago(
-        &cal,
+        &zone,
         photos,
         today,
         &dated,
@@ -387,6 +509,20 @@ pub fn generate_cancellable(
     }
 
     // === 4. Folder-based event memories ===
+    //
+    // The one stage that sees the placeholder tail. The deleted Swift read
+    // `folder.photos` — the folder's own array, which the coordinator's
+    // cloud-placeholder filter never touched, because that filter only ever
+    // applied to `allPhotos`:
+    //
+    //     for folder in leafFolders {
+    //         let withDatesRaw = folder.photos.compactMap { … }
+    //
+    // Resolving those ids through the *filtered* pool instead would silently
+    // drop every non-downloaded photo, pushing placeholder-heavy folders below
+    // `MIN_PHOTOS` (they vanish) and giving the survivors a different photo
+    // set, cover and subtitle under the same `folder-<id>` id. So the lookup
+    // spans the whole table.
     let mut by_id: HashMap<StableId, u32> = HashMap::with_capacity(photos.len());
     for (i, photo) in photos.iter().enumerate() {
         by_id.entry(photo.id).or_insert(i as u32);
@@ -402,7 +538,7 @@ pub fn generate_cancellable(
         let (Some(first), Some(last)) = (entries.first(), entries.last()) else {
             continue;
         };
-        let last_civil = cal.civil(last.1);
+        let last_civil = zone.at(last.0).civil(last.1);
         if entries.len() < MIN_PHOTOS || (last_civil.month, last_civil.year) == current_month_year {
             continue;
         }
@@ -432,7 +568,9 @@ pub fn generate_cancellable(
     let mut day_order: Vec<time::YearMonthDay> = Vec::new();
     let mut by_day: HashMap<time::YearMonthDay, Vec<DatedPhoto>> = HashMap::new();
     for entry in &dated {
-        let key = cal.ymd(entry.1);
+        // The photo's own offset, not the run's: a `density-<y>-<m>-<d>` id
+        // that moved with the season would break its own cool-down history.
+        let key = zone.at(entry.0).ymd(entry.1);
         by_day
             .entry(key)
             .or_insert_with(|| {
@@ -488,20 +626,17 @@ pub fn generate_cancellable(
     }
 
     // === 6. Trips ===
+    let keys = PersonKeys::build(inputs);
     candidates.extend(trips::generate_trip_memories(
-        &cal,
-        photos,
-        &dated,
-        today,
-        &inputs.me_person_path,
-        &inputs.hidden_people,
+        &zone, photos, &dated, today, &keys,
     ));
 
     // === 7. Birthdays ===
     if inputs.birthdays_enabled {
-        let people = birthdays::PeopleIndex::build(photos);
+        let people = birthdays::PeopleIndex::build(inputs.ladder_photos());
         candidates.extend(birthdays::generate_birthday_memories(
             inputs,
+            &keys,
             &people,
             today_md.month,
             today_md.day,
@@ -519,7 +654,7 @@ pub fn generate_cancellable(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gallery_model::CivilDateTime;
+    use gallery_model::{CivilDateTime, HierarchicalTag};
 
     /// Ported from the deleted `MemoryEngineSelectionTests`. The 60-second
     /// window is upstream of every count check in the ladder, so it decides
@@ -585,5 +720,331 @@ mod tests {
         assert_eq!(out[0].photo_ids, ids);
         assert_eq!(out[0].cover_photo_id, ids[2]);
         assert_eq!(out[0].subtitle.as_deref(), Some("5 photos"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Folder events see the cloud placeholders
+    // -----------------------------------------------------------------------
+
+    /// 2019-11-05 10:00 UTC + `i` minutes.
+    fn november(i: usize) -> AppleDate {
+        AppleDate::from_unix_secs_f64(
+            CivilDateTime::new(2019, 11, 5, 10, 0, 0).as_naive_unix_secs() as f64
+                + (i as f64) * 120.0,
+        )
+    }
+
+    fn dated_photo(path: &str, at: AppleDate) -> PhotoFile {
+        let mut p = PhotoFile::new(path, "x".to_string(), 1);
+        p.date_taken = Some(at);
+        p
+    }
+
+    /// A folder of 20 photos of which 12 are non-downloaded cloud placeholders,
+    /// and the inputs the coordinator would build for it.
+    fn folder_with_placeholders() -> (Vec<PhotoFile>, Vec<PhotoFile>, LeafFolder) {
+        // Interleaved, not appended: the folder's listing order is the order
+        // `photo_ids` records, and a placeholder sitting in the middle is what
+        // moves the cover.
+        let all: Vec<PhotoFile> = (0..20)
+            .map(|i| dated_photo(&format!("/lib/November/{i:02}.jpg"), november(i)))
+            .collect();
+        let folder = LeafFolder {
+            id: StableId::for_folder("/lib/November"),
+            name: "November".to_string(),
+            photo_ids: all.iter().map(|p| p.id).collect(),
+        };
+        let (live, placeholders): (Vec<_>, Vec<_>) =
+            all.into_iter().enumerate().partition(|(i, _)| i % 5 < 2);
+        (
+            live.into_iter().map(|(_, p)| p).collect(),
+            placeholders.into_iter().map(|(_, p)| p).collect(),
+            folder,
+        )
+    }
+
+    fn folder_inputs(
+        live: Vec<PhotoFile>,
+        placeholders: Vec<PhotoFile>,
+        folder: LeafFolder,
+    ) -> GenerationInputs {
+        // 2020-03-01, so the folder's November days are outside the current
+        // month/year the folder ladder refuses.
+        let now = AppleDate::from_unix_secs_f64(
+            CivilDateTime::new(2020, 3, 1, 12, 0, 0).as_naive_unix_secs() as f64,
+        );
+        let ladder_photo_count = live.len();
+        let mut photos = live;
+        photos.extend(placeholders);
+        GenerationInputs {
+            photos,
+            ladder_photo_count,
+            leaf_folders: vec![folder],
+            ..GenerationInputs::empty(now, UtcOffset::UTC, "seed")
+        }
+    }
+
+    /// The parity this exists to hold. The deleted Swift read the folder's own
+    /// array, which the cloud-placeholder filter never touched:
+    ///
+    /// ```text
+    /// for folder in leafFolders {
+    ///     let withDatesRaw = folder.photos.compactMap { photo -> (PhotoFile, Date)? in
+    ///         guard let date = photo.dateTaken else { return nil }
+    ///         return (photo, date)
+    ///     }.sorted { $0.1 < $1.1 }
+    /// ```
+    ///
+    /// So a folder of 20 photos made a 20-photo memory whether or not 12 of
+    /// them were still in the cloud — same membership, same
+    /// `ids[ids.count / 3]` cover, same subtitle. Resolving the ids through the
+    /// filtered pool alone would have made it an 8-photo folder, which is below
+    /// `MIN_PHOTOS` and therefore no memory at all.
+    #[test]
+    fn a_folder_event_counts_its_cloud_placeholders_exactly_as_the_swift_did() {
+        let (live, placeholders, folder) = folder_with_placeholders();
+        let every_id: Vec<StableId> = folder.photo_ids.clone();
+        let inputs = folder_inputs(live, placeholders, folder);
+
+        let memories = generate(&inputs);
+        let event = memories
+            .iter()
+            .find(|m| m.kind == MemoryType::FolderEvent)
+            .expect("the folder event must survive its placeholders");
+        assert_eq!(event.photo_ids, every_id, "membership is the folder's own");
+        assert_eq!(
+            event.cover_photo_id,
+            every_id[every_id.len() / 3],
+            "the cover is ids[count / 3] of the FULL list"
+        );
+        assert_eq!(
+            event.subtitle.as_deref(),
+            Some("Nov 5, 2019 \u{00B7} 20 photos")
+        );
+    }
+
+    /// The bug, stated as a test: the same folder with the placeholders
+    /// withheld falls below `MIN_PHOTOS` and produces nothing at all.
+    #[test]
+    fn withholding_the_placeholders_deletes_the_folder_event_entirely() {
+        let (live, _placeholders, folder) = folder_with_placeholders();
+        let inputs = folder_inputs(live, Vec::new(), folder);
+        assert!(
+            !generate(&inputs)
+                .iter()
+                .any(|m| m.kind == MemoryType::FolderEvent),
+            "8 of 20 photos is under the 15-photo floor — this is what the \
+             filtered-pool resolution silently did"
+        );
+    }
+
+    /// A placeholder is folder-event fuel and *nothing else*: it must not reach
+    /// the density day it would otherwise push over the threshold, because the
+    /// coordinator excluded it for a reason (no tags, no GPS, no trustworthy
+    /// date).
+    #[test]
+    fn placeholders_stay_out_of_every_other_ladder() {
+        let (live, placeholders, folder) = folder_with_placeholders();
+        let placeholder_ids: Vec<StableId> = placeholders.iter().map(|p| p.id).collect();
+        let inputs = folder_inputs(live, placeholders, folder);
+        for memory in generate(&inputs) {
+            if memory.kind == MemoryType::FolderEvent {
+                continue;
+            }
+            for id in &placeholder_ids {
+                assert!(
+                    !memory.photo_ids.contains(id),
+                    "{} leaked a placeholder into a {:?}",
+                    memory.id,
+                    memory.kind
+                );
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // DST: a photo's day must not depend on the season the run happens in
+    // -----------------------------------------------------------------------
+
+    const CET: i32 = 3600;
+    const CEST: i32 = 2 * 3600;
+
+    fn utc_at(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> AppleDate {
+        AppleDate::from_unix_secs_f64(
+            CivilDateTime::new(y, mo, d, h, mi, 0).as_naive_unix_secs() as f64
+        )
+    }
+
+    /// A Berlin library with one dense evening that is **after** local midnight
+    /// in summer time and **before** it in winter time.
+    ///
+    /// 20 photos over 2019-07-14 22:00–22:57 UTC — 00:00–00:57 CEST on July 15,
+    /// but 23:00–23:57 CET on July 14 — plus 30 single-photo days so the
+    /// density average stays low enough for the dense day to clear
+    /// `max(MIN_PHOTOS, avg × 3)`.
+    fn berlin_library() -> Vec<PhotoFile> {
+        let mut photos: Vec<PhotoFile> = (0..20)
+            .map(|i| {
+                dated_photo(
+                    &format!("/lib/dense-{i:02}.jpg"),
+                    // 3 minutes apart, comfortably outside the 60 s dedup.
+                    AppleDate(utc_at(2019, 7, 14, 22, 0).0 + i as f64 * 180.0),
+                )
+            })
+            .collect();
+        photos.extend((0..30).map(|i| {
+            dated_photo(
+                &format!("/lib/filler-{i:02}.jpg"),
+                AppleDate(utc_at(2019, 9, 1, 12, 0).0 + i as f64 * 86_400.0),
+            )
+        }));
+        photos
+    }
+
+    fn berlin_inputs(now: AppleDate, now_offset: i32, per_photo: Option<i32>) -> GenerationInputs {
+        let photos = berlin_library();
+        let offsets = match per_photo {
+            Some(o) => vec![o; photos.len()],
+            None => Vec::new(),
+        };
+        GenerationInputs {
+            photo_time_zone_offsets: offsets,
+            ..GenerationInputs::empty(now, UtcOffset(now_offset), "seed").with_photos(photos)
+        }
+    }
+
+    fn density_id(inputs: &GenerationInputs) -> String {
+        generate(inputs)
+            .into_iter()
+            .find(|m| m.kind == MemoryType::PhotoDensity)
+            .map(|m| m.id)
+            .expect("the dense day must produce a density memory")
+    }
+
+    /// The bug, reproduced: with one offset resolved at `now`, the same library
+    /// yields a different `density-*` id in January than in July. That id is
+    /// also its own cluster key, so the −25 cool-down and the −30 seen penalty
+    /// the user's taps wrote against one spelling stop applying to the other —
+    /// twice a year, for every DST user.
+    #[test]
+    fn a_single_run_offset_moves_a_berlin_density_id_between_seasons() {
+        let winter = berlin_inputs(utc_at(2020, 1, 15, 12, 0), CET, None);
+        let summer = berlin_inputs(utc_at(2020, 7, 15, 12, 0), CEST, None);
+        assert_eq!(density_id(&winter), "density-2019-7-14");
+        assert_eq!(density_id(&summer), "density-2019-7-15");
+    }
+
+    /// The fix: the photo carries the offset that was in force when it was
+    /// taken, so both runs agree — and agree on the *summer* answer, which is
+    /// the one the photo's own wall clock had.
+    #[test]
+    fn per_photo_offsets_pin_a_berlin_density_id_across_seasons() {
+        let winter = berlin_inputs(utc_at(2020, 1, 15, 12, 0), CET, Some(CEST));
+        let summer = berlin_inputs(utc_at(2020, 7, 15, 12, 0), CEST, Some(CEST));
+        assert_eq!(density_id(&winter), "density-2019-7-15");
+        assert_eq!(density_id(&summer), density_id(&winter));
+        assert_eq!(
+            cluster_key(&density_id(&winter)),
+            cluster_key(&density_id(&summer)),
+            "the cool-down key is the id, so it has to be stable too"
+        );
+    }
+
+    /// `now` still moves with the run: the horizon and the penalty windows are
+    /// computed in the offset at `now`, not in any photo's. A photo taken at
+    /// 23:30 UTC today is "today" in Berlin summer and yesterday in UTC.
+    #[test]
+    fn now_keeps_the_runs_own_offset() {
+        let inputs = berlin_inputs(utc_at(2020, 7, 15, 22, 30), CEST, Some(CEST));
+        assert_eq!(inputs.zone().now().ymd(inputs.now).day, 16);
+        assert_eq!(inputs.zone().at(0).offset, UtcOffset(CEST));
+    }
+
+    // -----------------------------------------------------------------------
+    // Canonical-equivalence keys (Swift `Set<String>` / `Dictionary`)
+    // -----------------------------------------------------------------------
+
+    fn person_photo(path: &str, tag: &str, at: AppleDate) -> PhotoFile {
+        let mut p = dated_photo(path, at);
+        p.hierarchical_tags = vec![HierarchicalTag::new(tag)];
+        p
+    }
+
+    /// A birthday library for `tag`, on a day the contact below has a birthday.
+    fn birthday_inputs(tag: &str) -> GenerationInputs {
+        let now = AppleDate::from_unix_secs_f64(
+            CivilDateTime::new(2024, 6, 11, 12, 0, 0).as_naive_unix_secs() as f64,
+        );
+        let photos: Vec<PhotoFile> = (0..3)
+            .map(|i| {
+                person_photo(
+                    &format!("/lib/p-{i}.jpg"),
+                    tag,
+                    AppleDate::from_unix_secs_f64(
+                        CivilDateTime::new(2020, 1, 1, 10, 0, 0).as_naive_unix_secs() as f64
+                            + i as f64 * 86_400.0,
+                    ),
+                )
+            })
+            .collect();
+        GenerationInputs {
+            contacts: vec![Contact {
+                id: "c-jose".to_string(),
+                // Precomposed, the way a typed address-book entry is stored.
+                given_name: "Jos\u{00E9}".to_string(),
+                family_name: "Ruiz".to_string(),
+                birthday_month: Some(6),
+                birthday_day: Some(11),
+            }],
+            ..GenerationInputs::empty(now, UtcOffset::UTC, "seed").with_photos(photos)
+        }
+    }
+
+    /// The tag comes off a filename, so on Apple platforms it is **decomposed**;
+    /// the contact was typed, so it is **precomposed**. Swift's `Dictionary`
+    /// matched the two. A byte-keyed map does not, and the birthday memory
+    /// silently stops being generated for exactly the people whose names have
+    /// accents.
+    #[test]
+    fn a_decomposed_person_tag_matches_a_precomposed_contact() {
+        let decomposed = generate(&birthday_inputs("People/Jose\u{0301} Ruiz"));
+        let precomposed = generate(&birthday_inputs("People/Jos\u{00E9} Ruiz"));
+        for (label, memories) in [("NFD", &decomposed), ("NFC", &precomposed)] {
+            assert!(
+                memories.iter().any(|m| m.kind == MemoryType::Birthday),
+                "{label} spelling produced no birthday memory"
+            );
+        }
+        // …and the title still uses the TAG's spelling, not the contact's
+        // (landmine 13), so the two ids differ even though both resolved.
+        assert_eq!(
+            decomposed[0].person_name.as_deref(),
+            Some("Jose\u{0301} Ruiz")
+        );
+    }
+
+    /// The hidden set is a Swift `Set<String>`: hiding the precomposed spelling
+    /// hides the decomposed tag too. Getting this wrong surfaces a memory the
+    /// user explicitly hid — the failure mode is *more* output, which no smoke
+    /// test notices.
+    #[test]
+    fn hiding_a_person_by_either_spelling_hides_both() {
+        let mut inputs = birthday_inputs("People/Jose\u{0301} Ruiz");
+        inputs.hidden_people = HashSet::from(["People/Jos\u{00E9} Ruiz".to_string()]);
+        assert!(!generate(&inputs)
+            .iter()
+            .any(|m| m.kind == MemoryType::Birthday));
+    }
+
+    /// `.disabled` is looked up in a Swift `Dictionary` keyed by the same
+    /// paths, so it has to fold identically.
+    #[test]
+    fn a_person_link_matches_across_spellings_too() {
+        let mut inputs = birthday_inputs("People/Jose\u{0301} Ruiz");
+        inputs.person_contact_links =
+            HashMap::from([("People/Jos\u{00E9} Ruiz".to_string(), PersonLink::Disabled)]);
+        assert!(!generate(&inputs)
+            .iter()
+            .any(|m| m.kind == MemoryType::Birthday));
     }
 }

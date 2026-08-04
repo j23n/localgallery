@@ -454,7 +454,6 @@ dependencies = [
  "gallery-model",
  "serde",
  "serde_json",
- "unicode-normalization",
 ]
 
 [[package]]
@@ -505,6 +504,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "unicode-normalization",
  "uuid",
 ]
 

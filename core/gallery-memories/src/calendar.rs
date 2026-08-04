@@ -108,3 +108,98 @@ pub fn generate_years_ago(
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::photos_with_dates;
+    use crate::time::UtcOffset;
+    use gallery_model::CivilDateTime;
+
+    /// Ported from the deleted `MemoryEngineCalendarTests`. The two cases below
+    /// are the ones `memory_engine.json` cannot state — no fixture scenario has
+    /// a current-year photo on today's month/day, and none has a burst that
+    /// collapses *below* the threshold. The fixtures were generated from the
+    /// shipping Swift and the Swift is now deleted, so a new scenario could only
+    /// pin Rust against itself; these assertions carry the Swift's expectations
+    /// across instead.
+    fn utc(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> AppleDate {
+        AppleDate::from_unix_secs_f64(
+            CivilDateTime::new(y, mo, d, h, mi, s).as_naive_unix_secs() as f64
+        )
+    }
+
+    fn library(dates: &[AppleDate]) -> Vec<PhotoFile> {
+        dates
+            .iter()
+            .enumerate()
+            .map(|(i, d)| {
+                let mut p = PhotoFile::new(&format!("/lib/otd-{i}.jpg"), format!("otd-{i}"), 0);
+                p.date_taken = Some(*d);
+                p
+            })
+            .collect()
+    }
+
+    fn cal() -> LocalCalendar {
+        LocalCalendar::new(UtcOffset::UTC)
+    }
+
+    #[test]
+    fn on_this_day_excludes_the_current_year_and_every_other_day() {
+        let today = utc(2024, 6, 11, 12, 0, 0);
+        let photos = library(&[
+            utc(2019, 6, 11, 10, 0, 0),
+            utc(2020, 6, 11, 10, 0, 0),
+            utc(2021, 6, 11, 10, 0, 0),
+            // Same month/day, current year — must not count.
+            utc(2024, 6, 11, 10, 0, 0),
+            // Different day entirely — must not count.
+            utc(2019, 6, 12, 10, 0, 0),
+        ]);
+        let dated = photos_with_dates(&photos);
+        let memory = generate_on_this_day(&cal(), &photos, today, &dated, 3).expect("a memory");
+        assert_eq!(memory.photo_ids.len(), 3);
+        assert!(!memory.photo_ids.contains(&photos[3].id), "current year leaked in");
+        assert!(!memory.photo_ids.contains(&photos[4].id), "June 12 leaked in");
+        // Three distinct years → 50 + 15.
+        assert_eq!(memory.score, 65.0);
+    }
+
+    /// `min_photos` is a **post-dedup** threshold (landmine 15): three shots in
+    /// one 60-second window are one photo, which is below 2.
+    #[test]
+    fn on_this_day_applies_min_photos_after_the_dedup_window() {
+        let today = utc(2024, 6, 11, 12, 0, 0);
+        let photos = library(&[
+            utc(2019, 6, 11, 10, 0, 0),
+            utc(2019, 6, 11, 10, 0, 10),
+            utc(2019, 6, 11, 10, 0, 20),
+        ]);
+        let dated = photos_with_dates(&photos);
+        assert!(generate_on_this_day(&cal(), &photos, today, &dated, 2).is_none());
+        // …and one photo is enough once the threshold is one.
+        assert!(generate_on_this_day(&cal(), &photos, today, &dated, 1).is_some());
+    }
+
+    #[test]
+    fn years_ago_fires_only_on_a_milestone_and_names_the_year() {
+        let today = utc(2024, 6, 11, 12, 0, 0);
+        let photos = library(&[
+            // 5 years ago — a milestone.
+            utc(2019, 6, 11, 10, 0, 0),
+            utc(2019, 6, 11, 10, 2, 0),
+            // 6 years ago — not one.
+            utc(2018, 6, 11, 10, 0, 0),
+            utc(2018, 6, 11, 10, 2, 0),
+        ]);
+        let dated = photos_with_dates(&photos);
+        let memories = generate_years_ago(&cal(), &photos, today, &dated, 2);
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].id, "yearsAgo-5-2024-06-11");
+        assert_eq!(memories[0].years_ago, Some(5));
+        assert_eq!(memories[0].title, "On this day in 2019");
+        let (first, last) = memories[0].date_range.expect("a range");
+        assert!(first.0 <= last.0, "the range is ascending");
+    }
+}

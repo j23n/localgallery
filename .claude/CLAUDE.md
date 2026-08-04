@@ -43,7 +43,7 @@ exposes (`store.people`, `store.memories`), and focused services under
 ### Rust core (`core/`)
 
 Cargo workspace behind a UniFFI boundary; the roadmap lives in `_plans/`.
-Phases 0–2:
+Phases 0–4:
 
 - **gallery-model** — `stable_uuid::derive`, the byte-for-byte mirror of
   `StableUUID.derive`.
@@ -77,6 +77,29 @@ Phases 0–2:
   Face results are keyed on `face_pack_key` (the two face model hashes +
   `PREPROCESS_VERSION` + `ALIGN_VERSION`), so adding face models to a pack does
   not re-tag and a labels rebuild does not re-detect.
+- **gallery-index** — `SearchIndex` + `TagIndex`, ported (Phase 4).
+  `LibraryIndex::build(all_photos)` owns **one** photo table; the sorted order
+  (date desc, `url.path` tiebreak), the per-photo search corpus and the tag
+  buckets are all lists of indices into it — the sanctioned improvement over
+  the Swift `TagIndex`, which copied a whole `PhotoFile` into every bucket a
+  photo was credited to. `text::match_key` (lowercase → NFC) is the one thing
+  to be careful with: Swift's `String.contains` compares by **canonical
+  equivalence**, so a precomposed query has to find a decomposed filename, and
+  a byte-comparing port silently stops finding every accented name.
+- **gallery-memories** — `MemoryEngine` + `computeScheduledMemories`, ported
+  (Phase 4), with the Swift extension-file layout kept as modules
+  (`calendar.rs` / `birthdays.rs` / `trips.rs` / `selection.rs`, plus
+  `scheduled.rs` and `time.rs` / `locale.rs` for the two things Foundation used
+  to supply implicitly). Pure over a `GenerationInputs` snapshot; the calendar
+  is an **explicit fixed UTC offset** rather than the ambient `Calendar.current`
+  the Swift read. Three deliberate divergences from the Swift, all from
+  `_plans/06` Finding 3: people → photos is grouped **once per call** rather
+  than once per horizon day, a no-birthday day early-exits before touching a
+  photo, and nothing copies a photo. Two more are *tightenings* the Swift could
+  not express: the birthday and density walks iterate in first-seen order
+  instead of `Dictionary` order. Where the Swift is buggy the bug is **pinned**
+  — see the landmine list in `core/fixtures/memories-conformance/README.md`,
+  especially the GMT-vs-local id bug the widget horizon inherits.
 - **gallery-ffi** — the sole crate the app sees (proc-macro UniFFI, namespace
   `GalleryCore`). Phase 1 adds `TaggingSession` (`enqueue` /
   `start(progress:rootPrefix:)` / `cancel` / `isRunning` / `stats` /
@@ -107,6 +130,21 @@ Phases 0–2:
   `FinishGuard` (release the lock *then* report, even on unwind), and
   `join_unless_current` (a listener that restarts or releases the session from
   `onFinished` must not self-join).
+  Phase 4 adds `src/library.rs`: the `LibraryIndex` object (`build(photos)` /
+  `sortedPhotoIds` / `search(query:requiredTagPaths:)` / `photoIdsForTag` /
+  `tagSuggestions` / `photoCount`) and the memory engine as free functions
+  (`generateMemories`, `computeScheduledMemories`, `scheduledMemoryHorizonDays`,
+  `memoryClusterKey`, `memoryCountryName`) plus the `MemoryGenerator` object,
+  which exists only to carry a cancel flag a Swift `withTaskCancellationHandler`
+  can reach. Two shape decisions worth keeping: photos cross **in** as
+  `ScanPhoto` (Phase 3's record — one photo wire format, not two) and **out** as
+  ids, because the app already holds the structs; and `search` takes no
+  `allTags` argument because the index holds its own aggregated list — the Swift
+  signature let a caller pass an empty one and silently degrade every tag query,
+  including the virtual `Places/…` prefixes, to a substring match.
+  **A Rust doc comment on an exported item must not contain `/` followed by `*`**
+  (`People/` + `*`): UniFFI copies docs into Swift block comments, Swift nests
+  them, and the generated file stops compiling at the last line.
 
 Plus an in-workspace `uniffi-bindgen` bin so no global install is needed.
 Toolchain pinned in `core/rust-toolchain.toml`.
@@ -156,6 +194,8 @@ Anything that dedupes by String will disagree with anything that dedupes by id.
 - **EXIFService** — lazy EXIF + photo-tools XMP read for the info panel. Also the home of `exifDateFormatter` (`en_US_POSIX`, Gregorian, no `timeZone`) since `MetadataReader` moved into the core — device-locale parsing breaks on non-Gregorian calendars.
 - **CoreScanner** — the app's side of the Rust scanner (Phase 3). Owns the core's `ScannerSession` and `CoreProviderProbe`, and bridges `ScanOutcomeRecord` ⇄ `PhotoFile`/`PhotoFolder`. Replaced `FolderScanner`; scan *policy* stayed in `GalleryStore+Scanning`. Two things to know: the core sends folders **flat** (parent index + a `(photoStart, photoCount)` slice of `flatPhotos`) so 20k photos cross once rather than twice, and `CoreScanner.fileURL(_:)` rebuilds URLs by percent-encoding rather than `URL(fileURLWithPath:)`, **which decomposes** — an NFC filename would otherwise land under a different `stableID` than the core derived.
 - **CoreProviderProbe** — the one thing the core cannot do for itself: the `URLResourceKey` read that says whether a file is provider-backed, whether its bytes are here, and what its content identifier is. Called **per directory, in batches**, only for files a pass is about to rebuild. Three of those seven keys (`isUbiquitousItem*`) are a blocking XPC round trip to `fileproviderd` and the other four are a stat, so the probe **resolves once per scan whether the tree is ubiquitous at all** and reads only the cheap four when it is not — which took a cold 20k scan from 406 s to 2.3 s. Placeholder detection survives on `totalFileSize > fileSize`, the branch non-Apple providers always took. Do not "restore" the full key set for uniformity: `_plans/06` Finding 1 has the numbers, including the 16-way fan-out that made it *slower* (512 s) because the call serialises somewhere threads cannot reach.
+- **CoreLibraryIndex** — the app's side of the Rust library index (Phase 4). Replaced `SearchIndex` + `TagIndex`. Every ordering and matching decision is the core's; what stays in Swift is the `photoByID` **object table** (the core answers in ids and the app holds the structs) and keeping the FFI off the main actor. `build(allPhotos:)` populates the id table synchronously — `photo(byID:)` is on the viewer's and the memory rail's critical path — and hands the sort/corpus/tag work to a detached task behind a generation counter; `settle()` awaits it. `photos(forTag:)` and `search(query:requiredTags:)` are memoised per rebuild, because `PeopleListRow`, `PersonCard` and `TagGridView.photos` all ask from inside a `View` body and a boundary crossing per frame is exactly what `_plans/06`'s scroll findings forbid.
+- **CoreMemories** — the app's side of the Rust memory engine (Phase 4). Replaced `MemoryEngine` + its four extension files. Marshals a `CoreMemories.Inputs` snapshot into the FFI record, runs `generate` / `computeScheduled` **off the main actor**, and maps the results back to `Memory`. Two things it owns rather than forwards: cancellation (`Task.detached` swallows the caller's, so it is wired explicitly into the core's `MemoryGenerator`) and the time zone, which is read from **`Calendar.current.timeZone`, not `TimeZone.current`** — the latter is cached and does not track an `NSTimeZone.default` override, so it answers GMT under the non-UTC conformance scenario and a stale zone on a device that crossed one. `countryName(from:)` is now the core's `en_US` table, not `Locale.current` (see the locale note under "Notes").
 - **EnrichmentService** — parallel `TaskGroup` enrichment of stale photo metadata; caller cancellation is forwarded into the detached work. Non-downloaded placeholders skip the byteless read and are re-enriched when their bytes arrive (locality-transition triggers in the scanner and `ensureMaterialized`). The reads themselves are the core's (`readImageMetadata` / `readVideoDate`); this file owns only the scheduling. `EnrichmentService.resolve(_:)` turns the core's zone-less EXIF wall clock into a `Date` in the **device** zone — the explicit form of what `exifDateFormatter`'s missing `timeZone` did.
 - **FaceService** — on-device faces (Phase 2). Owns the Rust core's `FaceSession` and mirrors `TaggingService` structurally (session held across runs, `cancelRequested` covering the window before a run exists, off-actor open/release, root-scoped runs, the shared `SidecarRefreshCoalescer`). Two things are its own: **availability is read from `TaggingService.pack.hasFaces`** through an injected `installedPack` closure, so a Settings appearance never SHA-256s the same ONNX twice, and it has calls that write to disk *without* being a run — `name` / `unname` / `ignore` / `rename` / `recluster`, all refused by the core while a run is in flight, hence `isRunning` gates the review buttons and not just the progress row. Eligibility calls straight through to `TaggingService.isEligible` (same bytes, same decoder, same sidecar). `allClusters` is refreshed after every run and every mutation; `reviewableClusters` is the unlabeled ones with ≥ `reviewMinimumFaces` (3), biggest first. Results reach the app the same way tagging's do: the light rescan → `SidecarSyncService` → `reapplySidecarMerges` → `PeopleStore`, which needs no new read path because the core writes the `People/*` keywords and `mwg-rs` regions it already parses.
 - **FileProviderDetector** — probes URLs for file-provider non-local status + `fileContentIdentifierKey`-based content versions.
@@ -163,11 +203,9 @@ Anything that dedupes by String will disagree with anything that dedupes by id.
 - **JSONDiskCache** — generic versioned JSON-file store used by the library/memories/sidecar caches: ordered + optionally debounced writes, version probed before the payload decode, eviction on mismatch *and* corrupt files.
 - **LibrarySnapshot** — the persisted scan result (`rootFolder` + `allPhotos` + an optional `sidecarManifest`) and its schema `version` history; `MemoriesCacheSchema` (independent version) lives alongside. **`sidecarManifest` was added to v20 without a version bump** (`_plans/06` Finding 2): a v20 file written before it existed decodes with `nil`, pays one legacy re-probe, then persists it. Bumping instead would have cost every installed library a full rescan to save one pass. `GalleryStore.loadCache()` seeds `lastSidecarManifest` from it *before* `restoreFolder` starts the launch scan — that ordering is the whole fix. The same file is read and written by the Rust core, so `SidecarCandidate` is `Codable` with `DownloadStatus` carrying `String` raw values and `ContentVersion.contentIdentifier` being a `String` (tolerant of the legacy `Int64` on decode).
 - **LogPersistence** / **LogStore** / **LogRedactor** — opt-in ring-buffer log capture feeding `LogsView` and the crash-share payload. `Log.r.*` tokenizes identifying strings; **use `Log.r.error(_:)` instead of `error.localizedDescription`** in log interpolation (Cocoa errors embed file names).
-- **MemoryEngine** (+`Calendar` / `+Birthdays` / `+Trips` / `+Selection` extension files) — pure once-a-day memory generation; see "Memories" below.
 - **MemoryRefreshService** — indirection between the BG-task handler in AppDelegate and the Store.
 - **PhotoExporter** — re-encodes a photo to JPEG at a chosen quality for share-sheet export.
 - **PhotoMaterializer** — kicks off + tracks file-provider downloads; coalesces by photo id with token-checked cleanup; gates *prefetch* on `NWPathMonitor.isExpensive` when "Use Cellular Data" is off.
-- **SearchIndex** + **TagIndex** — sorted photo list (date desc, URL-path tiebreak so rescans don't shuffle), search corpus, tag → photos index, async tag aggregator.
 - **SidecarCacheStore** / **SidecarSyncService** / **SidecarRefreshService** — parsed `.xmp` cache + bulk provider fetches + BG refresh. Fetched bytes are parsed by the core (`parseXmpBytes`), the same parser the scan and enrichment paths use.
 - **SidecarRefreshCoalescer** — shared by `TaggingService` and `FaceService`: turns a burst of "the core wrote sidecars" callbacks into at most one rescan per `refreshInterval` (30s), and **drains rather than drops** a request that arrives during an in-flight rescan — that walk may have listed the tree before the sidecars existed, so dropping it loses the results until something else happens to scan. `lastRefreshAt` marks when a refresh actually *ran*, so a steady drip of suppressed batches cannot keep pushing the window out.
 - **SlideshowMusic** — `AVAudioEngine`-based ambient pad synthesis for the six slideshow music themes.
@@ -217,7 +255,8 @@ The most intricate behavior in the app (`GalleryStore+Scanning.swift`). The
 
 ## Memories
 
-`MemoryEngine.generate` is pure; `MemoryCoordinator` owns the gating. Score
+`gallery_memories::generate` (reached through `CoreMemories.generate`) is pure;
+`MemoryCoordinator` owns the gating. Score
 ladder (before 0–12 daily jitter, −30 seen-within-6-months, −25
 cluster-cooldown-3-days): birthdays 100 · onThisDay 50+5/yr · yearsAgo 35–45 ·
 trips 20+1.5/day · subtrips 15+1.2/day · folder events 10+span · density 8.
@@ -252,8 +291,9 @@ catch-up regenerates the same ids on the matching day.
 ## Notes
 
 - Swift 6 language mode, `SWIFT_STRICT_CONCURRENCY: complete`, iOS 18 target.
-- `GalleryStore` is `@Observable @MainActor` (no `@unchecked Sendable`). Services are `@MainActor final class` (state-holding) or stateless `enum` namespaces. Heavy work runs off-actor: prefer `nonisolated` async funcs (they run on the global executor **and preserve cancellation**); where `Task.detached` is needed for priority, forward cancellation with `withTaskCancellationHandler` (see `MemoryEngine.generate`, `EnrichmentService.enrich`).
+- `GalleryStore` is `@Observable @MainActor` (no `@unchecked Sendable`). Services are `@MainActor final class` (state-holding) or stateless `enum` namespaces. Heavy work runs off-actor: prefer `nonisolated` async funcs (they run on the global executor **and preserve cancellation**); where `Task.detached` is needed for priority, forward cancellation with `withTaskCancellationHandler` (see `CoreMemories.generate`, `EnrichmentService.enrich`).
 - A `DefaultsBacked` property wrapper was considered for the hand-rolled `didSet { defaults.set(...) }` persistence pattern and rejected: the `@Observable` macro doesn't support property wrappers on observed properties. The didSet pattern is the @Observable-compatible way.
+- **Locale, after Phase 4.** Memory subtitles (`"Jun 11, 2019 · 12 photos"`) and country names in trip titles / the photo-info pill used to come from ICU through `DateFormatter.setLocalizedDateFormatFromTemplate` and `Locale.current.localizedString(forRegionCode:)`, so they followed the device language. They now come from the core's own `en_US` tables. This is a **user-visible behaviour change, accepted deliberately**: a memory's title and subtitle are part of its identity in the conformance fixtures, and the alternatives were bundling ICU in the core (megabytes, for one string per country) or moving subtitle composition into the UI layer (which would unpin the fixtures). Revisit by moving composition to the view, not by adding a locale to the core.
 - Stable photo/folder IDs derived from the file URL via SHA-256 (prefix-16 bytes, RFC 4122 variant + version-5 marker; namespace-less; matches localmusic) — grid doesn't flicker on rescan.
 - The BG-task handler in `AppDelegate.handleBackgroundRefresh` calls into `MemoryRefreshService` (held on the AppDelegate); the WindowGroup attaches the live Store via a `.task` modifier. Expiration handlers cancel the work and the cancellation actually propagates.
 - Tests: `LocalGalleryTests/Unit` + `Support` (fixtures, `TempDir`, `TestUserDefaults`, `TestGalleryStore`). The memory engine/coordinator suites pass an explicit UTC calendar or noon-UTC fixtures for timezone robustness. `TaggingSessionTests`/`FaceSessionTests` drive the real FFI against the *same* committed test packs `cargo test` uses (`core/gallery-ml/tests/{testpack,facepack,fixtures}`, folder references in `project.yml`), so a simulator-vs-host drift fails rather than being fixed up in one copy — that is also why the packs are referenced in place and never duplicated into the test target.
@@ -264,7 +304,6 @@ catch-up regenerates the same ids on the matching day.
 - `PhotoGridScreen` is still ~900 lines; extracting the filter pipeline into an `@Observable` model would make it testable.
 - `SwipeToDismissGestureInstaller` could become a `UIGestureRecognizerRepresentable` (iOS 18) — needs on-device gesture testing.
 - Collections navigation mixes typed `CollectionsRoute` pushes with closure-based `NavigationLink`s; unifying on typed routes would let deep links reach every screen.
-- `TagIndex` stores full `PhotoFile` copies per bucket; switching to `[String: [UUID]]` + `photoByID` would shrink it.
 - `clearAllDownloads` enumerates file-provider domains once per photo; the domain list could be fetched once per run (needs care: `NSFileProviderDomain` isn't Sendable).
 - Face **merge and split** are unimplemented: `merge_proposals` are computed and stored, but `merge(a, b)` / `split(id, faces)` do not exist in the core and nothing surfaces them in the UI.
 - Renaming an already-named person is core-side only (`FaceSession.renamePerson` / `FaceService.rename`); no UI reaches it yet, and the existing person screens still key off the `People/*` tag.

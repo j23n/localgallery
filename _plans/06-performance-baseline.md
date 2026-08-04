@@ -45,6 +45,17 @@ in …ms`, `Exported snapshot: … in …ms`.
 Same simulator, same generator invocation, same `Scan totals` line. Findings 1
 and 2 are **closed**; Finding 3 is untouched and still owned by Phase 4.
 
+> **Finding 3 closed by Phase 4** (measured 2026-08-04, Release, same 20k
+> library). The scheduled-memories pass is **61–144 ms and off the main
+> actor** — `sample` over a 12 s launch window shows no `computeScheduled` or
+> `uniffi` frames on the main thread. The `OnThisDay (…)` per-day log burst
+> this section measured from no longer exists (the core does not log); the
+> replacement line is `Scheduled horizon: N items over 7 days in …ms` from
+> `GalleryStore.exportWidgetSnapshot`. Index build over the same library is
+> 357–419 ms end to end (core: 130–303 ms), also off the main actor — see
+> `_plans/05` for why the wall clock did not drop below the 0.3 s gate even
+> though the algorithm got faster.
+
 | Scenario | Baseline | Now | Gate | |
 |---|---|---|---|---|
 | Cold full scan, 20k files | **406 s** | **2.3 s** | ≤ 60 s | ✅ 177× |

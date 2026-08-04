@@ -54,12 +54,12 @@ enum PhotoChrome {
             // ["Places", country] — country only.
             let country = deepest[1]
             // If a country code is also present, prefer the localized name.
-            if let code = photo.countryCode, let localized = MemoryEngine.countryName(from: code) {
+            if let code = photo.countryCode, let localized = CoreMemories.countryName(from: code) {
                 return localized
             }
             return country
         }
-        if let code = photo.countryCode, let localized = MemoryEngine.countryName(from: code) {
+        if let code = photo.countryCode, let localized = CoreMemories.countryName(from: code) {
             return localized
         }
         return nil

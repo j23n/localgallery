@@ -6,13 +6,22 @@ taxonomy, face recognition) that produces identical results on every device.
 
 Phases (each ships independently; each has its own plan file):
 
-| Phase | File | Delivers |
-|---|---|---|
-| 0 | `01-phase-0-toolchain-spike.md` | Rust workspace, UniFFI → Swift, XCFramework build, StableUUID parity proof |
-| 1 | `02-phase-1-ml-tagging.md` | On-device tagging → XMP sidecars (additive; no existing Swift rewritten) |
-| 2 | `03-phase-2-faces.md` | Face detect/embed/cluster + naming UI → `People/*` + MWG-RS regions |
-| 3 | `04-phase-3-scanner-metadata.md` | `MetadataReader` + `FolderScanner` move into core behind a VFS trait |
-| 4 | `05-phase-4-indexes-memories.md` | Search/tag indexes + MemoryEngine port; Swift engine deleted |
+| Phase | File | Delivers | Status |
+|---|---|---|---|
+| 0 | `01-phase-0-toolchain-spike.md` | Rust workspace, UniFFI → Swift, XCFramework build, StableUUID parity proof | shipped |
+| 1 | `02-phase-1-ml-tagging.md` | On-device tagging → XMP sidecars (additive; no existing Swift rewritten) | shipped |
+| 2 | `03-phase-2-faces.md` | Face detect/embed/cluster + naming UI → `People/*` + MWG-RS regions | shipped |
+| 3 | `04-phase-3-scanner-metadata.md` | `MetadataReader` + `FolderScanner` move into core behind a VFS trait | shipped — both Swift types deleted |
+| 4 | `05-phase-4-indexes-memories.md` | Search/tag indexes + MemoryEngine port; Swift engine deleted | shipped — `SearchIndex`, `TagIndex`, `MemoryEngine` + its 4 extensions deleted |
+
+With Phase 4 the extraction is **complete for the behaviours it set out to
+move**: no ordering, matching, or memory-selection rule is implemented twice.
+What remains in Swift under `Services/` is either platform-bound (Foundation
+file IO, file-provider XPC, thumbnails, contacts, widgets) or policy the core
+was deliberately not given (scan kinds and dedupe, the once-a-day memory gate,
+sidecar refresh coalescing). The two Phase-4 bridges — `CoreLibraryIndex` and
+`CoreMemories` — hold no rules of their own: an object table, a memo, an
+off-main hop, and a cancel flag.
 
 **Sequencing rule: Phase 1 before any extraction of existing behavior.** It
 proves the toolchain and sidecar contract on a purely additive feature; if the

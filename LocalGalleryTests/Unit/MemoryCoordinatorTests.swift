@@ -37,7 +37,6 @@ final class MemoryCoordinatorTests: XCTestCase {
     private func makeHarness(
         photos: [PhotoFile],
         contacts: [ContactInfo] = [],
-        lowerNameIndex: [String: ContactInfo] = [:],
         defaults: UserDefaults? = nil,
         tmp: TempDir? = nil
     ) -> Harness {
@@ -46,18 +45,18 @@ final class MemoryCoordinatorTests: XCTestCase {
         let cacheURL = tmp.appending("memories_cache.json")
         let clock = FixedClock(date: today)
 
-        let searchIndex = SearchIndex()
-        searchIndex.build(allPhotos: photos)
-        let tagIndex = TagIndex()
-        tagIndex.build(allPhotos: photos)
+        // The core build is async, but `photo(byID:)` — the only thing the
+        // coordinator's `visible` filter reads — is populated synchronously by
+        // `build`, so nothing here has to wait for it.
+        let index = CoreLibraryIndex()
+        index.build(allPhotos: photos)
 
-        let people = PeopleStore(defaults: defaults, clock: clock,
-                                 searchIndex: searchIndex, tagIndex: tagIndex)
+        let people = PeopleStore(defaults: defaults, clock: clock, index: index)
         let coordinator = MemoryCoordinator(
             defaults: defaults,
             clock: clock,
             cache: JSONDiskCache(url: cacheURL, version: 1, label: "test memories"),
-            searchIndex: searchIndex,
+            index: index,
             people: people
         )
         coordinator.makeInputs = { [weak people] in
@@ -66,7 +65,6 @@ final class MemoryCoordinatorTests: XCTestCase {
                 leafFolders: [],
                 contacts: contacts,
                 personContactLinks: [:],
-                contactsByLowerName: lowerNameIndex,
                 mePersonPath: "",
                 hiddenPeople: people?.hiddenPeople ?? []
             )
@@ -152,9 +150,10 @@ final class MemoryCoordinatorTests: XCTestCase {
                 tags: ["People/Alice Anderson"]
             )
         }
-        let h = makeHarness(photos: libraryPhotos(extra: tagged),
-                            contacts: [alice],
-                            lowerNameIndex: ["alice anderson": alice])
+        // No lowered-name index is passed: the core derives it from
+        // `contacts` the way `ContactLinker.index` does, so Alice's tag
+        // auto-matches her contact by name.
+        let h = makeHarness(photos: libraryPhotos(extra: tagged), contacts: [alice])
         defer { cleanup(h) }
 
         await h.coordinator.runScheduledRefresh()

@@ -55,11 +55,16 @@ struct ConfScheduledDump: Codable, Equatable {
 /// day-N parity check the widget pipeline depends on.
 ///
 /// The scheduled pass is the *other* caller of the calendar generators and of
-/// `MemoryEngine.finalize`, and it is the one `_plans/06-performance-baseline.md`
+/// `finalize`, and it is the one `_plans/06-performance-baseline.md`
 /// Finding 3 is about. The fixture pins its OUTPUT — per day, the memories and
 /// their validity windows — and says nothing about how it gets there, so the
-/// port is free to (and must) group people→photos once per call, early-exit on
+/// port is free to (and does) group people→photos once per call, early-exit on
 /// days with no birthdays, and run off the main thread.
+///
+/// Since Phase 4 step 4 the harness drives the Rust core:
+/// `GalleryStore.computeScheduledMemories` is now an `async` call into
+/// `CoreMemories.computeScheduled`, and the live-run comparison goes through
+/// `CoreMemories.generate`. The fixture and every assertion are unchanged.
 @MainActor
 final class ScheduledMemoriesConformanceTests: XCTestCase {
 
@@ -93,14 +98,6 @@ final class ScheduledMemoriesConformanceTests: XCTestCase {
     private func contact(_ id: String, _ given: String, _ family: String, month: Int, day: Int) -> ContactInfo {
         ContactInfo(id: id, givenName: given, familyName: family,
                     birthday: DateComponents(month: month, day: day))
-    }
-
-    private func contactsByLowerName(_ contacts: [ContactInfo]) -> [String: ContactInfo] {
-        var out: [String: ContactInfo] = [:]
-        for c in contacts where out[c.fullName.lowercased()] == nil {
-            out[c.fullName.lowercased()] = c
-        }
-        return out
     }
 
     /// Calendar-tied content on 2024-06-11 (offset +3 from the 06-08 clock)
@@ -175,7 +172,7 @@ final class ScheduledMemoriesConformanceTests: XCTestCase {
 
         let cal = Calendar.current
         let startOfToday = cal.startOfDay(for: spec.today)
-        let scheduled = store.computeScheduledMemories(photos: spec.photos)
+        let scheduled = await store.computeScheduledMemories(photos: spec.photos)
 
         let items: [ConfScheduledItem] = scheduled.map { item in
             let offset = cal.dateComponents([.day], from: startOfToday, to: item.validFrom).day ?? -1
@@ -192,16 +189,14 @@ final class ScheduledMemoriesConformanceTests: XCTestCase {
         for offset in 1...Self.horizonDays {
             guard let day = cal.date(byAdding: .day, value: offset, to: startOfToday),
                   let noon = cal.date(byAdding: .hour, value: 12, to: day) else { continue }
-            let live = await MemoryEngine.generate(
-                from: spec.photos,
-                leafFolders: [],
+            let live = await CoreMemories.generate(CoreMemories.Inputs(
+                photos: spec.photos,
                 contacts: spec.contacts,
                 personContactLinks: spec.links,
-                contactsByLowerName: contactsByLowerName(spec.contacts),
                 birthdaysEnabled: spec.birthdaysEnabled,
                 now: noon,
                 seed: WidgetDayKey.string(for: day)
-            )
+            ))
             let liveByID = Dictionary(uniqueKeysWithValues: live.map { ($0.id, ConfMemory($0)) })
             let scheduledForDay = items.filter { $0.dayOffset == offset }
             let matched = scheduledForDay.filter { liveByID[$0.memory.id] != nil }

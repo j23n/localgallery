@@ -1,7 +1,7 @@
 import XCTest
 @testable import LocalGallery
 
-/// `MetadataReader.earliestFilesystemDate` is the AirDrop / chat-save guard:
+/// `EnrichmentService.earliestFilesystemDate` is the AirDrop / chat-save guard:
 /// when a file arrives via AirDrop the modification date is preserved
 /// (matching the original capture time) but the creation date reflects when
 /// iOS wrote the file to this volume — i.e. today. Picking the smaller of
@@ -9,13 +9,13 @@ import XCTest
 final class EarliestFilesystemDateTests: XCTestCase {
 
     func testReturnsNilWhenBothDatesAreMissing() {
-        XCTAssertNil(MetadataReader.earliestFilesystemDate(creation: nil, modification: nil))
+        XCTAssertNil(EnrichmentService.earliestFilesystemDate(creation: nil, modification: nil))
     }
 
     func testReturnsCreationWhenModificationIsMissing() {
         let creation = date(2024, 6, 1)
         XCTAssertEqual(
-            MetadataReader.earliestFilesystemDate(creation: creation, modification: nil),
+            EnrichmentService.earliestFilesystemDate(creation: creation, modification: nil),
             creation
         )
     }
@@ -23,7 +23,7 @@ final class EarliestFilesystemDateTests: XCTestCase {
     func testReturnsModificationWhenCreationIsMissing() {
         let modification = date(2024, 6, 1)
         XCTAssertEqual(
-            MetadataReader.earliestFilesystemDate(creation: nil, modification: modification),
+            EnrichmentService.earliestFilesystemDate(creation: nil, modification: modification),
             modification
         )
     }
@@ -33,7 +33,7 @@ final class EarliestFilesystemDateTests: XCTestCase {
         // creationDate is when it landed on this volume (today).
         let originalCapture = date(2023, 8, 14, 10, 30)
         let arrivedToday = date(2024, 6, 1, 9, 0)
-        let earliest = MetadataReader.earliestFilesystemDate(
+        let earliest = EnrichmentService.earliestFilesystemDate(
             creation: arrivedToday, modification: originalCapture
         )
         XCTAssertEqual(earliest, originalCapture)
@@ -44,7 +44,7 @@ final class EarliestFilesystemDateTests: XCTestCase {
         // re-saved it). Still pick the earlier of the two.
         let creation = date(2024, 1, 1)
         let modification = date(2024, 6, 1)
-        let earliest = MetadataReader.earliestFilesystemDate(
+        let earliest = EnrichmentService.earliestFilesystemDate(
             creation: creation, modification: modification
         )
         XCTAssertEqual(earliest, creation)
@@ -52,6 +52,6 @@ final class EarliestFilesystemDateTests: XCTestCase {
 
     func testEqualDatesReturnTheSameValue() {
         let d = date(2024, 6, 1)
-        XCTAssertEqual(MetadataReader.earliestFilesystemDate(creation: d, modification: d), d)
+        XCTAssertEqual(EnrichmentService.earliestFilesystemDate(creation: d, modification: d), d)
     }
 }

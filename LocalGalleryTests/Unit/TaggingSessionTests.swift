@@ -95,7 +95,7 @@ final class TaggingSessionTests: XCTestCase {
 
     private func tags(in sidecar: URL) throws -> [String] {
         let data = try Data(contentsOf: sidecar)
-        return MetadataReader.parseXMPBytes(data).rawTags.sorted()
+        return parseXmpBytes(bytes: data).rawTags.sorted()
     }
 
     private func modificationDate(_ url: URL) throws -> Date {

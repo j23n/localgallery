@@ -7,7 +7,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use gallery_vfs::{Entry, ReadSeek, Stat, StdVfs, Vfs, VfsResult};
+use gallery_vfs::{Entry, ProviderAttrs, ReadSeek, Stat, StdVfs, Vfs, VfsResult};
 use serde::Deserialize;
 
 /// The fixture directory, shared with `LocalGalleryTests` and `gallery-model`.
@@ -188,17 +188,22 @@ impl Vfs for ApfsLikeVfs {
     }
 
     fn list(&self, dir: &str) -> VfsResult<Vec<Entry>> {
-        let mut entries = self.0.list(dir)?;
-        for entry in &mut entries {
-            entry.content_version = content_identifier(&format!("{dir}/{}", entry.name));
-        }
-        Ok(entries)
+        self.0.list(dir)
     }
 
     fn stat_entry(&self, path: &str) -> VfsResult<Entry> {
-        let mut entry = self.0.stat_entry(path)?;
-        entry.content_version = content_identifier(path);
-        Ok(entry)
+        self.0.stat_entry(path)
+    }
+
+    fn probe_provider(&self, paths: &[String]) -> Vec<ProviderAttrs> {
+        paths
+            .iter()
+            .map(|path| ProviderAttrs {
+                is_file_provider: false,
+                is_placeholder: false,
+                content_version: content_identifier(path),
+            })
+            .collect()
     }
 
     fn write_atomic(&self, path: &str, bytes: &[u8]) -> VfsResult<()> {

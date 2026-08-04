@@ -22,10 +22,42 @@ struct LibrarySnapshot: Codable, Sendable {
     /// Note: a bump here also wipes the memories cache (memories reference
     /// photo IDs that may change with the library schema) — the Store
     /// orchestrates that in `loadCache()`.
+    /// **`sidecarManifest` deliberately did not bump this.** It is optional, a
+    /// v20 file written before it existed decodes with `nil`, pays one legacy
+    /// re-probe and persists it from then on. A bump would have forced a full
+    /// rescan on every install — minutes of provider round-trips — to save a
+    /// single pass. See `_plans/06-performance-baseline.md` Finding 2.
     static let version = 20
 
     let rootFolder: PhotoFolder
     let allPhotos: [PhotoFile]
+    /// The sidecar rows the same scan produced.
+    ///
+    /// Persisting these is what stops every launch re-probing ~17k `.xmp`
+    /// files: the light scan's fast path needs a manifest hit per photo, and
+    /// the manifest used to live only in `GalleryStore.lastSidecarManifest` —
+    /// in memory, empty on launch, so the first `.auto` scan after every cold
+    /// start paid 259 s on a 20k library with 20,000/20,000 photo cache hits.
+    ///
+    /// Staleness is already guarded three ways and none of them relies on this
+    /// field being fresh: the fast path requires an unchanged photo size+mtime,
+    /// `SidecarSyncService` still diffs content versions before fetching, and a
+    /// *deleted* sidecar drops out through the directory listing rather than
+    /// through the cache.
+    ///
+    /// `nil` means "written by a build that did not have this field", which is
+    /// distinct from `[]` — a library with no sidecars at all.
+    let sidecarManifest: [SidecarCandidate]?
+
+    init(
+        rootFolder: PhotoFolder,
+        allPhotos: [PhotoFile],
+        sidecarManifest: [SidecarCandidate]? = nil
+    ) {
+        self.rootFolder = rootFolder
+        self.allPhotos = allPhotos
+        self.sidecarManifest = sidecarManifest
+    }
 }
 
 /// Schema version for the persisted `[Memory]` cache. Versioned

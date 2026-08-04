@@ -6,9 +6,9 @@ import XCTest
 /// `core/fixtures/scan-conformance/library_snapshot_v20.json` is produced by
 /// the app's **real** save path — `JSONDiskCache<LibrarySnapshot>.save`, i.e.
 /// a stock `JSONEncoder` over a `{version, value}` envelope — from a library
-/// that came out of a real `FolderScanner.scan` (with the temp-dir paths
-/// rebased onto a fixed root and a few photos decorated so every optional is
-/// exercised at least once).
+/// that came out of a real scan (with the temp-dir paths rebased onto a fixed
+/// root and a few photos decorated so every optional is exercised at least
+/// once).
 ///
 /// Phase 3 has to read this file with serde and re-emit something Swift
 /// decodes identically, and a warm relaunch after the port must NOT trigger a
@@ -58,6 +58,9 @@ final class LibrarySnapshotFixtureTests: XCTestCase {
             ("2021/IMG_0002.jpg", 5121),
             ("2021/Trip/Ünicode café.jpg", 7168),
             ("Videos/Clip.mov", 8192),
+            // One `.xmp`, so `sidecarManifest` has a row to persist and the
+            // field is exercised rather than merely present-and-empty.
+            ("2021/IMG_0001.jpg.xmp", 128),
         ]
         for (rel, size) in files {
             let url = root.appendingPathComponent(rel)
@@ -67,7 +70,7 @@ final class LibrarySnapshotFixtureTests: XCTestCase {
             try Data(repeating: 0x41, count: size).write(to: url)
         }
 
-        let result = await FolderScanner.scan(at: root, reuseCached: false)
+        let result = await CoreScanner().scan(at: root, reuseCached: false)
         let scannedRoot = try XCTUnwrap(result.rootFolder)
 
         // Rebase onto the canonical root, then decorate. Decoration is keyed
@@ -81,7 +84,28 @@ final class LibrarySnapshotFixtureTests: XCTestCase {
         // order (which is unspecified — see ScannerConformanceTests).
         return LibrarySnapshot(
             rootFolder: rebasedRoot,
-            allPhotos: rebasedPhotos.sorted { $0.url.path < $1.url.path }
+            allPhotos: rebasedPhotos.sorted { $0.url.path < $1.url.path },
+            // `_plans/06` Finding 2's field. The row's real `ContentVersion`
+            // is volume-dependent (an APFS inode, a fresh mtime), so it is
+            // replaced with fixed values for the same reason the photo dates
+            // are — a fixture that changed every run would pin nothing.
+            sidecarManifest: result.sidecarManifest
+                .map { rebase($0, from: root) }
+                .sorted { $0.sidecarURL.path < $1.sidecarURL.path }
+        )
+    }
+
+    private func rebase(_ candidate: SidecarCandidate, from root: URL) -> SidecarCandidate {
+        let url = canonicalURL(candidate.sidecarURL, from: root)
+        return SidecarCandidate(
+            photoID: PhotoFile.stableID(for: url.deletingPathExtension()),
+            sidecarURL: url,
+            currentVersion: FileProviderDetector.ContentVersion(
+                contentIdentifier: "1234567",
+                modificationDate: Date(timeIntervalSinceReferenceDate: 649_500_000),
+                size: 128
+            ),
+            downloadStatus: .local
         )
     }
 
@@ -185,7 +209,7 @@ final class LibrarySnapshotFixtureTests: XCTestCase {
         // test can prove they are dropped.
         p.locality = .remote(downloaded: false)
         p.sidecarStatus = .cached(FileProviderDetector.ContentVersion(
-            contentIdentifier: 42, modificationDate: nil, size: 99
+            contentIdentifier: "42", modificationDate: nil, size: 99
         ))
         return p
     }
@@ -230,9 +254,73 @@ final class LibrarySnapshotFixtureTests: XCTestCase {
         XCTAssertEqual(LibrarySnapshot.version, 20,
                        "the committed fixture is v20 — regenerate it in the same commit as a bump")
         let value = try XCTUnwrap(object["value"] as? [String: Any])
-        XCTAssertEqual(Set(value.keys), ["rootFolder", "allPhotos"],
-                       "LibrarySnapshot grew or lost a field; regenerate the fixture and update the README "
-                       + "(see _plans/06-performance-baseline.md Finding 2 for the planned sidecarManifest field)")
+        XCTAssertEqual(Set(value.keys), ["rootFolder", "allPhotos", "sidecarManifest"],
+                       "LibrarySnapshot grew or lost a field; regenerate the fixture and update the README")
+    }
+
+    /// `sidecarManifest` is the one field that arrived **without** a version
+    /// bump (`_plans/06-performance-baseline.md` Finding 2), so both halves of
+    /// that decision need a test: a file that has it round-trips it, and a file
+    /// written before it existed still loads warm instead of forcing a rescan.
+    func testTheSidecarManifestRoundTripsThroughTheWireFormat() throws {
+        let decoded = try decodeFixture()
+        let manifest = try XCTUnwrap(decoded.sidecarManifest)
+        XCTAssertEqual(manifest.count, 1)
+        let row = try XCTUnwrap(manifest.first)
+        XCTAssertEqual(row.sidecarURL.lastPathComponent, "IMG_0001.jpg.xmp")
+        XCTAssertEqual(row.photoID, PhotoFile.stableID(for: row.sidecarURL.deletingPathExtension()))
+        XCTAssertEqual(row.downloadStatus, .local)
+        XCTAssertEqual(row.currentVersion.contentIdentifier, "1234567")
+
+        // The enum has to be a plain string on the wire — the synthesised
+        // encoding for a payload-less case is `{"local": {}}`, and the Rust
+        // core reads and writes the same file.
+        let value = try XCTUnwrap(fixtureObject()["value"] as? [String: Any])
+        let rows = try XCTUnwrap(value["sidecarManifest"] as? [[String: Any]])
+        XCTAssertEqual(rows.first?["downloadStatus"] as? String, "local")
+        XCTAssertEqual(
+            (rows.first?["currentVersion"] as? [String: Any])?["contentIdentifier"] as? String,
+            "1234567",
+            "the content identifier is a string, matching gallery_model::snapshot::ContentVersion"
+        )
+    }
+
+    /// The upgrade path: a v20 snapshot written before `sidecarManifest`
+    /// existed decodes with `nil`, at the same version, with no eviction. A
+    /// bump instead would have cost every installed library a full rescan.
+    @MainActor
+    func testAV20SnapshotWithoutTheManifestStillLoadsWarm() throws {
+        var object = try fixtureObject()
+        var value = try XCTUnwrap(object["value"] as? [String: Any])
+        value.removeValue(forKey: "sidecarManifest")
+        object["value"] = value
+
+        let url = temp.appending("legacy.json")
+        try JSONSerialization.data(withJSONObject: object).write(to: url)
+        let cache = JSONDiskCache<LibrarySnapshot>(
+            url: url, version: LibrarySnapshot.version, label: "test"
+        )
+        let loaded = try XCTUnwrap(cache.load())
+        XCTAssertNil(loaded.sidecarManifest,
+                     "absent must stay distinguishable from an empty manifest")
+        XCTAssertEqual(loaded.allPhotos.count, 5)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path),
+                      "adding an optional field must not evict older snapshots")
+    }
+
+    /// …and a sidecar cache written while `contentIdentifier` was an `Int64`
+    /// still decodes, for the same reason: evicting it would re-download every
+    /// `.xmp` in the library to save nothing.
+    func testALegacyNumericContentIdentifierStillDecodes() throws {
+        let legacy = Data(#"{"contentIdentifier": 8675309, "size": 12}"#.utf8)
+        let decoded = try JSONDecoder().decode(FileProviderDetector.ContentVersion.self, from: legacy)
+        XCTAssertEqual(decoded.contentIdentifier, "8675309")
+        XCTAssertEqual(decoded.size, 12)
+        // …and it re-encodes as a string from then on.
+        let reencoded = try JSONSerialization.jsonObject(
+            with: try JSONEncoder().encode(decoded)
+        ) as? [String: Any]
+        XCTAssertEqual(reencoded?["contentIdentifier"] as? String, "8675309")
     }
 
     /// Dates are JSON **numbers**: `JSONEncoder`'s default `.deferredToDate`

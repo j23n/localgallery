@@ -24,7 +24,7 @@ pub use container::extract_xmp;
 pub use embedded::{read_embedded_xmp, EmbeddedXmp};
 pub use exif_read::{parse_exif_datetime, read_exif_facts, ExifFacts};
 pub use swift_xmp::{decode_xmp_text, parse_mwg_regions, parse_xmp_bytes, SwiftXmpParse};
-pub use video::read_video_date;
+pub use video::{read_video_date, read_video_date_at};
 
 /// Everything one photo contributes to a `PhotoFile`.
 #[derive(Debug, Default, Clone, PartialEq)]

@@ -110,8 +110,17 @@ final class GalleryStore {
     /// Most recent scanner-emitted sidecar manifest. `SidecarSyncService`
     /// diffs it after every scan; `SidecarRefreshService` re-reads it on the
     /// BG sidecar-refresh task.
-    @ObservationIgnored var lastSidecarManifest: [FolderScanner.SidecarCandidate] = []
+    ///
+    /// Seeded from the persisted snapshot in `loadCache()`, *before*
+    /// `restoreFolder` kicks off the launch `.auto` scan — without that, the
+    /// first light scan of every session re-probes every `.xmp` in the library
+    /// (`_plans/06-performance-baseline.md` Finding 2).
+    @ObservationIgnored var lastSidecarManifest: [SidecarCandidate] = []
     @ObservationIgnored let bookmarks: BookmarkManager
+    /// The Rust core's folder scanner and the provider probe it calls back
+    /// into. Replaced `FolderScanner`; scan *policy* stays in
+    /// `GalleryStore+Scanning.swift`.
+    @ObservationIgnored let coreScanner = CoreScanner()
     @ObservationIgnored private let contactLinker = ContactLinker()
     @ObservationIgnored private let searchService = SearchIndex()
     @ObservationIgnored private let tagService = TagIndex()
@@ -401,9 +410,25 @@ final class GalleryStore {
 
     // MARK: - Disk Cache
 
+    /// Write the library snapshot without touching `allPhotos` or the
+    /// indexes. The one caller is the scan pipeline's "no changes" branch,
+    /// which can still have a fresh `lastSidecarManifest` to persist —
+    /// every other write rides along with an `apply(_:)`.
+    func persistLibraryCache() {
+        saveCache()
+    }
+
     private func saveCache() {
         guard let root = rootFolder else { return }
-        libraryCache.save(LibrarySnapshot(rootFolder: root, allPhotos: allPhotos))
+        libraryCache.save(LibrarySnapshot(
+            rootFolder: root,
+            allPhotos: allPhotos,
+            // Rides along so the next launch's light scan can skip the `.xmp`
+            // provider probe for every unchanged photo. Absent until the first
+            // scan of the session has run, which is also when it is worth
+            // anything.
+            sidecarManifest: lastSidecarManifest.isEmpty ? nil : lastSidecarManifest
+        ))
     }
 
     // MARK: - Contacts
@@ -488,7 +513,15 @@ final class GalleryStore {
             memories.clearDiskCache()
             return false
         }
-        Log.cache.info("Loaded \(cached.allPhotos.count) photos from cache v\(LibrarySnapshot.version)")
+        // Before `apply`, and therefore before `restoreFolder`'s `.auto` scan:
+        // the manifest is only useful to a scan that has not started yet.
+        // `nil` means the snapshot predates the field — one legacy re-probe,
+        // then it persists.
+        lastSidecarManifest = cached.sidecarManifest ?? []
+        Log.cache.info(
+            "Loaded \(cached.allPhotos.count) photos and \(self.lastSidecarManifest.count) sidecar rows "
+            + "from cache v\(LibrarySnapshot.version)"
+        )
         // No persist — we just read this off disk, no need to write it back.
         apply(.scanResult(photos: cached.allPhotos, root: cached.rootFolder, persistCache: false))
         return true

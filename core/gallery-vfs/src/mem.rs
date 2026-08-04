@@ -149,9 +149,6 @@ impl Vfs for MemVfs {
                     },
                     modified: Some(modified),
                     created: Some(modified),
-                    is_file_provider: false,
-                    is_placeholder: false,
-                    content_version: None,
                     name,
                 }
             })
@@ -176,9 +173,6 @@ impl Vfs for MemVfs {
             size: stat.size,
             modified: Some(modified),
             created: Some(modified),
-            is_file_provider: false,
-            is_placeholder: false,
-            content_version: None,
         })
     }
 

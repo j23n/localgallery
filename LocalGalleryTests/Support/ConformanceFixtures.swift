@@ -228,15 +228,16 @@ enum ConformanceFixtures {
 /// A date, recorded in the one representation that is invariant under the
 /// machine's time zone.
 ///
-/// `localWallClock` — EXIF has no zone, so `MetadataReader.exifDateFormatter`
-/// interprets it in the *device* zone. Parsing in zone Z and formatting back
+/// `localWallClock` — EXIF has no zone, so the reader interprets it in the
+/// *device* zone (`EXIFService.exifDateFormatter` did it with a `DateFormatter`
+/// that had none; the core hands back a zone-less wall clock and
+/// `EnrichmentService.resolve` does the same job explicitly). Parsing in zone Z and formatting back
 /// in zone Z round-trips to the original wall clock whatever Z is, so the wall
 /// clock is what the fixture pins. The absolute instant is not portable and is
 /// deliberately not recorded.
 ///
-/// `utc` — `AVAsset.creationDate` yields a real instant (QuickTime `©day`
-/// carries an offset, and AVFoundation reads a zone-less `©day` as UTC), so
-/// UTC is both exact and portable.
+/// `utc` — a QuickTime `©day` yields a real instant (it carries an offset, and
+/// a zone-less one is read as UTC), so UTC is both exact and portable.
 struct ConformanceDate: Codable, Equatable {
     let basis: String
     let value: String
@@ -244,7 +245,7 @@ struct ConformanceDate: Codable, Equatable {
     static let localWallClockBasis = "localWallClock"
     static let utcBasis = "utc"
 
-    /// Mirrors `MetadataReader.exifDateFormatter`: POSIX locale, Gregorian
+    /// Mirrors `EXIFService.exifDateFormatter`: POSIX locale, Gregorian
     /// calendar, **no** explicit time zone.
     nonisolated(unsafe) private static let wallClock: DateFormatter = {
         let f = DateFormatter()

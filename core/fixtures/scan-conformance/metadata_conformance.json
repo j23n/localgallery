@@ -9,8 +9,8 @@
 
       ],
       "notes" : [
-        "JPEG bytes with a .txt extension. `UTType(filenameExtension: \"txt\")` conforms to neither .image nor .movie, so FolderScanner never sees this file.",
-        "MetadataReader would happily read it — this entry pins the reader, not the scanner."
+        "JPEG bytes with a .txt extension. `UTType(filenameExtension: \"txt\")` conforms to neither .image nor .movie, so the scanner never sees this file.",
+        "The metadata reader would happily read it — this entry pins the reader, not the scanner."
       ],
       "path" : "containers/actually_jpeg.txt",
       "scannerKind" : "skipped"
@@ -128,7 +128,7 @@
       "notes" : [
         "Date order is DateTimeOriginal → DateTimeDigitized → TIFF DateTime.",
         "SubSecTimeOriginal (250) and OffsetTimeOriginal (+02:00) are DROPPED: the format string is exactly \"yyyy:MM:dd HH:mm:ss\" and neither field is consulted. Subsecond is always .000.",
-        "Orientation is not read by MetadataReader at all."
+        "Orientation is not read by the app at all — the core parses it for its own decode path and the app never asks for it."
       ],
       "path" : "exif/full.jpg",
       "scannerKind" : "image"
@@ -262,7 +262,7 @@
 
       ],
       "notes" : [
-        "GPSAltitude / GPSAltitudeRef are read by nobody — MetadataReader has no altitude field."
+        "GPSAltitude / GPSAltitudeRef are read by nobody — the reader has no altitude field."
       ],
       "path" : "gps/north_east.jpg",
       "scannerKind" : "image"
@@ -272,14 +272,15 @@
 
       ],
       "gpsLatitude" : -33.8688,
-      "gpsLongitude" : -151.2093,
+      "gpsLongitude" : -151.20929999999998,
       "hasSidecar" : false,
       "hierarchicalTags" : [
 
       ],
       "notes" : [
-        "Ref \"S\"/\"W\" negate the (always positive) ImageIO magnitudes.",
-        "GPSAltitudeRef=1 (below sea level) is ignored along with the altitude."
+        "Ref \"S\"/\"W\" negate the (always positive) magnitudes.",
+        "GPSAltitudeRef=1 (below sea level) is ignored along with the altitude.",
+        "SUB-ULP DIVERGENCE, pinned to the port's value: the longitude reads -151.20929999999998 where ImageIO's Swift reader gave -151.2093 — one ULP apart, 1e-14 degrees, a nanometre on the ground. The two differ only in the order they fold degrees/minutes/seconds out of the EXIF rationals. The Rust host test compares GPS at 1e-9 and is indifferent; this file is byte-exact, so the number here is the port's."
       ],
       "path" : "gps/south_west.jpg",
       "scannerKind" : "image"
@@ -289,7 +290,7 @@
 
       ],
       "gpsLatitude" : 0,
-      "gpsLongitude" : 0.0001,
+      "gpsLongitude" : 9.999999999999999e-05,
       "hasSidecar" : false,
       "hierarchicalTags" : [
 
@@ -297,7 +298,8 @@
       "notes" : [
         "LANDMINE, CONFIRMED: the ref comparison is case-SENSITIVE (`latRef == \"S\"` / `lonRef == \"W\"`). The raw lowercase refs \"s\"/\"w\" written here do NOT negate, so this southern/western point is reported as northern/eastern.",
         "exiftool normalises refs to uppercase on a normal write; these were planted with `#=` to bypass PrintConv, which is why the case matters at all.",
-        "Latitude 0 comes out as +0. When the ref IS uppercase the same expression yields -0.0, which serialises as `-0` in JSON — see gps/south_west.jpg's sign handling and keep Rust's float formatting in mind."
+        "Latitude 0 comes out as +0. When the ref IS uppercase the same expression yields -0.0, which serialises as `-0` in JSON — see gps/south_west.jpg's sign handling and keep Rust's float formatting in mind.",
+        "SUB-ULP DIVERGENCE, same cause as gps/south_west.jpg: the longitude reads 9.999999999999999e-05 where ImageIO gave 0.0001. One ULP."
       ],
       "path" : "gps/zero_and_lowercase_ref.jpg",
       "scannerKind" : "image"

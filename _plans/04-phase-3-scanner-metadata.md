@@ -60,15 +60,21 @@ must reproduce rather than fix. What follows is the original spec.
 **Done.** `Vfs::list(dir) -> Vec<Entry>` plus `Vfs::stat_entry(path)` for the
 one thing a listing cannot give you — the *scanned directory's own*
 timestamps, which is where Swift calls `dirURL.resourceValues(forKeys:)`.
-`Entry` carries `name / kind / size / modified / created / is_file_provider /
-is_placeholder / content_version`. Three fields beyond the sketch, each
-load-bearing: `created` because the fallback capture date is
-`min(creation, modification)`; `is_file_provider` because the app
-distinguishes `.remote(downloaded: true)` from `.local`; sub-second times on
-`modified` because the light-scan cache-hit rule is Swift `Date` equality,
-which is a `Double`. `StdVfs` reports `is_file_provider`/`is_placeholder`
-false and `content_version` none — provider awareness arrives with the Swift
-implementation.
+`Entry` carries `name / kind / size / modified / created`. `created` is beyond
+the sketch and load-bearing: the fallback capture date is
+`min(creation, modification)`. So are sub-second times on `modified` — the
+light-scan cache-hit rule is Swift `Date` equality, and a `Date` is a `Double`,
+so truncating to whole seconds would make a file rewritten 400 ms later read as
+unchanged.
+
+**Revised in step 5.** `Entry` originally carried `is_file_provider /
+is_placeholder / content_version` too. Those moved to a separate
+`Vfs::probe_provider(&[path]) -> Vec<ProviderAttrs>`, batched, with a default
+implementation that answers "plain local file". Folding them into the listing
+would have made the *light* path pay a bill it currently skips entirely: a
+light scan that hits the cache for every photo needs none of them, and each one
+is a ~20 ms XPC round trip. `StdVfs` and `MemVfs` take the default; only the
+platform layer overrides it.
 
 ```
 trait Vfs {
@@ -153,32 +159,92 @@ in the type as an optional field that is omitted when `None`.
 
 ### 5. FFI + Swift swap
 
+**Done.** `gallery-ffi::scanner` + `Services/CoreScanner.swift`;
+`FolderScanner.swift` and `MetadataReader.swift` are deleted.
+
 ```
-scanner_open(vfs: Box<dyn VfsCallback>, snapshot_path) -> Scanner
-scanner.scan(root, kind: Light|Full, progress) -> ScanOutcome
-   // ScanOutcome: rootFolder + flatPhotos (batched), needsEnrichment,
-   //              sidecarManifest, added/removed/modified, failedDirectoryPaths
-scanner.load_snapshot() / save_snapshot(...)
+ScannerSession(probe: ProviderProbe)
+  .scan(root, ScanRequest{reuseCached, cachedPhotos, cachedSidecarManifest},
+        progress?) -> ScanOutcomeRecord        // throws ScanError.cancelled
+  .cancel()
+loadSnapshot / saveSnapshot / probeSnapshotVersion / snapshotVersion
+readImageMetadata(path) / readVideoDate(path) / parseXmpBytes(bytes)
 ```
 
-- `GalleryStore+Scanning` swaps its calls; `apply(_:)`, dedupe, two-phase,
-  post-scan steps untouched. Delete `FolderScanner.swift`,
-  `MetadataReader.swift` (and its tests, replaced by conformance fixtures
-  running against FFI).
-- Bridge types once at the boundary (`PhotoFile` ⇄ FFI record); the Swift
-  `PhotoFile` stays the app's currency in this phase.
+Four decisions the sketch above did not anticipate, each measured rather than
+argued:
+
+- **The session is request/response, not a run thread.** None of
+  `crate::support`'s machinery applies — no listener, no summary, no
+  "already running". What the object exists for is the two things that are
+  per-*app* rather than per-call: the `ProviderProbe` the core calls back into,
+  and a cancel flag reachable from a thread that is not the one blocked inside
+  `scan`. It holds no state between calls.
+- **Swift implements a probe, not a `Vfs`.** §2 assumed the iOS `Vfs` would
+  supply `is_placeholder`/`content_version` from inside `list()`. Measured,
+  that is the wrong split twice over: it makes the *light* path pay the
+  provider bill it currently skips entirely, and it routes 20k listings through
+  UniFFI plus Foundation's URL machinery to get facts `read_dir` already has.
+  So `Vfs` grew `probe_provider(&[path]) -> Vec<ProviderAttrs>`, the scanner
+  calls it once per directory with exactly the files it is about to rebuild,
+  and the core uses `StdVfs` for everything else under the app's active
+  security scope. A light scan over an unchanged library crosses the boundary
+  **zero** times.
+- **The tree crosses flat.** `PhotoFolder` owns its photos by value, so
+  shipping the recursive tree *and* `flat_photos` would put 40k records on the
+  wire for a 20k library. Folders come back as a flat array with a parent index
+  and a `(photoStart, photoCount)` slice — valid because the walk appends each
+  directory's photos contiguously — and Swift rebuilds the tree in one pass.
+- **Records, not JSON, for the bulk payload.** Measured at 20k photos; see the
+  numbers in the acceptance list below.
+
+`GalleryStore+Scanning` swapped one call; `apply(_:)`, dedupe, two-phase and
+the post-scan steps are untouched. What survived of `MetadataReader`:
+`exifDateFormatter` moved to `EXIFService` (the info panel reads its own
+`CGImageSource` properties anyway) and `earliestFilesystemDate` to
+`EnrichmentService` (it compares two `URLResourceValues` dates read on that
+side). The parsers — `readImageMetadata`, `parseXMPBytes`, `readVideoDate`,
+`parseMWGRegions` — are gone, and `SidecarSyncService` now parses fetched
+`.xmp` bytes through the core too, so a sidecar read from a provider and one
+read off disk cannot disagree.
 
 ## Testing / acceptance
 
-- [ ] All conformance fixtures green against the Rust implementation (run
+- [x] All conformance fixtures green against the Rust implementation (run
       in `cargo test` on the Mac host *and* via FFI in `LocalGalleryTests`).
-- [ ] Upgrade test: snapshot written by the last Swift build loads warm
-      (no rescan) in the Rust build.
-- [ ] Perf: full scan + light scan of the 10k-photo synthetic library
-      benchmarked before/after; regression budget ±20%, expect improvement.
-- [ ] FFI traffic measured: O(directories + batches), not O(files).
-- [ ] Simulator soak: repeated foreground light scans, pull-to-refresh,
-      Reload Library — no diffs vs. baseline behavior notes.
+      `scanner_conformance.json` regenerated byte-identical — the port's output
+      over the fixture tree is indistinguishable from the Swift scanner's.
+      `metadata_conformance.json` moved on two values only, both **one ULP** of
+      GPS longitude (rational→float folding order); each entry carries a note
+      saying so.
+- [x] Upgrade test: a v20 snapshot without `sidecarManifest` loads warm, at the
+      same version, with no eviction — `LibrarySnapshotFixtureTests`
+      `.testAV20SnapshotWithoutTheManifestStillLoadsWarm` and
+      `library_snapshot_roundtrip.rs::the_committed_snapshot_decodes`. A legacy
+      numeric `contentIdentifier` still decodes too, so sidecar caches survive.
+- [x] Swift and Rust agree on the snapshot at *runtime*, not just against the
+      committed fixture: `CoreScannerBridgeTests`
+      `.testSwiftAndRustAgreeOnTheSnapshotAtRuntime` writes with each and reads
+      with the other.
+- [x] FFI traffic measured: O(directories that need a probe), not O(files) —
+      and **zero** for a light scan over an unchanged library
+      (`ScanTimings.probeBatches`, asserted in `gallery-scan` and `gallery-ffi`
+      unit tests).
+- [x] Perf gates (`_plans/06-performance-baseline.md`), all three met on the
+      20k fixture library, Release, iPhone 17 Pro simulator:
+      cold full scan **406 s → 2.3 s** (gate ≤ 60 s), light scan
+      **259 s → 0.83 s** (gate ≤ 10 s), relaunch light scan **0.79 s with
+      `probe=0ms probed=0 batches=0`** (gate: seconds, probe ≈ 0).
+      The win is *not* the fan-out Finding 1 predicted — that was implemented,
+      measured at 512 s, and is documented as a dead end in `_plans/06`. It is
+      dropping the three ubiquitous `URLResourceKey`s on a non-iCloud tree.
+- [x] FFI payload strategy settled by measurement, not argument: 20k photos
+      cross as plain records in `in=50ms out=64ms`. No batching, no JSON side
+      channel. The tree crosses flat (parent index + photo slice) so the photos
+      are not sent twice; that alone was worth more than any encoding choice.
+- [x] Simulator soak: nine scans over one session — cold full, relaunch light,
+      two foreground lights, three pull-to-refresh lights, and a two-phase
+      "Reload Library" — 20,000 photos on every one, no crash report.
 
 ## Risks
 

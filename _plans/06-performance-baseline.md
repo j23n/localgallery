@@ -40,6 +40,23 @@ Log lines that carry the numbers: `Scan totals: … probe=…ms hits=… slow=�
 `Done in …s` (enrichment), `Built: … in …ms` (index), `Generated … memories
 in …ms`, `Exported snapshot: … in …ms`.
 
+## Results after Phase 3 step 5 (measured 2026-08-04)
+
+Same simulator, same generator invocation, same `Scan totals` line. Findings 1
+and 2 are **closed**; Finding 3 is untouched and still owned by Phase 4.
+
+| Scenario | Baseline | Now | Gate | |
+|---|---|---|---|---|
+| Cold full scan, 20k files | **406 s** | **2.3 s** | ≤ 60 s | ✅ 177× |
+| Light rescan, zero changes | **259 s** | **0.83 s** | ≤ 10 s | ✅ |
+| Relaunch light scan | 259 s | **0.79 s**, `probe=0ms probed=0 batches=0` | seconds, probe ≈ 0 | ✅ |
+| "Reload Library" (two-phase) | — | 0.79 s light pre-pass + **1.23 s** full pass | — | |
+| FFI record marshalling, 20k | — | `in=50ms out=64ms` | — | not the bottleneck |
+
+**Read Finding 1's fix direction below with the correction that follows it: the
+fan-out it proposed does not work, and the reason is worth more than the
+prediction was.**
+
 ## Finding 1 — full scan is 99.4% serial file-provider probe
 
 `FileProviderDetector.probe(_:)` (`FileProviderDetector.swift:58`) does one
@@ -73,6 +90,49 @@ perf gate in the Phase 3 exit criteria, not just conformance.
 **Gate:** full scan of the 20k fixture library ≤ 60 s on the simulator
 (from `Scan totals`), light scan unchanged-library ≤ 10 s.
 
+### Correction — the fan-out was the wrong fix, and the right one was smaller
+
+Fix direction 1 was implemented as specified (bounded fan-out, deterministic
+positional emission) and **measured to make things worse**:
+
+| probe strategy | cold scan, 20k |
+|---|---|
+| serial, 7 keys (baseline) | 406 s |
+| 16-way fan-out, 7 keys | **512 s** |
+| 16-way fan-out + per-directory `contentsOfDirectory` prefetch, 7 keys | **582 s** |
+| 4 cheap keys only (fan-out irrelevant) | **2.3 s** |
+
+`sample` during the 512 s run showed all 16 threads parked in `mach_msg2_trap`
+inside `resourceValues`, and the arithmetic settles it: per-probe latency went
+from ~11 ms to ~220 ms — exactly 16× plus contention. Throughput was flat, so
+the round trip is serialised somewhere the thread count cannot reach. Fix
+direction 2's prefetch experiment was run too and is also a dead end: the
+`contentsOfDirectory` cache does not serve the ubiquitous keys either, and the
+prefetch call itself costs.
+
+What worked was asking for **less**, not asking in parallel. Of the seven keys
+`FileProviderDetector.probe` reads, only three go to `fileproviderd`:
+`isUbiquitousItem`, `ubiquitousItemDownloadingStatus`,
+`ubiquitousItemIsDownloading`. The other four (`fileSize`, `totalFileSize`,
+`contentModificationDate`, `fileContentIdentifier`) are a stat. The scanner now
+resolves once per scan whether the tree is ubiquitous at all — one probe — and
+on a non-iCloud tree reads only the cheap four. Placeholder detection survives
+because `totalFileSize > fileSize` is the branch every non-Apple provider
+already took; what is given up is iCloud's `.downloading` / `.stale`
+distinctions, which nothing in the app reads and which the core already
+collapses into `placeholder`.
+
+The 20k fixture library is not ubiquitous, so **all 36,999 of those probes were
+asking a plain local file whether it was in the cloud**. 403 of the baseline's
+406 seconds bought exactly one bit of information, and it was always the same
+bit.
+
+On a genuinely ubiquitous library nothing changes: the full seven-key read
+happens as before and the scan is as slow as it always was. Making *that* case
+fast needs the placeholder bit to come from `stat` (`st_blocks == 0 &&
+st_size > 0`) rather than from Foundation, which is a real behaviour change and
+is deliberately not in this phase.
+
 ## Finding 2 — sidecar manifest is not persisted; every launch re-pays a ~4-min rescan
 
 Light scan skips the sidecar probe only on `cachedSidecarManifest[photo.id]`
@@ -103,6 +163,22 @@ added, and the Rust side must round-trip it losslessly.
 
 **Gate:** app relaunch on an unchanged 20k library → post-launch scan
 completes in seconds with `probe=` ≈ 0 in `Scan totals`.
+
+### Closed as specified
+
+Landed exactly as described — optional field, no version bump, seeded in
+`loadCache()` before `restoreFolder`'s `.auto` scan. Measured on relaunch:
+
+    Loaded 20000 photos and 16999 sidecar rows from cache v20
+    Scan totals: 20000 files in 97 folders, total=794ms … probe=0ms probed=0
+                 batches=0 hits=20000 slow=0 reuseCached=true
+
+One wrinkle the sketch did not cover: the scan pipeline's "no changes" branch
+does not call `apply(_:)`, so it never reached `saveCache()`. The first pass
+after an upgrade changes the manifest and *nothing else* — so without an
+explicit write the fix would have lived in memory only and every launch would
+have gone on re-probing. `runScanPass` now compares the manifest across the
+pass and calls `persistLibraryCache()` on that branch.
 
 ## Finding 3 — scheduled-memories widget pass: ~9 s main-thread stall
 

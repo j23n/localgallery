@@ -217,7 +217,7 @@ final class FaceServiceTests: XCTestCase {
         // And a sidecar the app's own reader understands is on disk.
         let sidecar = exemplar.url.appendingPathExtension("xmp")
         XCTAssertTrue(FileManager.default.fileExists(atPath: sidecar.path))
-        let xmp = MetadataReader.parseXMPBytes(try Data(contentsOf: sidecar))
+        let xmp = parseXmpBytes(bytes: try Data(contentsOf: sidecar))
         XCTAssertTrue(xmp.rawTags.contains("People/Ada Lovelace"), "\(xmp.rawTags)")
         XCTAssertFalse(xmp.faceRegions.isEmpty)
     }

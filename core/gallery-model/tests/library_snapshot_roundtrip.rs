@@ -23,7 +23,7 @@ use gallery_model::date::AppleDate;
 use gallery_model::photo::{
     FaceRegion, FileUrl, HierarchicalTag, PhotoFile, PhotoFolder, StableId,
 };
-use gallery_model::snapshot::{self, LibrarySnapshot, LIBRARY_SNAPSHOT_VERSION};
+use gallery_model::snapshot::{self, DownloadStatus, LibrarySnapshot, LIBRARY_SNAPSHOT_VERSION};
 
 fn fixture_bytes() -> Vec<u8> {
     let path: PathBuf = [
@@ -50,9 +50,41 @@ fn the_committed_snapshot_decodes() {
     assert_eq!(library.all_photos.len(), 5);
     assert_eq!(library.root_folder.name, "PhotoLibrary");
     assert_eq!(library.root_folder.total_photo_count, 5);
+    // `_plans/06` Finding 2's field, added to v20 *without* a version bump.
+    let manifest = library
+        .sidecar_manifest
+        .as_ref()
+        .expect("the fixture carries a manifest since Finding 2 landed");
+    assert_eq!(manifest.len(), 1);
     assert_eq!(
-        library.sidecar_manifest, None,
-        "a v20 file written before the field existed decodes with None"
+        manifest[0].sidecar_url.path(),
+        "/fixtures/PhotoLibrary/2021/IMG_0001.jpg.xmp"
+    );
+    assert_eq!(
+        manifest[0].photo_id,
+        StableId::for_photo("/fixtures/PhotoLibrary/2021/IMG_0001.jpg")
+    );
+    assert_eq!(
+        manifest[0].current_version.content_identifier.as_deref(),
+        Some("1234567"),
+        "the identifier is a JSON string on both sides of the boundary"
+    );
+    assert_eq!(manifest[0].download_status, DownloadStatus::Local);
+
+    // …and the other half of the no-bump decision: a v20 file written *before*
+    // the field existed still decodes, at the same version, with `None`. That
+    // is what stops the upgrade costing every installed library a full rescan.
+    let mut legacy = json(&fixture_bytes());
+    legacy["value"]
+        .as_object_mut()
+        .expect("value is an object")
+        .remove("sidecarManifest");
+    let legacy_bytes = serde_json::to_vec(&legacy).unwrap();
+    assert_eq!(snapshot::probe_version(&legacy_bytes), Ok(20));
+    assert_eq!(
+        snapshot::load(&legacy_bytes).unwrap().sidecar_manifest,
+        None,
+        "absent must stay distinguishable from an empty manifest"
     );
 
     // Paths come back as paths, not URL strings — that is what the VFS and

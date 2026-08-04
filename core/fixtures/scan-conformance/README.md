@@ -1,10 +1,17 @@
 # Phase-3 scanner / metadata conformance fixtures
 
-The spec for `_plans/04-phase-3-scanner-metadata.md` §1. Everything here pins
-the **current Swift behaviour** of `MetadataReader`, `FolderScanner` and the
-persisted `LibrarySnapshot`, so the Rust port can be checked against something
-other than opinion. Where the current behaviour is buggy, the bug is pinned —
-fixing it is a separate, deliberate change with its own version bump.
+The spec for `_plans/04-phase-3-scanner-metadata.md` §1. Everything here was
+generated from the **shipping Swift** `MetadataReader`, `FolderScanner` and
+`LibrarySnapshot` before any of them was ported, so the Rust implementation
+could be checked against something other than opinion. Where the Swift
+behaviour was buggy, the bug is pinned — fixing it is a separate, deliberate
+change with its own version bump.
+
+Since step 5 those three Swift types are **gone**: the app runs on the core
+scanner, and the Swift-side harnesses now drive `CoreScanner` /
+`GalleryCore.readImageMetadata` with their assertions unchanged. That is the
+arrangement these files exist for — the same expectations, produced by a
+different implementation, reached through the path the app actually uses.
 
 One copy in the repo, two readers:
 
@@ -113,7 +120,7 @@ What the Rust port must reproduce:
 |---|---|
 | envelope | `{"version": Int, "value": LibrarySnapshot}`. The version is decoded **first**, on its own; only then the payload. An incompatible payload must still report as a version mismatch, not a corrupt file. |
 | version | `20`. A mismatch **evicts the file** (and the memories cache with it). |
-| `LibrarySnapshot` | exactly two keys: `rootFolder`, `allPhotos` |
+| `LibrarySnapshot` | three keys: `rootFolder`, `allPhotos`, `sidecarManifest` — the last one optional and omitted when `nil` (see below) |
 | dates | JSON **numbers**: `JSONEncoder`'s default `.deferredToDate`, i.e. seconds since **2001-01-01T00:00:00Z** (Unix 978307200). Not ISO 8601, not the Unix epoch. Fractional seconds are kept (`651234567.25`). |
 | URLs | `absoluteString` of a file URL: `"file:///fixtures/PhotoLibrary/…"`, percent-encoded (`%20` for spaces). |
 | UUIDs | uppercase hyphenated strings |
@@ -132,20 +139,26 @@ Documented, legal loss on a save/load round trip:
 - Nil-vs-absent is not distinguishable after a round trip, and does not need
   to be.
 
-### When `sidecarManifest` lands
+### `sidecarManifest` — landed, without a version bump
 
-`_plans/06-performance-baseline.md` Finding 2 adds
+`_plans/06-performance-baseline.md` Finding 2 added
 `sidecarManifest: [SidecarCandidate]?` to `LibrarySnapshot` as an **optional**
-field with **no version bump** (a bump would force a full rescan on every
-install). When that happens:
+field with **no version bump**: a bump would have forced a full rescan on every
+install to save a single pass. The fixture keeps its `v20` name because the
+version genuinely did not change, and it now carries one row so the field is
+exercised rather than merely present.
 
-1. `testEnvelopeShape` fails, because it asserts the exact two-key set. That
-   failure is the reminder, not an accident.
-2. Regenerate `library_snapshot_v20.json` (the name keeps `v20` — the version
-   genuinely does not change) so the new field is present in the fixture.
-3. Update the key-set assertions and this table.
-4. The Rust decoder must treat the field as optional and round-trip it
-   losslessly; a v20 file written before the change decodes with `nil`.
+Two things about that row are contract, not decoration:
+
+| aspect | contract |
+|---|---|
+| `downloadStatus` | a **bare string** (`"local"`). A Swift enum without raw values synthesises `{"local": {}}` for a payload-less case, and `gallery_model::snapshot::DownloadStatus` emits the string. `FileProviderDetector.DownloadStatus` therefore has `String` raw values. |
+| `currentVersion.contentIdentifier` | a **string**, even though `fileContentIdentifierKey` vends an `Int64` on APFS. SAF and every non-Apple provider hand back opaque tokens. `ContentVersion`'s Swift decoder accepts a bare JSON number too, so sidecar caches written before the change still load. |
+
+Both halves of the no-bump decision have a test:
+`LibrarySnapshotFixtureTests.testAV20SnapshotWithoutTheManifestStillLoadsWarm`
+and `library_snapshot_roundtrip.rs::the_committed_snapshot_decodes` each strip
+the key and check the file still loads warm with `nil`.
 
 ## Adversarial asset inventory (`assets/`)
 
@@ -302,4 +315,5 @@ conservative way — the one that refuses rather than the one that guesses.
 | embedded XMP | HEIF/AVIF containers | **not read** — see `gallery-meta/src/media/container.rs` |
 | `localizedStandardCompare` | locale-sensitive collation | Unicode order with numeric runs and case folding; no ICU |
 | extension table | anything outside `assets/` | a curated list in `gallery-scan/src/classify.rs`, erring narrow |
-| `DownloadStatus` | `downloading` / `stale` | collapsed into `placeholder`; nothing in the app reads them |
+| `DownloadStatus` | `downloading` / `stale` | collapsed into `placeholder`; nothing in the app reads them. The Swift probe collapses them at the boundary too (`status != .local`), so a manifest row is now only ever `local` or `placeholder`. |
+| GPS last bits | rational→float folding order | the port's values differ from ImageIO's by **one ULP** on two fixture files (`gps/south_west.jpg`, `gps/zero_and_lowercase_ref.jpg`) — 1e-14 degrees. The Rust host test compares at 1e-9; the byte-exact Swift fixture records the port's numbers, with a note on each entry saying so. |

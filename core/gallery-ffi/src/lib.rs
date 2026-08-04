@@ -14,6 +14,10 @@
 //! * Phase 2 — [`faces`]: [`FaceSession`], its progress listener, and the
 //!   cluster-review calls (`clusters` / `cluster_faces` / `name_cluster` /
 //!   `rename_person` / `unname_cluster` / `ignore_cluster` / `recluster`).
+//! * Phase 3 — [`scanner`]: [`ScannerSession`], the [`ProviderProbe`] Swift
+//!   implements, the snapshot IO, and the metadata read path that replaced
+//!   `MetadataReader`. Unlike the two sessions above it is request/response —
+//!   see that module's docs for why it is still an object.
 //!
 //! The two sessions are siblings sharing one cache file: [`support`] holds the
 //! run-thread mechanics both are built on.
@@ -21,12 +25,20 @@
 uniffi::setup_scaffolding!("GalleryCore");
 
 pub mod faces;
+pub mod scanner;
 mod support;
 pub mod tagging;
 
 pub use faces::{
     ClusterState, ClusterSummary, FaceError, FaceFailure, FaceLibraryStats, FaceProgressListener,
     FaceRef, FaceRunSummary, FaceSession, FaceStats, ReclusterSummary, SidecarWriteReport,
+};
+pub use scanner::{
+    load_snapshot, parse_xmp_bytes, probe_snapshot_version, read_image_metadata, read_video_date,
+    save_snapshot, snapshot_version, ImageMetadataRecord, ProviderProbe, ScanContentVersion,
+    ScanError, ScanFolderNode, ScanLocality, ScanOutcomeRecord, ScanPhoto, ScanProgressListener,
+    ScanRegion, ScanRequest, ScanSidecarRow, ScanTag, ScanTimings, ScannerSession,
+    SidecarParseRecord, SnapshotRecord, VfsProviderAttrs, WallClock,
 };
 pub use tagging::{
     inspect_model_pack, ModelPackInfo, TaggingError, TaggingFailure, TaggingProgressListener,

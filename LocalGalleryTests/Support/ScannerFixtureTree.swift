@@ -6,7 +6,7 @@ import XCTest
 /// between-pass mutations.
 ///
 /// The tree lives in JSON rather than in this file so the Rust port can build
-/// the byte-identical library from the same description. `FolderScanner`
+/// the byte-identical library from the same description. The scanner
 /// never opens a file — it stats and classifies by extension — so filler
 /// bytes with an explicit size and modification date are the whole contract.
 struct ScannerFixtureTree: Decodable {

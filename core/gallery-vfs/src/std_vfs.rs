@@ -163,9 +163,6 @@ impl Vfs for StdVfs {
                 size: if link_md.is_dir() { 0 } else { link_md.len() },
                 modified: link_md.modified().ok().map(file_time),
                 created: link_md.created().ok().map(file_time),
-                is_file_provider: false,
-                is_placeholder: false,
-                content_version: None,
             });
         }
         Ok(out)
@@ -196,9 +193,6 @@ impl Vfs for StdVfs {
             size: if md.is_dir() { 0 } else { md.len() },
             modified: md.modified().ok().map(file_time),
             created: md.created().ok().map(file_time),
-            is_file_provider: false,
-            is_placeholder: false,
-            content_version: None,
         })
     }
 

@@ -255,6 +255,12 @@ impl Vfs for RacyVfs {
     fn stat(&self, path: &str) -> gallery_vfs::VfsResult<gallery_vfs::Stat> {
         self.inner.stat(path)
     }
+    fn list(&self, dir: &str) -> gallery_vfs::VfsResult<Vec<gallery_vfs::Entry>> {
+        self.inner.list(dir)
+    }
+    fn stat_entry(&self, path: &str) -> gallery_vfs::VfsResult<gallery_vfs::Entry> {
+        self.inner.stat_entry(path)
+    }
     fn write_atomic(&self, path: &str, bytes: &[u8]) -> gallery_vfs::VfsResult<()> {
         self.inner.write_atomic(path, bytes)
     }

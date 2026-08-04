@@ -33,7 +33,16 @@ Tests that read them:
 - `LocalGalleryTests/Unit/LibrarySnapshotFixtureTests.swift`
 - `LocalGalleryTests/Unit/PathNormalizationTests.swift` (no fixture; pins the
   Unicode behaviour the other three depend on)
-- `core/gallery-model/tests/scan_conformance_fixtures.rs`
+- `core/gallery-model/tests/scan_conformance_fixtures.rs` (shape + landmine
+  guard rails)
+- `core/gallery-meta/tests/metadata_conformance.rs` — runs the Rust reader over
+  `assets/` and compares every field
+- `core/gallery-scan/tests/scanner_conformance.rs` — materialises
+  `scanner_tree.json`, runs the same four passes, compares every field
+- `core/gallery-scan/tests/classification_conformance.rs` — checks the Rust
+  extension table against the `scannerKind` column
+- `core/gallery-model/tests/library_snapshot_roundtrip.rs` — decodes and
+  re-encodes `library_snapshot_v20.json`
 
 ## Regenerating
 
@@ -275,3 +284,22 @@ it diverges from the shipped app.
     carries a `pathNormalization` token (`ascii` / `NFC` / `NFD`) — an ASCII
     string the comparison *can* see. Rust's `==` is byte equality and does not
     need the crutch, but must keep emitting the token.
+
+## What the fixtures do *not* pin
+
+Cases the Rust port had to decide for itself, listed so the next person knows
+these are judgement calls rather than observations. Each is implemented the
+conservative way — the one that refuses rather than the one that guesses.
+
+| area | undecided | port's reading |
+|---|---|---|
+| EXIF hour | anything above 24 | rejected (`25:00:00` → nil). 24 rolls, as pinned |
+| EXIF minute/second | 60+ | rejected |
+| EXIF trailing junk | `"2021:07:04 08:09:10 extra"` | rejected; the string must be exactly 19 chars |
+| GPS | a coordinate with fewer than 3 rationals | missing components read as 0 |
+| region name lookback | the 2000 "characters" on a non-ASCII packet | counted in Unicode scalars, not grapheme clusters |
+| embedded regions | a malformed packet | a packet that does not parse yields no regions at all |
+| embedded XMP | HEIF/AVIF containers | **not read** — see `gallery-meta/src/media/container.rs` |
+| `localizedStandardCompare` | locale-sensitive collation | Unicode order with numeric runs and case folding; no ICU |
+| extension table | anything outside `assets/` | a curated list in `gallery-scan/src/classify.rs`, erring narrow |
+| `DownloadStatus` | `downloading` / `stale` | collapsed into `placeholder`; nothing in the app reads them |

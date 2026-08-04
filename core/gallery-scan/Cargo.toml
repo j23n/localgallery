@@ -1,0 +1,20 @@
+[package]
+name = "gallery-scan"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+gallery-model = { path = "../gallery-model" }
+gallery-vfs = { path = "../gallery-vfs" }
+# `failedDirectoryPaths` are decomposed, because Swift emits them through
+# `standardizedFileURL.path`, and the Store's carry-forward prefix check
+# compares against that same form. Both sides normalize; mixing is what breaks.
+unicode-normalization = "0.1"
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"

@@ -57,6 +57,19 @@ must reproduce rather than fix. What follows is the original spec.
 
 ### 2. `gallery-vfs` grows the scanner surface
 
+**Done.** `Vfs::list(dir) -> Vec<Entry>` plus `Vfs::stat_entry(path)` for the
+one thing a listing cannot give you — the *scanned directory's own*
+timestamps, which is where Swift calls `dirURL.resourceValues(forKeys:)`.
+`Entry` carries `name / kind / size / modified / created / is_file_provider /
+is_placeholder / content_version`. Three fields beyond the sketch, each
+load-bearing: `created` because the fallback capture date is
+`min(creation, modification)`; `is_file_provider` because the app
+distinguishes `.remote(downloaded: true)` from `.local`; sub-second times on
+`modified` because the light-scan cache-hit rule is Swift `Date` equality,
+which is a `Double`. `StdVfs` reports `is_file_provider`/`is_placeholder`
+false and `content_version` none — provider awareness arrives with the Swift
+implementation.
+
 ```
 trait Vfs {
     fn list(&self, dir: &str) -> Result<Vec<Entry>>;   // name, kind, size, mtime,
@@ -75,6 +88,21 @@ trait Vfs {
   per-file) keeps FFI traffic at directory granularity.
 
 ### 3. Port `gallery-meta` read side
+
+**Done**, as `gallery-meta::media`: `container` (JPEG APP1 / PNG iTXt / TIFF
+tag 700 XMP extraction, sniffed by magic bytes because ImageIO sniffs
+content), `exif_read` (kamadak-exif, the date strictness table, case-sensitive
+GPS refs), `swift_xmp` (the literal port of `parseXMPBytes` /
+`parseMWGRegions`, promoted out of the old parity *test* into production
+code), `embedded` (leaf-name tag matching + the ImageIO alphabetical
+re-serialisation that produces the region name shift), `video` (QuickTime
+`moov/udta/©day`, honoured only for `qt  `-branded files). The precedence
+table now lives at the Rust merge site in `media/mod.rs`. All 58 fixture
+assets match.
+
+**Not covered:** embedded XMP in HEIF/AVIF containers — no fixture, and their
+packet lives behind `meta`/`iinf`/`iloc`. EXIF dates and GPS in HEIC still
+come through `kamadak-exif`.
 
 - EXIF via `kamadak-exif` (already a dependency from Phase 1 orientation);
   date parsing with a **fixed-format parser** equivalent to the
@@ -96,6 +124,20 @@ trait Vfs {
   out of scope — sidecars, not IDs, are the portable layer.
 
 ### 4. Port `gallery-scan`
+
+**Done.** New crate, `scan(vfs, root, &ScanInput) -> ScanOutcome`, plus
+`scan_with_progress`. The model types moved into `gallery-model`
+(`photo::{PhotoFile, PhotoFolder, HierarchicalTag, FaceRegion}`,
+`date::{AppleDate, CivilDateTime}`, `file_url`, `snapshot`), so the snapshot
+wire format and the scanner output are one set of types. All four fixture
+passes match field for field, including the blind spot, the failed-directory
+carry-forward, the lowercased standalone-video filename and the
+no-manifest-row-for-videos rule.
+
+`LibrarySnapshot` round-trips the committed v20 file losslessly *as a JSON
+object* — including Swift's habit of writing an integral `Double` without a
+fractional part, which `swift_json` reproduces. `sidecarManifest` is already
+in the type as an optional field that is omitted when `None`.
 
 - Iterative traversal mirroring `FolderScanner` (same ordering guarantees —
   the sort lives in `SearchIndex` but folder child order must stay stable),

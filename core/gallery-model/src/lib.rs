@@ -16,6 +16,7 @@ pub mod rng;
 pub mod snapshot;
 pub mod stable_uuid;
 pub mod swift_json;
+pub mod text;
 
 pub use date::{AppleDate, CivilDateTime};
 pub use photo::{

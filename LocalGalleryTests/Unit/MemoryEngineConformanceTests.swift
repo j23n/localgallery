@@ -369,9 +369,16 @@ final class MemoryEngineConformanceTests: XCTestCase {
 
     private func run(_ spec: ScenarioSpec) async -> ConfEngineScenario {
         // The time-zone move is still how a non-UTC scenario is driven: the
-        // bridge reads `TimeZone.current.secondsFromGMT(for: now)` and hands
-        // the core a fixed offset, so moving the process moves the engine's
-        // calendar exactly as it moved `Calendar.current` before.
+        // bridge reads `Calendar.current.timeZone.secondsFromGMT(for:)` — once
+        // for `now` and once per photo — and hands the core fixed offsets, so
+        // moving the process moves the engine's calendar exactly as it moved
+        // `Calendar.current` before.
+        //
+        // `Calendar.current.timeZone`, **not** `TimeZone.current`: the latter
+        // is cached and does not observe an `NSTimeZone.default` override, so
+        // it would answer GMT here and the Tokyo scenario would silently run in
+        // UTC. Both fixture zones are fixed-offset, so the per-photo offsets
+        // equal the constant and no scenario can distinguish them.
         //
         // `contactsByLowerName` is no longer passed. The core derives it from
         // `contacts` the way `ContactLinker.index` does, which is what the

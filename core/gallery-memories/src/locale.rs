@@ -320,13 +320,20 @@ pub fn country_name(code: &str) -> Option<&'static str> {
 
 /// One date in the `en_US` rendering of the `"d MMM yyyy"` skeleton: `MMM d, y`
 /// — `"Jun 11, 2019"`, no zero padding on the day.
+///
+/// The **year** is zero-padded to four digits, and that is not decoration:
+/// `yyyy` is a padded field in ICU, so a photo whose EXIF year came back as
+/// 875 formats as `"Jan 1, 0875"` in the shipping app and `"Jan 1, 875"` from a
+/// bare `{}`. Nothing in the fixtures reaches a year below 1000 — every
+/// scenario is 2014 or later — so this is a divergence no scenario could have
+/// caught, and the four-digit form is the one the deleted Swift produced.
 fn format_day(cal: &LocalCalendar, t: AppleDate) -> String {
     let c = cal.civil(t);
     let month = SHORT_MONTHS
         .get((c.month as usize).wrapping_sub(1))
         .copied()
         .unwrap_or("");
-    format!("{} {}, {}", month, c.day, c.year)
+    format!("{} {}, {:04}", month, c.day, c.year)
 }
 
 /// `MemoryEngine.formatDateRange`. One date when both ends fall on the same
@@ -395,6 +402,28 @@ mod tests {
             "Jun 11, 2014 \u{2013} Jun 11, 2023 \u{00B7} 44 photos"
         );
         assert_eq!(subtitle_with_count(&cal, None, 1), "1 photo");
+    }
+
+    /// ICU's `yyyy` is a **padded** field. A three-digit year — reachable from
+    /// a mis-parsed EXIF date, which is where absurd `dateTaken` values come
+    /// from — renders as `0875`, not `875`. No fixture scenario goes near it.
+    #[test]
+    fn the_year_is_padded_to_four_digits_the_way_icu_pads_yyyy() {
+        let cal = LocalCalendar::new(UtcOffset::UTC);
+        assert_eq!(
+            subtitle_with_count(&cal, Some((utc(875, 1, 1, 12), utc(875, 1, 1, 12))), 2),
+            "Jan 1, 0875 \u{00B7} 2 photos"
+        );
+        assert_eq!(
+            subtitle_with_count(&cal, Some((utc(9, 3, 4, 12), utc(9, 3, 4, 12))), 1),
+            "Mar 4, 0009 \u{00B7} 1 photo"
+        );
+        // …and a normal four-digit year is unchanged, which is what keeps every
+        // fixture green.
+        assert_eq!(
+            subtitle_with_count(&cal, Some((utc(2019, 6, 11, 12), utc(2019, 6, 11, 12))), 3),
+            "Jun 11, 2019 \u{00B7} 3 photos"
+        );
     }
 
     #[test]

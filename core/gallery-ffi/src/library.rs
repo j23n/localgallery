@@ -406,10 +406,34 @@ pub struct MemoryDateEntry {
 /// seen/cool-down state — everything the engine reads.
 ///
 /// `photos` is already past the coordinator's cloud-placeholder filter; that
-/// filter stays in Swift.
+/// filter stays in Swift. The photos it *excluded* come back in
+/// [`Self::folder_placeholder_photos`], because one ladder needs them.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct MemoryGenerationInputs {
     pub photos: Vec<ScanPhoto>,
+    /// `Calendar.current.timeZone.secondsFromGMT(for: photo.dateTaken)`, one
+    /// per entry of `photos`, in the same order.
+    ///
+    /// **Empty is legal** and means "use `time_zone_offset_seconds` for every
+    /// photo" — the behaviour before this field existed. Supplying them matters
+    /// for a zone with DST: a single offset resolved at `now` buckets a summer
+    /// photo on a different day depending on the season the run happens in,
+    /// which moves `density-*` and `trip-*` ids — and therefore cluster keys —
+    /// twice a year, so the cool-down and seen penalties stop matching the
+    /// history the user's own taps wrote.
+    pub photo_time_zone_offsets: Vec<i32>,
+    /// The cloud placeholders the coordinator filtered out of `photos`.
+    ///
+    /// Visible to the **folder-event ladder only**, because the deleted Swift
+    /// read `folder.photos` — the folder's own unfiltered array — while every
+    /// other generator drew from the filtered `allPhotos`. Resolving folder
+    /// members through the filtered pool alone drops placeholder-heavy folders
+    /// below the 15-photo floor entirely and silently re-cuts the ones that
+    /// survive. Pass an empty list for the pre-filter behaviour.
+    pub folder_placeholder_photos: Vec<ScanPhoto>,
+    /// Per-photo offsets for `folder_placeholder_photos`, same rules as
+    /// [`Self::photo_time_zone_offsets`].
+    pub folder_placeholder_time_zone_offsets: Vec<i32>,
     pub leaf_folders: Vec<MemoryLeafFolder>,
     pub contacts: Vec<MemoryContact>,
     pub person_contact_links: Vec<MemoryPersonLink>,
@@ -419,10 +443,19 @@ pub struct MemoryGenerationInputs {
     pub hidden_people: Vec<String>,
     /// "Now", reference-date seconds.
     pub now: f64,
-    /// A **fixed** UTC offset in seconds: `TimeZone.current.secondsFromGMT(for:
-    /// now)`. Not an IANA zone — the engine never spans a DST boundary within
-    /// one call, and taking the offset makes the calendar an explicit input
-    /// instead of the ambient `Calendar.current` the Swift read.
+    /// The UTC offset in seconds **at `now`**:
+    /// `Calendar.current.timeZone.secondsFromGMT(for: now)`.
+    ///
+    /// `Calendar.current.timeZone`, not `TimeZone.current`, and the difference
+    /// is load-bearing: `TimeZone.current` is cached and does not track an
+    /// `NSTimeZone.default` override, so it answers GMT in exactly the
+    /// situation the non-UTC conformance scenario creates, and answers a stale
+    /// zone on a device whose zone changed while the app was running.
+    /// `Calendar.current.timeZone` is what the deleted engine read.
+    ///
+    /// Not an IANA zone: the core has no tz database. Today, the horizon and
+    /// the penalty windows are computed in this offset; each *photo* is bucketed
+    /// in its own (see [`Self::photo_time_zone_offsets`]).
     pub time_zone_offset_seconds: i32,
     /// Drives the daily jitter: the day key for a normal run, a time-based
     /// value for force-regenerate.
@@ -446,8 +479,30 @@ impl MemoryGenerationInputs {
                 birthday_day: c.birthday_day,
             })
             .collect();
+        // One table: the scored pool first, then the folder-event-only
+        // placeholders. Keeping them in one `Vec` is what lets every stage —
+        // and the per-photo offset table — stay index-addressed; the ladder
+        // simply never looks past `ladder_photo_count`.
+        let ladder_photo_count = self.photos.len();
+        let mut photos: Vec<PhotoFile> =
+            Vec::with_capacity(ladder_photo_count + self.folder_placeholder_photos.len());
+        photos.extend(self.photos.into_iter().map(photo_from_record));
+        photos.extend(
+            self.folder_placeholder_photos
+                .into_iter()
+                .map(photo_from_record),
+        );
+        let photo_time_zone_offsets = concat_offsets(
+            self.photo_time_zone_offsets,
+            self.folder_placeholder_time_zone_offsets,
+            ladder_photo_count,
+            photos.len(),
+            self.time_zone_offset_seconds,
+        );
         GenerationInputs {
-            photos: self.photos.into_iter().map(photo_from_record).collect(),
+            photos,
+            ladder_photo_count,
+            photo_time_zone_offsets,
             leaf_folders: self
                 .leaf_folders
                 .into_iter()
@@ -470,10 +525,10 @@ impl MemoryGenerationInputs {
                     (l.person_path, link)
                 })
                 .collect(),
-            // Derived here rather than shipped: `ContactLinker.index` builds it
-            // from `contacts` by lowercased full name, first write wins, and
-            // sending both would let the two disagree across the boundary.
-            contacts_by_lower_name: contacts_by_lower_name(&contacts),
+            // `contactsByLowerName` is not on the wire at all: the engine
+            // derives it from `contacts` the way `ContactLinker.index` does
+            // (full name, folded, first write wins), and sending both would let
+            // the two disagree across the boundary.
             contacts,
             birthdays_enabled: self.birthdays_enabled,
             me_person_path: self.me_person_path,
@@ -487,12 +542,31 @@ impl MemoryGenerationInputs {
     }
 }
 
-fn contacts_by_lower_name(contacts: &[Contact]) -> HashMap<String, Contact> {
-    let mut out: HashMap<String, Contact> = HashMap::with_capacity(contacts.len());
-    for c in contacts {
-        out.entry(c.full_name().to_lowercase())
-            .or_insert_with(|| c.clone());
+/// Splice the two per-photo offset tables into one parallel to the combined
+/// photo table.
+///
+/// Either side may be empty — that is the documented "no calendar available"
+/// input, and both empty means no table at all (the pre-per-photo-offset
+/// behaviour). A short or over-long table is padded/truncated with the `now`
+/// offset rather than trusted, because the alternative is either a panic inside
+/// a background task or a silent slide of every later photo onto the wrong
+/// offset. Padding with `now` degrades exactly to what a caller that sent no
+/// table would have got.
+fn concat_offsets(
+    ladder: Vec<i32>,
+    placeholders: Vec<i32>,
+    ladder_count: usize,
+    total: usize,
+    now_offset: i32,
+) -> Vec<i32> {
+    if ladder.is_empty() && placeholders.is_empty() {
+        return Vec::new();
     }
+    let mut out = Vec::with_capacity(total);
+    out.extend(ladder.into_iter().take(ladder_count));
+    out.resize(ladder_count, now_offset);
+    out.extend(placeholders);
+    out.resize(total, now_offset);
     out
 }
 
@@ -673,6 +747,9 @@ mod tests {
     fn empty_inputs(now: f64) -> MemoryGenerationInputs {
         MemoryGenerationInputs {
             photos: Vec::new(),
+            photo_time_zone_offsets: Vec::new(),
+            folder_placeholder_photos: Vec::new(),
+            folder_placeholder_time_zone_offsets: Vec::new(),
             leaf_folders: Vec::new(),
             contacts: Vec::new(),
             person_contact_links: Vec::new(),
@@ -776,14 +853,22 @@ mod tests {
         let index = LibraryIndex::default();
         index.build(vec![
             photo("/lib/rome.jpg", Some(300.0), &["Places/Italy/Lazio/Rome"]),
-            photo("/lib/milan.jpg", Some(200.0), &["Places/Italy/Lombardy/Milan"]),
+            photo(
+                "/lib/milan.jpg",
+                Some(200.0),
+                &["Places/Italy/Lombardy/Milan"],
+            ),
         ]);
         assert_eq!(index.photo_ids_for_tag("Places/Italy".to_string()).len(), 2);
         assert_eq!(
-            index.photo_ids_for_tag("Places/Italy/Lazio".to_string()).len(),
+            index
+                .photo_ids_for_tag("Places/Italy/Lazio".to_string())
+                .len(),
             1
         );
-        assert!(index.photo_ids_for_tag("Places/France".to_string()).is_empty());
+        assert!(index
+            .photo_ids_for_tag("Places/France".to_string())
+            .is_empty());
     }
 
     /// A rebuild replaces the table wholesale — the contract `build(allPhotos:)`
@@ -808,7 +893,10 @@ mod tests {
         assert_eq!(memories[0].kind, MemoryKind::OnThisDay);
         assert_eq!(memories[0].photo_ids.len(), 12);
         assert!(memories[0].photo_ids.contains(&memories[0].cover_photo_id));
-        assert_eq!(memories[0].subtitle.as_deref(), Some("Jun 11, 2019 · 12 photos"));
+        assert_eq!(
+            memories[0].subtitle.as_deref(),
+            Some("Jun 11, 2019 · 12 photos")
+        );
     }
 
     /// The forwarding path itself: a generator cancelled before it runs returns
@@ -848,7 +936,9 @@ mod tests {
             );
         }
         // 2024-06-11 is offset +3 and is the only populated day.
-        assert!(scheduled.iter().any(|s| s.memory.id == "onThisDay-2024-06-11"));
+        assert!(scheduled
+            .iter()
+            .any(|s| s.memory.id == "onThisDay-2024-06-11"));
     }
 
     #[test]
@@ -856,11 +946,8 @@ mod tests {
         let mut inputs = empty_inputs(739_540_800.0);
         inputs.photos = on_this_day_library(12);
         let all = compute_scheduled_memories(inputs.clone(), 7, Vec::new());
-        let hidden = compute_scheduled_memories(
-            inputs,
-            7,
-            vec!["onThisDay-2024-06-11".to_string()],
-        );
+        let hidden =
+            compute_scheduled_memories(inputs, 7, vec!["onThisDay-2024-06-11".to_string()]);
         assert_eq!(hidden.len(), all.len() - 1);
         assert!(!hidden.iter().any(|s| s.memory.id == "onThisDay-2024-06-11"));
     }
@@ -903,7 +990,10 @@ mod tests {
 
     #[test]
     fn country_names_resolve_and_unknown_codes_do_not() {
-        assert_eq!(memory_country_name("AR".to_string()).as_deref(), Some("Argentina"));
+        assert_eq!(
+            memory_country_name("AR".to_string()).as_deref(),
+            Some("Argentina")
+        );
         assert_eq!(memory_country_name("ZZ".to_string()), None);
     }
 

@@ -55,6 +55,15 @@ and 2 are **closed**; Finding 3 is untouched and still owned by Phase 4.
 > 357–419 ms end to end (core: 130–303 ms), also off the main actor — see
 > `_plans/05` for why the wall clock did not drop below the 0.3 s gate even
 > though the algorithm got faster.
+>
+> *Amended after the Phase-4 review (`_plans/05`, R-S3).* "Off the main actor"
+> was true of the measured span and not of the whole call: the marshalling into
+> `ScanPhoto` records ran **before** the detached hop and the id resolution
+> **after** it on the index path, and `CoreMemories.record(from:)` ran on the
+> caller's actor on the horizon path. Neither showed up as `computeScheduled`
+> or `uniffi` frames, which is why the `sample` evidence above missed them.
+> Both are inside the detached task now; the only main-actor work left in a
+> rebuild is the `[UUID: PhotoFile]` table build, which is deliberate.
 
 | Scenario | Baseline | Now | Gate | |
 |---|---|---|---|---|

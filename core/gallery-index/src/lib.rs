@@ -39,6 +39,19 @@ pub struct LibraryIndex {
     sorted: Vec<u32>,
     /// Parallel to `photos`: the newline-joined, match-key-folded corpus.
     corpus: Vec<String>,
+    /// Parallel to `photos`: each photo's tag paths, already [`text::match_key`]ed.
+    ///
+    /// Folding is not free — `to_lowercase` + NFC allocates a `String` per tag
+    /// — and `photo_carries` runs it **per photo per required tag per query**.
+    /// A tag-branch query over 20k photos re-normalised ~60k paths every
+    /// keystroke, so the fold moved to build time where it happens once.
+    ///
+    /// Deliberately *not* the tag buckets, even though they hold the same
+    /// folded strings: the buckets prefix-expand `objects`/`scenes` as well as
+    /// `places`, while `photo_carries` expands `places` alone. That asymmetry
+    /// is pinned Swift behaviour (landmines 18/19) — answering a query from the
+    /// buckets would quietly widen `Objects/Vehicle` into a prefix filter.
+    tag_keys: Vec<Vec<String>>,
     tags: TagIndex,
 }
 
@@ -59,6 +72,15 @@ impl LibraryIndex {
         }
 
         let corpus: Vec<String> = all_photos.iter().map(search::corpus_entry).collect();
+        let tag_keys: Vec<Vec<String>> = all_photos
+            .iter()
+            .map(|p| {
+                p.hierarchical_tags
+                    .iter()
+                    .map(|t| text::match_key(&t.full_path))
+                    .collect()
+            })
+            .collect();
         let tags = TagIndex::build(&all_photos);
 
         LibraryIndex {
@@ -66,6 +88,7 @@ impl LibraryIndex {
             by_id,
             sorted,
             corpus,
+            tag_keys,
             tags,
         }
     }
@@ -177,19 +200,19 @@ impl LibraryIndex {
 
     /// Does photo `idx` carry `path` (already [`text::match_key`]ed), counting a nested
     /// path when `is_places`?
+    ///
+    /// Reads the pre-folded [`Self::tag_keys`] rather than re-normalising the
+    /// photo's tags, which is what keeps a tag-branch query linear in *tags*
+    /// rather than linear in tags × a Unicode normalisation each.
     fn photo_carries(&self, idx: u32, path: &str, is_places: bool) -> bool {
-        self.photos[idx as usize]
-            .hierarchical_tags
-            .iter()
-            .any(|ht| {
-                let hp = text::match_key(&ht.full_path);
-                // `hp == path || (isPlaces && hp.hasPrefix(path + "/"))`,
-                // without building the concatenation on every comparison.
-                hp == path
-                    || (is_places
-                        && hp.len() > path.len()
-                        && hp.starts_with(path)
-                        && hp.as_bytes()[path.len()] == b'/')
-            })
+        self.tag_keys[idx as usize].iter().any(|hp| {
+            // `hp == path || (isPlaces && hp.hasPrefix(path + "/"))`,
+            // without building the concatenation on every comparison.
+            hp == path
+                || (is_places
+                    && hp.len() > path.len()
+                    && hp.starts_with(path)
+                    && hp.as_bytes()[path.len()] == b'/')
+        })
     }
 }

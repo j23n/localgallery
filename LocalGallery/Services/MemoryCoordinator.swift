@@ -291,17 +291,35 @@ final class MemoryCoordinator {
         // yet — their tags/GPS/date are unknown, so they'd inflate the pool
         // with garbage candidates. Local photos and remote-with-cached-
         // sidecar photos pass through.
-        let filtered = inputs.photos.filter { photo in
+        //
+        // The excluded ones are not discarded: they are handed over separately
+        // so the **folder-event** ladder can still see them. The deleted Swift
+        // engine read `folder.photos` — the folder's own array, which this
+        // filter never touched, because it only ever applied to `allPhotos` —
+        // so a folder of 20 photos made a 20-photo memory whether or not 12 of
+        // them were still in the cloud. Resolving folder members through the
+        // filtered pool alone drops such folders below the 15-photo floor
+        // entirely, and re-cuts the survivors' photo list, cover and subtitle
+        // under an unchanged `folder-<id>` id.
+        var filtered: [PhotoFile] = []
+        var placeholders: [PhotoFile] = []
+        for photo in inputs.photos {
+            let isInPool: Bool
             switch photo.locality {
-            case .local: return true
+            case .local: isInPool = true
             case .remote(let downloaded):
-                if downloaded { return true }
-                if case .cached = photo.sidecarStatus { return true }
-                return false
+                if downloaded {
+                    isInPool = true
+                } else if case .cached = photo.sidecarStatus {
+                    isInPool = true
+                } else {
+                    isInPool = false
+                }
             }
+            if isInPool { filtered.append(photo) } else { placeholders.append(photo) }
         }
-        if filtered.count != inputs.photos.count {
-            Log.memory.info("Memory pool: \(filtered.count) of \(inputs.photos.count) photos (excluded \(inputs.photos.count - filtered.count) cloud placeholders without sidecars)")
+        if !placeholders.isEmpty {
+            Log.memory.info("Memory pool: \(filtered.count) of \(inputs.photos.count) photos (\(placeholders.count) cloud placeholders without sidecars, folder events only)")
         }
 
         CoreMemories.logInputSummary(allPhotos: filtered)
@@ -314,6 +332,7 @@ final class MemoryCoordinator {
         // disagree across the boundary.
         let results = await CoreMemories.generate(CoreMemories.Inputs(
             photos: filtered,
+            folderPlaceholderPhotos: placeholders,
             leafFolders: inputs.leafFolders,
             contacts: inputs.contacts,
             personContactLinks: inputs.personContactLinks,

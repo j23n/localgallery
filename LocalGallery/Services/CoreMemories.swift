@@ -28,6 +28,15 @@ enum CoreMemories {
     /// detached task without touching the Store.
     struct Inputs: Sendable {
         var photos: [PhotoFile]
+        /// The cloud placeholders `MemoryCoordinator` filtered out of `photos`.
+        ///
+        /// The engine shows them to the **folder-event ladder only**, because
+        /// the deleted Swift read `folder.photos` — the folder's own array,
+        /// which the placeholder filter never touched — while every other
+        /// generator drew from the filtered `allPhotos`. Leaving them out makes
+        /// placeholder-heavy folders fall below the 15-photo floor and vanish,
+        /// and silently re-cuts the ones that survive.
+        var folderPlaceholderPhotos: [PhotoFile]
         var leafFolders: [PhotoFolder]
         var contacts: [ContactInfo]
         var personContactLinks: [String: PersonLink]
@@ -41,6 +50,7 @@ enum CoreMemories {
 
         init(
             photos: [PhotoFile],
+            folderPlaceholderPhotos: [PhotoFile] = [],
             leafFolders: [PhotoFolder] = [],
             contacts: [ContactInfo] = [],
             personContactLinks: [String: PersonLink] = [:],
@@ -53,6 +63,7 @@ enum CoreMemories {
             surfacedClusters: [String: Date] = [:]
         ) {
             self.photos = photos
+            self.folderPlaceholderPhotos = folderPlaceholderPhotos
             self.leafFolders = leafFolders
             self.contacts = contacts
             self.personContactLinks = personContactLinks
@@ -89,10 +100,13 @@ enum CoreMemories {
         // One generator per run: `cancel()` is sticky by design, so a
         // cancellation that lands before the core call starts is still seen.
         let generator = MemoryGenerator()
-        let record = self.record(from: inputs)
         let results = await withTaskCancellationHandler {
             await Task.detached(priority: .utility) {
-                generator.generate(inputs: record)
+                // Marshalling is inside the detached task, not before it: it
+                // walks every photo twice (once into a `ScanPhoto`, once for
+                // its UTC offset) and the caller is `MemoryCoordinator`, which
+                // is `@MainActor`.
+                generator.generate(inputs: record(from: inputs))
             }.value
         } onCancel: {
             generator.cancel()
@@ -110,11 +124,12 @@ enum CoreMemories {
         _ inputs: Inputs,
         hiddenMemoryIDs: Set<String>
     ) async -> [Scheduled] {
-        let record = self.record(from: inputs)
         let hidden = Array(hiddenMemoryIDs)
         let horizon = Int64(horizonDays)
         let items = await Task.detached(priority: .utility) {
-            computeScheduledMemories(inputs: record, horizonDays: horizon, hiddenMemoryIds: hidden)
+            computeScheduledMemories(
+                inputs: record(from: inputs), horizonDays: horizon, hiddenMemoryIds: hidden
+            )
         }.value
         return items.compactMap { item in
             memory(from: item.memory).map {
@@ -150,9 +165,36 @@ enum CoreMemories {
 
     // MARK: - Marshalling
 
+    /// `Calendar.current.timeZone.secondsFromGMT(for:)` per photo — the offset
+    /// that was in force **when the photo was taken**, not when the run
+    /// happens.
+    ///
+    /// The core has no tz database, so this is the only place the real
+    /// transition table can be consulted. Without it a single offset resolved
+    /// at `now` buckets a summer photo on a different local day depending on
+    /// the season the generation runs in, which moves `density-*` and `trip-*`
+    /// ids — and therefore cluster keys — twice a year, so the seen (−30) and
+    /// cool-down (−25) penalties stop matching the history the user's own taps
+    /// wrote.
+    ///
+    /// An undated photo gets the offset at `now`: it has no instant of its own,
+    /// and every ladder that buckets by day ignores it anyway.
+    ///
+    /// One `secondsFromGMT(for:)` per photo is ~20 ms over 20k. This runs
+    /// inside the detached task, never on the main actor.
+    private static func offsets(for photos: [PhotoFile], fallback: Date) -> [Int32] {
+        let zone = Calendar.current.timeZone
+        return photos.map { Int32(zone.secondsFromGMT(for: $0.dateTaken ?? fallback)) }
+    }
+
     private static func record(from inputs: Inputs) -> MemoryGenerationInputs {
         MemoryGenerationInputs(
             photos: inputs.photos.map(CoreScanner.record(of:)),
+            photoTimeZoneOffsets: offsets(for: inputs.photos, fallback: inputs.now),
+            folderPlaceholderPhotos: inputs.folderPlaceholderPhotos.map(CoreScanner.record(of:)),
+            folderPlaceholderTimeZoneOffsets: offsets(
+                for: inputs.folderPlaceholderPhotos, fallback: inputs.now
+            ),
             leafFolders: inputs.leafFolders.map {
                 MemoryLeafFolder(
                     id: $0.id.uuidString,
@@ -182,18 +224,19 @@ enum CoreMemories {
             mePersonPath: inputs.mePersonPath,
             hiddenPeople: Array(inputs.hiddenPeople),
             now: inputs.now.timeIntervalSinceReferenceDate,
-            // A fixed offset resolved at `now`, not an IANA zone: the engine
-            // never spans a DST boundary inside one call, and this makes the
-            // calendar an explicit input rather than the ambient
-            // `Calendar.current` the Swift engine read.
+            // The offset at `now`, which is what today, the horizon and the two
+            // penalty windows are computed in. Each *photo* carries its own
+            // (see `offsets(for:fallback:)`), so this one is never applied to
+            // history.
             //
-            // Read off `Calendar.current`, **not** `TimeZone.current`, and that
-            // is load-bearing: `TimeZone.current` is cached and does not track
-            // an `NSTimeZone.default` override, so it answers GMT in exactly
-            // the situation the non-UTC conformance scenario creates — and
-            // would answer a stale zone on a device whose zone changed while
-            // the app was running. `Calendar.current.timeZone` is what the
-            // deleted engine read, and it is correct in both cases.
+            // Read off `Calendar.current.timeZone`, **not** `TimeZone.current`,
+            // and that is load-bearing: `TimeZone.current` is cached and does
+            // not track an `NSTimeZone.default` override, so it answers GMT in
+            // exactly the situation the non-UTC conformance scenario creates —
+            // and would answer a stale zone on a device whose zone changed
+            // while the app was running. `Calendar.current.timeZone` resolves
+            // through the current calendar every time, which is what the
+            // deleted engine read.
             timeZoneOffsetSeconds: Int32(Calendar.current.timeZone.secondsFromGMT(for: inputs.now)),
             seed: inputs.seed,
             seenMemoryIds: inputs.seenMemoryIDs.map {

@@ -31,7 +31,7 @@ use gallery_model::AppleDate;
 use crate::birthdays::{generate_birthday_memories, PeopleIndex};
 use crate::calendar::{generate_on_this_day, generate_years_ago};
 use crate::time::MonthDay;
-use crate::{finalize, photos_with_dates, DatedPhoto, GenerationInputs, Memory};
+use crate::{finalize, photos_with_dates, DatedPhoto, GenerationInputs, Memory, PersonKeys};
 
 /// How far ahead calendar-tied memories are pre-published. Seven days covers a
 /// weekly-launch cadence without bloating widget thumbnail storage.
@@ -60,25 +60,30 @@ pub fn compute_scheduled(
     horizon_days: i64,
     hidden_memories: &HashSet<String>,
 ) -> Vec<ScheduledMemory> {
-    let cal = inputs.calendar();
+    let zone = inputs.zone();
+    let cal = zone.now();
     let today = cal.start_of_day(inputs.now);
 
     // Photos bucketed by (month, day) once, so each horizon day's calendar
-    // filter walks a small candidate set instead of the whole library.
+    // filter walks a small candidate set instead of the whole library. Bucketed
+    // by each photo's OWN offset, which is what `generate_on_this_day` then
+    // re-filters by — the two must agree or the bucket hides its own members.
     let mut by_month_day: HashMap<MonthDay, Vec<DatedPhoto>> = HashMap::new();
-    for entry in photos_with_dates(&inputs.photos) {
+    for entry in photos_with_dates(inputs.ladder_photos()) {
         by_month_day
-            .entry(cal.month_day(entry.1))
+            .entry(zone.at(entry.0).month_day(entry.1))
             .or_default()
             .push(entry);
     }
-    // Finding 3(c): the person → photos grouping is day-independent, so it is
-    // built once here rather than seven times inside the loop.
+    // Finding 3(c): the person → photos grouping and the folded person keys are
+    // both day-independent, so they are built once here rather than seven times
+    // inside the loop.
     let people = if inputs.birthdays_enabled {
-        PeopleIndex::build(&inputs.photos)
+        PeopleIndex::build(inputs.ladder_photos())
     } else {
         PeopleIndex::default()
     };
+    let keys = PersonKeys::build(inputs);
 
     let mut out = Vec::new();
     for offset in 1..=horizon_days {
@@ -88,10 +93,10 @@ pub fn compute_scheduled(
         let bucket = by_month_day.get(&day_md).map_or(&[][..], Vec::as_slice);
 
         let mut day_memories: Vec<Memory> = Vec::new();
-        if let Some(m) = generate_on_this_day(&cal, &inputs.photos, day, bucket, 10) {
+        if let Some(m) = generate_on_this_day(&zone, &inputs.photos, day, bucket, 10) {
             day_memories.push(m);
         }
-        day_memories.extend(generate_years_ago(&cal, &inputs.photos, day, bucket, 10));
+        day_memories.extend(generate_years_ago(&zone, &inputs.photos, day, bucket, 10));
         if inputs.birthdays_enabled {
             // Birthdays walk every photo by People/* tag rather than by date
             // bucket, so they are the one scheduled item whose cost is
@@ -100,6 +105,7 @@ pub fn compute_scheduled(
             // worth having.
             day_memories.extend(generate_birthday_memories(
                 inputs,
+                &keys,
                 &people,
                 day_md.month,
                 day_md.day,

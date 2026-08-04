@@ -38,10 +38,20 @@ final class CoreLibraryIndex {
     private(set) var peopleTags: [TagSuggestion] = []
 
     /// `PhotoFile.id` → `PhotoFile`. The object table the core's id answers are
-    /// resolved through. Built synchronously in `seed(allPhotos:)` because
+    /// resolved through. Built synchronously in `build(allPhotos:)` because
     /// `photo(byID:)` is on the viewer's and the memory rail's critical path and
     /// must never be a frame behind `allPhotos`.
     @ObservationIgnored private var photoByID: [UUID: PhotoFile] = [:]
+
+    /// False until the first rebuild publishes.
+    ///
+    /// `sortedPhotos` is empty for the ~400 ms between `apply(_:)` and the
+    /// first publish, and an empty *sorted* list is indistinguishable from an
+    /// empty *library* to a view that only sees the former — which is how a
+    /// cold launch with a warm cache flashed "No photos match." over a library
+    /// the user definitely has. Views that render `sortedPhotos` check this
+    /// before deciding they have nothing to show.
+    private(set) var hasEverPublished = false
 
     // MARK: Wiring
 
@@ -50,19 +60,29 @@ final class CoreLibraryIndex {
     /// `tagBuildGeneration`, now covering the whole rebuild rather than just
     /// the tag half.
     @ObservationIgnored private var generation = 0
-    /// The in-flight rebuild, so tests (and `runScheduledMemoryRefresh`) can
-    /// wait for the index to settle rather than poll.
+    /// The in-flight rebuild, so tests can wait for the index to settle rather
+    /// than poll — and so the *next* rebuild can wait for it before touching
+    /// the core (see `build(allPhotos:)`).
     @ObservationIgnored private var pending: Task<Void, Never>?
 
-    /// Memoised `photos(forTag:)` answers, cleared on every rebuild.
+    /// Memoised `photos(forTag:)` answers, cleared when a rebuild **publishes**.
     ///
     /// Not a second tag index: the keys, the membership and the order all come
     /// from the core. This is a cache of its replies, and it exists because
     /// `PeopleListRow` and `PersonCard` ask the same question inside a
     /// `ScrollView` body.
+    ///
+    /// Cleared at publish rather than at the start of a rebuild, and that is
+    /// the whole point: between the two the core still holds the *previous*
+    /// index while `photoByID` already holds the new library, so a query in
+    /// that window answers with ids the table cannot resolve — usually an empty
+    /// list. Clearing first meant that answer was cached *after* the clear and
+    /// outlived the rebuild entirely: blank `PersonCard`s and an empty
+    /// `TagGridView` until something else happened to rescan.
     @ObservationIgnored private var tagPhotoCache: [String: [PhotoFile]] = [:]
     /// Single-entry memo for `search`, for the same reason: `TagGridView.photos`
-    /// is a computed property evaluated on every body pass.
+    /// is a computed property evaluated on every body pass. Same publish-time
+    /// invalidation as `tagPhotoCache`.
     @ObservationIgnored private var searchCache: (key: String, result: [PhotoFile])?
 
     // MARK: Build
@@ -72,7 +92,23 @@ final class CoreLibraryIndex {
     /// Split in two on purpose. The dictionary is built here, synchronously, so
     /// `photo(byID:)` is correct the instant `apply(_:)` returns. The sort, the
     /// corpus and the tag aggregation — the parts that were 0.25–0.3 s of main
-    /// thread on a 20k library — go to the core on a detached task.
+    /// thread on a 20k library — go to the core on a detached task, and so does
+    /// everything around them: marshalling 20k `PhotoFile`s into `ScanPhoto`
+    /// records (14–22 ms) and resolving 20k ids back through `table`
+    /// (`UUID(uuidString:)` per id plus a dictionary hit) are both work the main
+    /// actor has no reason to do. Only the assignment of the finished arrays
+    /// happens back here.
+    ///
+    /// **Core builds are serialised.** Cancelling `pending` stops a stale
+    /// rebuild from *publishing*, but not from running: the inner detached task
+    /// is not a child, and the core takes its write lock only after its build
+    /// finishes, so two overlapping rebuilds swap in whichever order they
+    /// happen to end. The published Swift state would be the fresh one and the
+    /// core's index the stale one — and since queries go to the core, every
+    /// `search` / `photos(forTag:)` would answer from a library the app no
+    /// longer shows. Awaiting the previous rebuild first makes last-started =
+    /// last-swapped, and costs nothing a second concurrent CPU-bound build was
+    /// not costing already.
     func build(allPhotos: [PhotoFile]) {
         generation += 1
         let generation = self.generation
@@ -83,33 +119,57 @@ final class CoreLibraryIndex {
             table[photo.id] = photo
         }
         photoByID = table
-        tagPhotoCache = [:]
-        searchCache = nil
+        // An immutable copy for the detached task: a `var` local is main-actor
+        // isolated to region analysis even when its type is `Sendable`, and the
+        // build task resolves the core's ids through it.
+        let lookup = table
 
-        pending?.cancel()
+        let previous = pending
+        previous?.cancel()
         let core = self.core
         pending = Task { [weak self] in
+            // Cancelled or not, the previous rebuild's core call runs to
+            // completion; waiting for it is what orders the two swaps.
+            await previous?.value
             let t = CFAbsoluteTimeGetCurrent()
-            let records = allPhotos.map(CoreScanner.record(of:))
-            let marshalled = CFAbsoluteTimeGetCurrent()
-            let summary = await Task.detached(priority: .userInitiated) {
-                core.build(photos: records)
+            let built = await Task.detached(priority: .userInitiated) { () -> Built in
+                let start = CFAbsoluteTimeGetCurrent()
+                let records = allPhotos.map(CoreScanner.record(of:))
+                let marshalled = CFAbsoluteTimeGetCurrent()
+                let summary = core.build(photos: records)
+                // The core's records never reach the main actor: they are not
+                // `Sendable` (UniFFI does not mark them) and resolving them is
+                // 20k `UUID(uuidString:)` parses plus 20k dictionary hits, which
+                // is exactly the kind of work this hop exists to move.
+                return Built(
+                    sorted: summary.sortedPhotoIds.compactMap {
+                        UUID(uuidString: $0).flatMap { lookup[$0] }
+                    },
+                    tags: summary.tags.map(Self.suggestion(from:)),
+                    people: summary.people.map(Self.suggestion(from:)),
+                    marshalMillis: (marshalled - start) * 1000,
+                    coreMillis: Double(summary.buildMillis)
+                )
             }.value
             guard !Task.isCancelled, let self, self.generation == generation else { return }
 
-            self.sortedPhotos = summary.sortedPhotoIds.compactMap {
-                UUID(uuidString: $0).flatMap { table[$0] }
-            }
-            self.allTags = summary.tags.map(Self.suggestion(from:))
-            self.peopleTags = summary.people.map(Self.suggestion(from:))
+            // Everything below this line is one main-actor turn: the memos are
+            // dropped and the new answers published without a suspension in
+            // between, so no query can observe half of a rebuild.
+            self.tagPhotoCache = [:]
+            self.searchCache = nil
+            self.sortedPhotos = built.sorted
+            self.allTags = built.tags
+            self.peopleTags = built.people
+            self.hasEverPublished = true
             self.onRebuild?(self.allTags, self.peopleTags)
 
-            let ms = { (a: CFAbsoluteTime, b: CFAbsoluteTime) in String(format: "%.0f", (b - a) * 1000) }
-            let now = CFAbsoluteTimeGetCurrent()
+            let total = String(format: "%.0f", (CFAbsoluteTimeGetCurrent() - t) * 1000)
             Log.index.info("""
-                Built: \(allPhotos.count) photos, \(summary.tags.count) unique tags, \
-                \(summary.people.count) people in \(ms(t, now))ms \
-                (in=\(ms(t, marshalled))ms core=\(summary.buildMillis)ms)
+                Built: \(allPhotos.count) photos, \(built.tags.count) unique tags, \
+                \(built.people.count) people in \(total)ms \
+                (in=\(String(format: "%.0f", built.marshalMillis))ms \
+                core=\(String(format: "%.0f", built.coreMillis))ms)
                 """)
         }
     }
@@ -120,8 +180,13 @@ final class CoreLibraryIndex {
     /// `Task.detached` tail in `rebuildSortAndIndex` did.
     @ObservationIgnored var onRebuild: (([TagSuggestion], [TagSuggestion]) -> Void)?
 
-    /// Wait for the in-flight rebuild, if any. For tests and for callers that
-    /// genuinely need the sorted order rather than whatever is published.
+    /// Wait for the in-flight rebuild, if any.
+    ///
+    /// **Tests only.** No production path awaits it, and none should: the app's
+    /// contract is that `photo(byID:)` is correct immediately and the sorted /
+    /// aggregated views arrive when they arrive, observed rather than awaited.
+    /// A caller that blocked on this would be reintroducing the main-thread
+    /// stall the rebuild was moved off the main actor to remove.
     func settle() async {
         await pending?.value
     }
@@ -165,13 +230,30 @@ final class CoreLibraryIndex {
 
     // MARK: Bridging
 
+    /// One rebuild's results, already in the app's own types.
+    ///
+    /// Exists so the detached task can return something `Sendable`: the core's
+    /// `LibraryIndexSummary` is not, and making it the hop's payload would have
+    /// forced the id resolution and the suggestion mapping back onto the main
+    /// actor — the two costs `_plans/05` measured at 14–22 ms and a 20k-entry
+    /// dictionary walk.
+    private struct Built: Sendable {
+        let sorted: [PhotoFile]
+        let tags: [TagSuggestion]
+        let people: [TagSuggestion]
+        let marshalMillis: Double
+        let coreMillis: Double
+    }
+
     /// Core ids → the app's photo structs, dropping ids the table no longer
     /// knows (a rebuild that has not landed yet, or a photo removed since).
     private func resolve(_ ids: [String]) -> [PhotoFile] {
         ids.compactMap { UUID(uuidString: $0).flatMap { photoByID[$0] } }
     }
 
-    private static func suggestion(from record: TagSuggestionRecord) -> TagSuggestion {
+    /// `nonisolated` because it runs inside the detached build task — it is a
+    /// pure field-for-field copy and has no business hopping back.
+    nonisolated private static func suggestion(from record: TagSuggestionRecord) -> TagSuggestion {
         TagSuggestion(
             id: record.id,
             displayName: record.displayName,

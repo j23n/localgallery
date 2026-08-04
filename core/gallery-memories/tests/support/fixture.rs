@@ -177,16 +177,6 @@ pub fn links_map(links: &[ConfLink]) -> HashMap<String, PersonLink> {
         .collect()
 }
 
-/// `ContactLinker.index`: lowercased full name → contact, **first write wins**.
-pub fn contacts_by_lower_name(contacts: &[Contact]) -> HashMap<String, Contact> {
-    let mut out: HashMap<String, Contact> = HashMap::new();
-    for c in contacts {
-        out.entry(c.full_name().to_lowercase())
-            .or_insert_with(|| c.clone());
-    }
-    out
-}
-
 pub fn date_map(entries: &[ConfDateEntry]) -> HashMap<String, AppleDate> {
     entries
         .iter()
@@ -263,10 +253,15 @@ pub fn inputs_from(
     seed: &str,
 ) -> GenerationInputs {
     let contacts: Vec<Contact> = contacts.iter().map(ConfContact::to_contact).collect();
+    let photos: Vec<_> = photos.iter().map(ConfPhoto::to_photo_file).collect();
     GenerationInputs {
-        photos: photos.iter().map(ConfPhoto::to_photo_file).collect(),
+        // No fixture scenario has cloud placeholders, so the whole table is the
+        // scored pool — and no per-photo offsets, because both fixture zones
+        // are fixed-offset and every offset would equal the constant.
+        ladder_photo_count: photos.len(),
+        photo_time_zone_offsets: Vec::new(),
+        photos,
         leaf_folders: folders.iter().map(ConfFolder::to_leaf_folder).collect(),
-        contacts_by_lower_name: contacts_by_lower_name(&contacts),
         contacts,
         person_contact_links: links_map(links),
         birthdays_enabled,

@@ -13,7 +13,8 @@ use std::collections::HashMap;
 use gallery_model::PhotoFile;
 
 use crate::{
-    dedup_photos_by_time_window, Contact, GenerationInputs, Memory, MemoryType, PersonLink,
+    dedup_photos_by_time_window, Contact, GenerationInputs, Memory, MemoryType, PersonKeys,
+    PersonLink,
 };
 
 /// Every photo carrying one `People/*` tag, by that tag's exact path.
@@ -74,8 +75,16 @@ impl PeopleIndex {
 /// first, then the explicit link — `.disabled` suppresses the tag entirely and
 /// `.manual` beats the name auto-match — and only then does the contact's
 /// birthday have to match.
+///
+/// Every person lookup goes through [`PersonKeys`], which folds both sides to
+/// NFC the way Swift's `Set<String>`/`Dictionary` did. Without it a
+/// `People/Jos\u{00E9}` tag misses a decomposed hidden entry and misses the
+/// contact it is named after, so the memory surfaces for a person the user
+/// hid — the failure is *more* output, not less, which is why nothing catches
+/// it in a smoke test.
 pub fn generate_birthday_memories(
     inputs: &GenerationInputs,
+    keys: &PersonKeys,
     people: &PeopleIndex,
     month: u32,
     day: u32,
@@ -92,15 +101,14 @@ pub fn generate_birthday_memories(
     let mut out = Vec::new();
 
     for bundle in people.bundles() {
-        if inputs.hidden_people.contains(&bundle.full_path) {
+        let key = PersonKeys::key(&bundle.full_path);
+        if keys.is_hidden(&key) {
             continue;
         }
-        let contact: Option<&Contact> = match inputs.person_contact_links.get(&bundle.full_path) {
+        let contact: Option<&Contact> = match keys.link_for(&key) {
             Some(PersonLink::Disabled) => continue,
             Some(PersonLink::Manual(id)) => contact_by_id.get(id.as_str()).copied(),
-            None => inputs
-                .contacts_by_lower_name
-                .get(&bundle.display_name.to_lowercase()),
+            None => keys.contact_named(&bundle.display_name),
         };
         let Some(contact) = contact else { continue };
         if contact.birthday_month != Some(month) || contact.birthday_day != Some(day) {

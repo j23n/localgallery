@@ -1,5 +1,5 @@
 [package]
-name = "gallery-meta"
+name = "gallery-scan"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,11 +9,9 @@ publish.workspace = true
 [dependencies]
 gallery-model = { path = "../gallery-model" }
 gallery-vfs = { path = "../gallery-vfs" }
-# Pinned to the exact version `gallery-ml` pins: both crates parse the same
-# EXIF, and a patch bump that changed a rational-to-float rounding would move
-# GPS coordinates in one of them only.
-kamadak-exif = "=0.6.1"
-quick-xml = "0.41"
+# `failedDirectoryPaths` are decomposed, because Swift emits them through
+# `standardizedFileURL.path`, and the Store's carry-forward prefix check
+# compares against that same form. Both sides normalize; mixing is what breaks.
 unicode-normalization = "0.1"
 
 [dev-dependencies]

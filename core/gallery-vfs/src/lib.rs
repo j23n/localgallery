@@ -28,10 +28,52 @@ pub use error::{VfsError, VfsResult};
 pub use mem::MemVfs;
 pub use std_vfs::StdVfs;
 
+/// Name of the temp file [`Vfs::write_atomic`] uses, so listings can skip it.
+pub const TEMP_PREFIX: &str = ".gallery-tmp-";
+
 /// A readable, seekable byte stream. Blanket-implemented, so `File`,
 /// `Cursor<Vec<u8>>`, … all qualify.
 pub trait ReadSeek: Read + Seek {}
 impl<T: Read + Seek> ReadSeek for T {}
+
+/// A wall-clock instant with sub-second precision, as the platform reports it.
+///
+/// Whole seconds plus nanoseconds rather than a single float because the two
+/// consumers want different things: the snapshot encodes Apple's
+/// seconds-since-2001 `Double`, and a `stat` is naturally integral.
+///
+/// # Why sub-seconds are carried
+///
+/// [`Stat::modified_unix`] drops them — it predates the scanner and only ever
+/// fed 1-second comparisons. [`Entry`] must not: the light-scan cache-hit rule
+/// is Swift's `cached.fileModificationDate == entry.modified`, and a Swift
+/// `Date` is a `Double` of seconds, so two mtimes 500 ms apart are **not**
+/// equal there. Truncating to whole seconds would make the Rust scanner
+/// silently treat a modified file as unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub struct FileTime {
+    /// Whole seconds since the Unix epoch. Negative before 1970.
+    pub secs: i64,
+    /// Sub-second remainder in nanoseconds, `0..1_000_000_000`.
+    pub subsec_nanos: u32,
+}
+
+impl FileTime {
+    /// Split a `SystemTime`-derived `(secs, nanos)` pair.
+    pub fn new(secs: i64, subsec_nanos: u32) -> Self {
+        FileTime { secs, subsec_nanos }
+    }
+
+    /// Seconds since the Unix epoch as a float, sub-seconds included.
+    ///
+    /// This is the form the scanner compares in, because it is the form
+    /// Foundation's `Date` compares in: `Date` is a `Double`, so anything
+    /// finer than its ~microsecond resolution at present-day magnitudes is
+    /// invisible to Swift too.
+    pub fn as_secs_f64(self) -> f64 {
+        self.secs as f64 + f64::from(self.subsec_nanos) / 1e9
+    }
+}
 
 /// Metadata about one filesystem entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -40,10 +82,89 @@ pub struct Stat {
     pub size: u64,
     /// Last-modified time as whole seconds since the Unix epoch, when the
     /// platform reports one. Sub-second precision is deliberately dropped —
-    /// it is not portable and the scanner only ever compares at 1s.
+    /// it is not portable and the sidecar writer only ever compares at 1s.
+    /// Directory enumeration goes through [`Entry`], which keeps them.
     pub modified_unix: Option<i64>,
     /// Whether the entry is a directory.
     pub is_dir: bool,
+}
+
+/// What a directory entry *is*.
+///
+/// Symlinks are reported as [`EntryKind::Symlink`] rather than resolved: the
+/// scanner classifies by extension and never follows a link into a second
+/// subtree, and a resolved-then-followed link is how a traversal ends up in a
+/// cycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EntryKind {
+    /// A regular file.
+    File,
+    /// A directory.
+    Dir,
+    /// A symbolic link (target not resolved).
+    Symlink,
+}
+
+/// One row of a directory listing.
+///
+/// Everything the scanner needs about a file arrives here, in **one** call per
+/// directory. That granularity is the whole point (`_plans/06` Finding 1): the
+/// Swift baseline pays a per-file `resourceValues` round-trip to `fileproviderd`
+/// — ~20 ms each, fully serial, 99.4% of a cold scan. The trait stays
+/// per-directory so an implementation is free to batch or parallelise the
+/// provider attribute reads behind it; the core never asks for one file at a
+/// time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entry {
+    /// Final path component, byte-exact as the platform reports it.
+    ///
+    /// **Not normalized.** APFS hands back the spelling the file was created
+    /// with, and `stable_uuid` hashes UTF-8 bytes, so normalizing here would
+    /// change every id for NFC-named files arriving from outside.
+    pub name: String,
+    /// File, directory, or symlink.
+    pub kind: EntryKind,
+    /// Size in bytes. 0 for directories.
+    pub size: u64,
+    /// Last-modified time, when the platform reports one.
+    pub modified: Option<FileTime>,
+    /// Creation ("birth") time, when the platform reports one.
+    ///
+    /// Not in the original Phase-3 sketch, and load-bearing anyway: the
+    /// scanner's fallback capture date is `min(creation, modification)`
+    /// (`MetadataReader.earliestFilesystemDate`), which cannot be computed
+    /// without it.
+    pub created: Option<FileTime>,
+    /// Whether the entry belongs to a file provider (iCloud Drive, OneDrive,
+    /// Dropbox, …) rather than to plain local storage.
+    ///
+    /// Separate from `is_placeholder` because the app distinguishes
+    /// `.remote(downloaded: true)` from `.local` — "downloaded from the cloud"
+    /// is what the Settings download counters and `clearAllDownloads` operate
+    /// on. Collapsing the two would make every materialised cloud photo look
+    /// like a local one and quietly empty those screens.
+    pub is_file_provider: bool,
+    /// Whether the bytes are absent — a provider placeholder that appears in
+    /// the listing but has not been materialised.
+    ///
+    /// Coarser than `FileProviderDetector.DownloadStatus`, which also has
+    /// `downloading` and `stale`. Nothing in the app reads those two today
+    /// (`SidecarCandidate.downloadStatus` is written and never inspected), so
+    /// they collapse into "not local" here rather than adding a state the core
+    /// cannot act on.
+    ///
+    /// Always `false` from [`StdVfs`], along with `is_file_provider`: provider
+    /// awareness needs the iOS `URLResourceKey`s, which arrive with the
+    /// Swift-side implementation.
+    pub is_placeholder: bool,
+    /// An opaque token that changes when the file's *content* changes.
+    ///
+    /// Mirrors `NSURLFileContentIdentifierKey`, which APFS populates and most
+    /// providers do not. `None` means "no identifier available" — callers fall
+    /// back to comparing `(modified, size)`, exactly like
+    /// `FileProviderDetector.ContentVersion.sameContent`. Never `Some` from
+    /// [`StdVfs`], for the same reason as `is_placeholder`.
+    pub content_version: Option<String>,
 }
 
 /// The filesystem seam.
@@ -56,6 +177,36 @@ pub trait Vfs: Send + Sync {
 
     /// Metadata for `path`. Symlinks are followed.
     fn stat(&self, path: &str) -> VfsResult<Stat>;
+
+    /// Everything directly inside `dir`, one round trip.
+    ///
+    /// # Ordering
+    ///
+    /// **Unspecified**, and deliberately so. `FolderScanner` consumes
+    /// `contentsOfDirectory` in whatever order the filesystem hands it back
+    /// and sorts only the *subdirectories* (ascending
+    /// `localizedStandardCompare`, applied by the caller, not here). The
+    /// conformance fixtures pin folder order and explicitly leave
+    /// within-folder photo order free; an implementation that sorts is legal
+    /// but buys nothing.
+    ///
+    /// # Errors
+    ///
+    /// A directory that cannot be listed must fail rather than return an
+    /// empty listing. The scanner's carry-forward depends on telling the two
+    /// apart: an empty directory means "these photos are gone", a failed
+    /// listing means "ask again later" (fixture landmine 20 — a transient I/O
+    /// error must not look like a deletion).
+    fn list(&self, dir: &str) -> VfsResult<Vec<Entry>>;
+
+    /// The same record [`Vfs::list`] returns, for a single path.
+    ///
+    /// Deliberately *not* the bulk read path — calling it per file is the
+    /// mistake `_plans/06` Finding 1 is about. The scanner calls it once per
+    /// **directory**, to pick up the folder node's own timestamps, exactly
+    /// where the Swift baseline calls `dirURL.resourceValues(forKeys:)`.
+    /// [`Stat`] cannot serve: it has no creation time and no sub-seconds.
+    fn stat_entry(&self, path: &str) -> VfsResult<Entry>;
 
     /// Write `bytes` to `path` such that readers see either the old contents
     /// or the complete new contents — never anything in between.
@@ -140,6 +291,29 @@ mod tests {
         assert_eq!(vfs.read(&file).unwrap(), b"");
 
         assert!(vfs.stat(dir).unwrap().is_dir);
+
+        // `list` sees what was written, with the size the stat reports.
+        let listing = vfs.list(dir).unwrap();
+        let entry = listing
+            .iter()
+            .find(|e| e.name == "contract.txt")
+            .expect("the file just written is missing from the listing");
+        assert_eq!(entry.kind, EntryKind::File);
+        assert_eq!(entry.size, 0);
+        assert!(!entry.is_placeholder);
+
+        // Listing a file, or something absent, is an error — never an empty
+        // listing. The scanner tells "gone" from "unreadable" by that.
+        assert!(vfs.list(&file).is_err());
+        assert!(vfs.list(&format!("{dir}/nope")).is_err());
+
+        // `stat_entry` agrees with the listing, and knows about directories.
+        let single = vfs.stat_entry(&file).unwrap();
+        assert_eq!(single.name, "contract.txt");
+        assert_eq!(single.kind, EntryKind::File);
+        assert_eq!(single.size, 0);
+        assert_eq!(vfs.stat_entry(dir).unwrap().kind, EntryKind::Dir);
+        assert!(vfs.stat_entry(&format!("{dir}/nope")).is_err());
     }
 
     #[test]

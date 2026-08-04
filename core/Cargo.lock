@@ -446,8 +446,11 @@ dependencies = [
 name = "gallery-meta"
 version = "0.1.0"
 dependencies = [
+ "gallery-model",
  "gallery-vfs",
+ "kamadak-exif",
  "quick-xml",
+ "serde",
  "serde_json",
  "tempfile",
  "unicode-normalization",
@@ -477,7 +480,20 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "uuid",
+]
+
+[[package]]
+name = "gallery-scan"
+version = "0.1.0"
+dependencies = [
+ "gallery-model",
+ "gallery-vfs",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "unicode-normalization",
 ]
 
 [[package]]

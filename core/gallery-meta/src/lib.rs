@@ -32,6 +32,7 @@
 mod edit;
 pub mod error;
 pub mod faces;
+pub mod media;
 pub mod model;
 pub mod read;
 pub mod regions;
@@ -43,6 +44,7 @@ pub mod xml;
 
 pub use error::{MetaError, MetaResult};
 pub use faces::{apply_faces, write_faces, AppliedFaces, Authority, FaceWriteRequest};
+pub use media::{read_image_metadata, read_video_date, ImageMetadata};
 pub use model::{AppliedDimensions, CoreSentinel, FaceRegion, PhotoToolsFields, SidecarView};
 pub use read::read_view;
 pub use regions::{bind_claims, Area, FaceRegionWrite, RegionClaim, REGION_MATCH_IOU};

@@ -4,11 +4,11 @@
 //! it forces the trait to stay implementable by something that is not
 //! `std::fs` — which is the whole point of the seam (Android SAF is next).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
 use std::sync::{Mutex, PoisonError};
 
-use crate::{ReadSeek, Stat, Vfs, VfsError, VfsResult};
+use crate::{Entry, EntryKind, FileTime, ReadSeek, Stat, Vfs, VfsError, VfsResult};
 
 /// A flat path → bytes map with directory semantics synthesised from the
 /// path separators. `write_atomic` is trivially atomic here (one lock, one
@@ -16,6 +16,7 @@ use crate::{ReadSeek, Stat, Vfs, VfsError, VfsResult};
 #[derive(Debug, Default)]
 pub struct MemVfs {
     files: Mutex<BTreeMap<String, Vec<u8>>>,
+    times: Mutex<BTreeMap<String, FileTime>>,
 }
 
 impl MemVfs {
@@ -30,6 +31,26 @@ impl MemVfs {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(path.to_string(), bytes.into());
+    }
+
+    /// Seed a file *and* its modification time, for scanner tests that need a
+    /// change signal. `insert` leaves the mtime at the epoch.
+    pub fn insert_at(&self, path: &str, bytes: impl Into<Vec<u8>>, modified: FileTime) {
+        self.insert(path, bytes);
+        self.times
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(path.to_string(), modified);
+    }
+
+    /// Modification time of `path`, defaulting to the epoch.
+    fn time_of(&self, path: &str) -> FileTime {
+        self.times
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(path)
+            .copied()
+            .unwrap_or_default()
     }
 
     /// Every path currently present, sorted.
@@ -81,6 +102,83 @@ impl Vfs for MemVfs {
         }
         Err(VfsError::NotFound {
             path: path.to_string(),
+        })
+    }
+
+    /// Children of `dir`, synthesised from the path separators.
+    ///
+    /// Directories exist only implicitly here, so a listing is "the distinct
+    /// next segment of every key under `dir/`". Names are returned sorted,
+    /// which the trait does not promise but makes the tests readable.
+    fn list(&self, dir: &str) -> VfsResult<Vec<Entry>> {
+        let stat = self.stat(dir)?;
+        if !stat.is_dir {
+            return Err(VfsError::NotADirectory {
+                path: dir.to_string(),
+            });
+        }
+        let prefix = format!("{}/", dir.trim_end_matches('/'));
+        let mut names: BTreeSet<(String, bool)> = BTreeSet::new();
+        {
+            let files = self.files.lock().unwrap_or_else(PoisonError::into_inner);
+            for key in files.keys() {
+                let Some(rest) = key.strip_prefix(&prefix) else {
+                    continue;
+                };
+                match rest.split_once('/') {
+                    Some((head, _)) => names.insert((head.to_string(), true)),
+                    None => names.insert((rest.to_string(), false)),
+                };
+            }
+        }
+        Ok(names
+            .into_iter()
+            .map(|(name, is_dir)| {
+                let path = format!("{prefix}{name}");
+                let modified = self.time_of(&path);
+                Entry {
+                    kind: if is_dir {
+                        EntryKind::Dir
+                    } else {
+                        EntryKind::File
+                    },
+                    size: if is_dir {
+                        0
+                    } else {
+                        self.read(&path).map(|b| b.len() as u64).unwrap_or(0)
+                    },
+                    modified: Some(modified),
+                    created: Some(modified),
+                    is_file_provider: false,
+                    is_placeholder: false,
+                    content_version: None,
+                    name,
+                }
+            })
+            .collect())
+    }
+
+    fn stat_entry(&self, path: &str) -> VfsResult<Entry> {
+        let stat = self.stat(path)?;
+        let modified = self.time_of(path);
+        Ok(Entry {
+            name: path
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or("")
+                .to_string(),
+            kind: if stat.is_dir {
+                EntryKind::Dir
+            } else {
+                EntryKind::File
+            },
+            size: stat.size,
+            modified: Some(modified),
+            created: Some(modified),
+            is_file_provider: false,
+            is_placeholder: false,
+            content_version: None,
         })
     }
 

@@ -898,7 +898,7 @@ fn photo_to_record(photo: &PhotoFile) -> ScanPhoto {
     }
 }
 
-fn photo_from_record(record: ScanPhoto) -> PhotoFile {
+pub(crate) fn photo_from_record(record: ScanPhoto) -> PhotoFile {
     PhotoFile {
         // Re-derived rather than trusted: the id *is* a function of the path,
         // and a caller that let the two drift would silently split a photo's

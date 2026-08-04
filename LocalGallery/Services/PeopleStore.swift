@@ -56,11 +56,10 @@ final class PeopleStore {
 
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let clock: any Clock
-    /// O(1) photo lookup, for resolving featured-photo IDs. Strong reference
-    /// is cycle-free: the indexes don't know about this type.
-    @ObservationIgnored private let searchIndex: SearchIndex
-    /// Tag → photos lookup, for featured-photo candidate pools.
-    @ObservationIgnored private let tagIndex: TagIndex
+    /// The core library index: O(1) photo lookup for featured-photo IDs, and
+    /// the tag → photos buckets for the candidate pool. Strong reference is
+    /// cycle-free: the index doesn't know about this type.
+    @ObservationIgnored private let index: CoreLibraryIndex
     /// Set by the Store: hidden/me changes affect memory generation.
     @ObservationIgnored var onMemoryAffectingChange: (() -> Void)?
     /// Set by the Store: visibility changes affect the widget snapshot.
@@ -69,13 +68,11 @@ final class PeopleStore {
     init(
         defaults: UserDefaults,
         clock: any Clock,
-        searchIndex: SearchIndex,
-        tagIndex: TagIndex
+        index: CoreLibraryIndex
     ) {
         self.defaults = defaults
         self.clock = clock
-        self.searchIndex = searchIndex
-        self.tagIndex = tagIndex
+        self.index = index
 
         if let hidden = defaults.array(forKey: "hiddenPeople") as? [String] {
             hiddenPeople = Set(hidden)
@@ -196,10 +193,10 @@ final class PeopleStore {
     /// can't be uniquely identified by name — solo-photo preference is a
     /// simpler proxy for "good portrait of this person".
     func featuredPhoto(for tag: TagSuggestion) -> PhotoFile? {
-        if let id = featuredPhotoByPerson[tag.fullPath], let photo = searchIndex.photo(byID: id) {
+        if let id = featuredPhotoByPerson[tag.fullPath], let photo = index.photo(byID: id) {
             return photo
         }
-        let candidates = tagIndex.photos(forTag: tag)
+        let candidates = index.photos(forTag: tag)
         guard !candidates.isEmpty else { return nil }
         let solo = candidates.filter { peopleTagCount(in: $0) == 1 }
         let pool = solo.isEmpty ? candidates : solo

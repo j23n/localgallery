@@ -122,8 +122,10 @@ final class GalleryStore {
     /// `GalleryStore+Scanning.swift`.
     @ObservationIgnored let coreScanner = CoreScanner()
     @ObservationIgnored private let contactLinker = ContactLinker()
-    @ObservationIgnored private let searchService = SearchIndex()
-    @ObservationIgnored private let tagService = TagIndex()
+    /// The Rust core's library index (Phase 4): the sorted photo order, the
+    /// search corpus, the tag buckets and the `TagSuggestion` aggregation.
+    /// Replaced `SearchIndex` + `TagIndex`.
+    @ObservationIgnored let index = CoreLibraryIndex()
     @ObservationIgnored private let thumbnailService: ThumbnailService
     @ObservationIgnored private let widgetExport = WidgetExportScheduler()
     /// Materialises file-provider placeholders on demand. Exposed as a
@@ -190,12 +192,8 @@ final class GalleryStore {
         let sidecarCache = SidecarCacheStore(url: paths.sidecarCacheURL)
         self.sidecarCache = sidecarCache
         self.sidecarSync = SidecarSyncService(cache: sidecarCache)
-        let people = PeopleStore(
-            defaults: defaults,
-            clock: clock,
-            searchIndex: searchService,
-            tagIndex: tagService
-        )
+        let index = self.index
+        let people = PeopleStore(defaults: defaults, clock: clock, index: index)
         self.people = people
         self.memories = MemoryCoordinator(
             defaults: defaults,
@@ -205,7 +203,7 @@ final class GalleryStore {
                 version: MemoriesCacheSchema.version,
                 label: "memories cache"
             ),
-            searchIndex: searchService,
+            index: index,
             people: people
         )
         // One coalescer for both core engines. The interval is a budget for
@@ -271,10 +269,19 @@ final class GalleryStore {
                 leafFolders: self._cachedLeafFolders,
                 contacts: self.contacts,
                 personContactLinks: self.personContactLinks,
-                contactsByLowerName: self.contactLinker.contactsByLowerName,
                 mePersonPath: self.people.mePersonPath,
                 hiddenPeople: self.people.hiddenPeople
             )
+        }
+        // The tail of every index rebuild: publish the aggregated people list
+        // and re-export the widget snapshot, which is what the old
+        // `Task.detached` inside `rebuildSortAndIndex` did once the tag
+        // aggregation landed.
+        self.index.onRebuild = { [weak self] tags, people in
+            guard let self else { return }
+            self.allTags = tags
+            self.people.updateTopPeople(people)
+            self.exportWidgetSnapshot()
         }
         self.memories.onMemoriesPublished = { [weak self] in
             self?.exportWidgetSnapshot()
@@ -599,62 +606,49 @@ final class GalleryStore {
 
     // MARK: - Sorted / Search / Tags
 
-    /// All unique tags across the library, sorted by frequency.
-    private(set) var allTags: [TagSuggestion] = []
-    /// Generation counter to cancel stale tag aggregation tasks.
-    @ObservationIgnored private var tagBuildGeneration = 0
+    /// All unique tags across the library, sorted by frequency. Published by
+    /// `CoreLibraryIndex.onRebuild`; the stale-rebuild guard lives there.
+    fileprivate(set) var allTags: [TagSuggestion] = []
     /// Cached leaf folders (no subfolders, has photos).
     @ObservationIgnored private var _cachedLeafFolders: [PhotoFolder] = []
 
-    /// Date-descending photo list. Forwards to `SearchIndex`; observation
-    /// chains through because `SearchIndex` is `@Observable`.
-    var sortedPhotos: [PhotoFile] { searchService.sortedPhotos }
+    /// Date-descending photo list, from the core. Observation chains through
+    /// because `CoreLibraryIndex` is `@Observable`.
+    var sortedPhotos: [PhotoFile] { index.sortedPhotos }
 
-    /// O(1) photo lookup by ID. Forwards to `SearchIndex`.
-    func photo(byID id: UUID) -> PhotoFile? { searchService.photo(byID: id) }
+    /// O(1) photo lookup by ID. The id → `PhotoFile` table is the app's own —
+    /// the core answers in ids and the app holds the structs.
+    func photo(byID id: UUID) -> PhotoFile? { index.photo(byID: id) }
 
-    /// O(1) photos for a given tag. Forwards to `TagIndex`.
+    /// Photos for a given tag, from the core's buckets (prefix expansion
+    /// included), memoised per tag between rebuilds.
     func photos(forTag tag: TagSuggestion) -> [PhotoFile] {
-        tagService.photos(forTag: tag)
+        index.photos(forTag: tag)
     }
 
-    internal func rebuildSortAndIndex() {
-        let t = CFAbsoluteTimeGetCurrent()
-        searchService.build(allPhotos: allPhotos)
-        tagService.build(allPhotos: allPhotos)
-        let withTags = allPhotos.filter { !$0.hierarchicalTags.isEmpty }.count
-        let withDates = allPhotos.filter { $0.dateTaken != nil }.count
+    /// Wait for the in-flight index rebuild. The rebuild is off-main, so a
+    /// caller that genuinely needs the sorted order (tests; the conformance
+    /// harnesses) has to be able to wait for it rather than poll.
+    func settleIndex() async { await index.settle() }
 
-        // Cache leaf folders and pre-compute event folders
+    /// Republish the library to the core index and refresh the folder-derived
+    /// caches.
+    ///
+    /// The index build itself is **off the main actor** — `CoreLibraryIndex`
+    /// runs the FFI on a detached task behind a generation counter and
+    /// publishes `sortedPhotos` / `allTags` / `topPeople` when it lands. Only
+    /// the id table and the two folder lists below are computed here, and none
+    /// of them sorts or matches anything.
+    internal func rebuildSortAndIndex() {
+        index.build(allPhotos: allPhotos)
+
+        // Cache leaf folders and pre-compute event folders. Not index work —
+        // this is a walk of the folder tree the Store owns.
         _cachedLeafFolders = rootFolder.map { Self.collectLeafFolders($0) } ?? []
         eventFolders = _cachedLeafFolders.sorted { a, b in
             let aDate = a.photos.compactMap(\.dateTaken).max() ?? .distantPast
             let bDate = b.photos.compactMap(\.dateTaken).max() ?? .distantPast
             return aDate > bDate
-        }
-
-        Log.index.info("Built: \(self.allPhotos.count) photos (\(withDates) dates, \(withTags) tagged) in \(String(format: "%.0f", (CFAbsoluteTimeGetCurrent() - t) * 1000))ms")
-
-        // Aggregate global tag list + topPeople in background to avoid blocking scroll
-        tagBuildGeneration += 1
-        let generation = tagBuildGeneration
-        let tagPhotosSnapshot = tagService.photosForTag
-        let canonicalPathSnapshot = tagService.canonicalPath
-        Task.detached(priority: .utility) {
-            let (tags, people) = TagIndex.aggregateTagsAndPeople(
-                photosForTag: tagPhotosSnapshot,
-                canonicalPath: canonicalPathSnapshot
-            )
-
-            await MainActor.run { [weak self] in
-                guard let self, self.tagBuildGeneration == generation else { return }
-                self.allTags = tags
-                self.people.updateTopPeople(people)
-                Log.index.info("Tags: \(tags.count) unique, \(people.count) people")
-                // Tag aggregation populates the widget Tags picker — re-export
-                // so the catalog reflects the latest set.
-                self.exportWidgetSnapshot()
-            }
         }
     }
 
@@ -688,8 +682,16 @@ final class GalleryStore {
         }
     }
 
+    /// Filter the sorted photo list by AND-combining required tags and an
+    /// optional substring query.
+    ///
+    /// No `allTags` argument any more: the core holds its own aggregated list
+    /// and uses it for the exact-tag-path branch, which is what makes the
+    /// *virtual* `Places/*` prefix tags queryable. The Swift signature let a
+    /// caller pass a stale or empty list and silently degrade every tag query
+    /// to a substring match.
     func search(query: String, requiredTags: [TagSuggestion] = []) -> [PhotoFile] {
-        searchService.search(query: query, requiredTags: requiredTags, allTags: allTags)
+        index.search(query: query, requiredTags: requiredTags)
     }
 
     // MARK: - Widget Snapshot
@@ -701,7 +703,7 @@ final class GalleryStore {
     /// We pass `memories.visible` verbatim so the widget rail mirrors the
     /// in-app rail — every widget item id resolves to a memory the app can
     /// open. Calendar-tied memories (`onThisDay`, `yearsAgo`, birthdays)
-    /// for the next `scheduledMemoryHorizonDays` days are computed up-front
+    /// for the next `CoreMemories.horizonDays` days are computed up-front
     /// so the widget can rotate to them on their day even if the app isn't
     /// relaunched in between. Each scheduled item carries its own validity
     /// window; when the user finally opens the app on the matching day,
@@ -717,87 +719,82 @@ final class GalleryStore {
             case .remote(let downloaded): return downloaded
             }
         }
-        let scheduled = computeScheduledMemories(photos: widgetPhotos)
-        widgetExport.schedule(WidgetSnapshotExporter.Inputs(
-            allPhotos: widgetPhotos,
-            memories: memories.visible,
-            allTags: allTags,
-            rootFolder: rootFolder,
-            leafFolders: _cachedLeafFolders,
-            scheduled: scheduled
-        ))
+        // Everything the export needs, snapshotted here so the rest of this
+        // runs without touching the Store. `_plans/06` Finding 3: the horizon
+        // pass used to run on the main actor and cost ~9 s on a 20k library.
+        let visible = memories.visible
+        let tags = allTags
+        let root = rootFolder
+        let leaves = _cachedLeafFolders
+        let inputs = scheduledInputs(photos: widgetPhotos)
+        let hidden = memories.hiddenMemories
+
+        widgetExportGeneration += 1
+        let generation = widgetExportGeneration
+        Task { [weak self] in
+            let started = CFAbsoluteTimeGetCurrent()
+            let scheduled = await CoreMemories.computeScheduled(inputs, hiddenMemoryIDs: hidden)
+            // The line `_plans/06` Finding 3's gate is measured from. It
+            // replaces the `OnThisDay (…)` burst the deleted Swift generators
+            // logged once per horizon day; the core does not log, so the one
+            // number worth having is the whole pass.
+            let horizonMillis = (CFAbsoluteTimeGetCurrent() - started) * 1000
+            Log.memory.info("Scheduled horizon: \(scheduled.count) items over \(CoreMemories.horizonDays) days in \(String(format: "%.0f", horizonMillis))ms")
+            // A newer export superseded this one while the horizon was
+            // computing — its snapshot is the current truth, so drop this.
+            guard let self, self.widgetExportGeneration == generation else { return }
+            self.widgetExport.schedule(WidgetSnapshotExporter.Inputs(
+                allPhotos: widgetPhotos,
+                memories: visible,
+                allTags: tags,
+                rootFolder: root,
+                leafFolders: leaves,
+                scheduled: scheduled.map {
+                    WidgetSnapshotExporter.ScheduledMemory(
+                        memory: $0.memory, validFrom: $0.validFrom, validTo: $0.validTo
+                    )
+                }
+            ))
+        }
     }
 
-    /// How far ahead to pre-publish calendar-tied memories into the widget
-    /// snapshot. 7 days covers a typical "user opens the app weekly" cadence
-    /// without bloating thumbnail storage.
-    private static let scheduledMemoryHorizonDays = 7
+    /// Cancels a superseded widget export whose horizon pass is still running.
+    @ObservationIgnored private var widgetExportGeneration = 0
 
-    /// Pre-compute the next `scheduledMemoryHorizonDays` days of calendar-
-    /// tied memories (onThisDay, yearsAgo, birthdays) so the widget can
-    /// surface them on the matching day without waiting for the next app
-    /// launch. Excludes day 0 — that's already in `memories.visible`.
+    /// The engine-input snapshot the horizon pass runs over.
     ///
-    /// Photos get bucketed by (month, day) once up-front so each day's
-    /// onThisDay/yearsAgo filter walks a small candidate set instead of the
-    /// full library — keeps the main-actor cost flat for large libraries.
+    /// Only the calendar half is read (`photos`, `contacts`, the links, the
+    /// birthdays toggle, `now`); `seed`, `leafFolders` and the seen/cool-down
+    /// maps play no part, because nothing in the horizon is scored or selected.
+    private func scheduledInputs(photos: [PhotoFile]) -> CoreMemories.Inputs {
+        CoreMemories.Inputs(
+            photos: photos,
+            contacts: contacts,
+            personContactLinks: personContactLinks,
+            birthdaysEnabled: memories.birthdaysEnabled,
+            hiddenPeople: people.hiddenPeople,
+            now: clock.now()
+        )
+    }
+
+    /// Pre-compute the next `CoreMemories.horizonDays` days of calendar-tied
+    /// memories (onThisDay, yearsAgo, birthdays) so the widget can surface them
+    /// on the matching day without waiting for the next app launch. Day 0 is
+    /// excluded — it is already in `memories.visible`.
     ///
     /// Internal rather than private so `ScheduledMemoriesConformanceTests` can
-    /// pin the pre-publish horizon it produces (Phase-4 fixture
-    /// `scheduled_memories.json`). Not called from anywhere but
-    /// `exportWidgetSnapshot`.
-    func computeScheduledMemories(photos: [PhotoFile]) -> [WidgetSnapshotExporter.ScheduledMemory] {
-        let cal = Calendar.current
-        let today = cal.startOfDay(for: clock.now())
-
-        let photosWithDates = photos.compactMap { photo -> (PhotoFile, Date)? in
-            guard let date = photo.dateTaken else { return nil }
-            return (photo, date)
+    /// pin the horizon it produces (Phase-4 fixture `scheduled_memories.json`).
+    /// The only production caller is `exportWidgetSnapshot`, which inlines the
+    /// same call so it can carry its own generation guard.
+    func computeScheduledMemories(photos: [PhotoFile]) async -> [WidgetSnapshotExporter.ScheduledMemory] {
+        await CoreMemories.computeScheduled(
+            scheduledInputs(photos: photos),
+            hiddenMemoryIDs: memories.hiddenMemories
+        ).map {
+            WidgetSnapshotExporter.ScheduledMemory(
+                memory: $0.memory, validFrom: $0.validFrom, validTo: $0.validTo
+            )
         }
-        var byMonthDay: [DateComponents: [(PhotoFile, Date)]] = [:]
-        for entry in photosWithDates {
-            let key = cal.dateComponents([.month, .day], from: entry.1)
-            byMonthDay[key, default: []].append(entry)
-        }
-
-        var out: [WidgetSnapshotExporter.ScheduledMemory] = []
-        for offset in 1...Self.scheduledMemoryHorizonDays {
-            guard let day = cal.date(byAdding: .day, value: offset, to: today) else { continue }
-            let nextDay = cal.date(byAdding: .day, value: 1, to: day) ?? day.addingTimeInterval(86400)
-            let dayComps = cal.dateComponents([.month, .day], from: day)
-            let bucket = byMonthDay[dayComps] ?? []
-
-            var dayMemories: [Memory] = []
-            if let m = MemoryEngine.generateOnThisDay(for: day, in: bucket, calendar: cal) {
-                dayMemories.append(m)
-            }
-            dayMemories.append(contentsOf: MemoryEngine.generateYearsAgo(for: day, in: bucket, calendar: cal))
-            if memories.birthdaysEnabled {
-                // Birthdays walk all photos by People/* tag rather than by
-                // date bucket, so we pass `photos` directly.
-                dayMemories += MemoryEngine.generateBirthdayMemories(
-                    from: photos,
-                    contacts: contacts,
-                    links: personContactLinks,
-                    lowerNameIndex: contactLinker.contactsByLowerName,
-                    calendar: cal,
-                    todayComponents: dayComps,
-                    hiddenPeople: people.hiddenPeople
-                )
-            }
-
-            // Same finalize step as `generate` (photo cap + subtitle) so a
-            // pre-published scheduled item looks identical to the memory the
-            // foreground catch-up regenerates on its day.
-            for memory in MemoryEngine.finalize(dayMemories) where !memories.hiddenMemories.contains(memory.id) {
-                out.append(WidgetSnapshotExporter.ScheduledMemory(
-                    memory: memory,
-                    validFrom: day,
-                    validTo: nextDay
-                ))
-            }
-        }
-        return out
     }
 
     var leafFolders: [PhotoFolder] { _cachedLeafFolders }
@@ -813,7 +810,7 @@ final class GalleryStore {
 
     /// Resolve photo IDs from a memory back to PhotoFile instances.
     func photos(for memory: Memory) -> [PhotoFile] {
-        memory.photoIDs.compactMap { searchService.photo(byID: $0) }
+        memory.photoIDs.compactMap { index.photo(byID: $0) }
     }
 
     // MARK: - Thumbnails (forwarded to ThumbnailService)
@@ -859,7 +856,7 @@ final class GalleryStore {
         // Mark this photo as downloaded in the in-memory model so the grid
         // badge clears without waiting for a rescan. Cache write is deferred
         // to the next save.
-        if let existing = searchService.photo(byID: photo.id),
+        if let existing = index.photo(byID: photo.id),
            case .remote = existing.locality {
             apply(.photoLocalityChanged(id: photo.id, locality: .remote(downloaded: true)))
         }

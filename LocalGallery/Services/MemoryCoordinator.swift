@@ -8,21 +8,25 @@ import os
 /// machine in the app lives (and can be tested) in one place; views reach it
 /// via `store.memories`.
 ///
-/// The engine itself (`MemoryEngine`) stays pure; this type supplies its
-/// inputs (via the Store-provided `makeInputs` closure), owns the gating
-/// rules, and publishes results.
+/// The engine itself lives in the Rust core (`CoreMemories.generate`, Phase 4)
+/// and is pure; this type supplies its inputs (via the Store-provided
+/// `makeInputs` closure), owns the gating rules, and publishes results.
 @Observable
 @MainActor
 final class MemoryCoordinator {
-    /// Everything `MemoryEngine.generate` needs, snapshotted on the main
+    /// Everything the engine needs from the *Store*, snapshotted on the main
     /// actor at generation time. Built by the Store, which owns the photo
     /// library, contacts, and people state.
+    ///
+    /// The coordinator's own half of the snapshot — the clock, the seed, the
+    /// birthdays toggle and the seen/cool-down maps — is added in `generate`;
+    /// together they become `CoreMemories.Inputs`, which is what crosses the
+    /// FFI boundary.
     struct GenerationInputs {
         let photos: [PhotoFile]
         let leafFolders: [PhotoFolder]
         let contacts: [ContactInfo]
         let personContactLinks: [String: PersonLink]
-        let contactsByLowerName: [String: ContactInfo]
         let mePersonPath: String
         let hiddenPeople: Set<String>
     }
@@ -48,7 +52,7 @@ final class MemoryCoordinator {
         }
     }
 
-    /// Cluster keys (see `MemoryEngine.clusterKey(for:)`) → last date the
+    /// Cluster keys (see `CoreMemories.clusterKey(for:)`) → last date the
     /// cluster surfaced on the rail. Clusters are penalised for ~3 days
     /// after surfacing so a trip parent + sub-trips rotate across days.
     /// Pruned at load to entries from the last 7 days; that headroom
@@ -102,7 +106,7 @@ final class MemoryCoordinator {
     @ObservationIgnored private let clock: any Clock
     @ObservationIgnored private let cache: JSONDiskCache<[Memory]>
     /// O(1) photo lookup for stale-ID filtering in `visible`.
-    @ObservationIgnored private let searchIndex: SearchIndex
+    @ObservationIgnored private let index: CoreLibraryIndex
     /// Hidden-people set, for suppressing stale birthday memories.
     @ObservationIgnored private let people: PeopleStore
     /// Set by the Store: snapshots engine inputs, or nil when the library
@@ -116,13 +120,13 @@ final class MemoryCoordinator {
         defaults: UserDefaults,
         clock: any Clock,
         cache: JSONDiskCache<[Memory]>,
-        searchIndex: SearchIndex,
+        index: CoreLibraryIndex,
         people: PeopleStore
     ) {
         self.defaults = defaults
         self.clock = clock
         self.cache = cache
-        self.searchIndex = searchIndex
+        self.index = index
         self.people = people
 
         if let hiddenMem = defaults.array(forKey: "hiddenMemories") as? [String] {
@@ -169,8 +173,8 @@ final class MemoryCoordinator {
                 if people.hiddenPeople.contains(personPath) { return false }
             }
             // Mirror the same resolution order as MemoryCardView's coverURL.
-            if searchIndex.photo(byID: memory.coverPhotoID) != nil { return true }
-            return memory.photoIDs.contains { searchIndex.photo(byID: $0) != nil }
+            if index.photo(byID: memory.coverPhotoID) != nil { return true }
+            return memory.photoIDs.contains { index.photo(byID: $0) != nil }
         }
     }
 
@@ -300,14 +304,19 @@ final class MemoryCoordinator {
             Log.memory.info("Memory pool: \(filtered.count) of \(inputs.photos.count) photos (excluded \(inputs.photos.count - filtered.count) cloud placeholders without sidecars)")
         }
 
-        MemoryEngine.logMemoryInputSummary(allPhotos: filtered)
+        CoreMemories.logInputSummary(allPhotos: filtered)
 
-        let results = await MemoryEngine.generate(
-            from: filtered,
+        // The whole snapshot crosses to a detached task inside `generate`, so
+        // nothing below this line reads the Store or the coordinator until the
+        // await returns. `contactsByLowerName` is not passed: the core derives
+        // it from `contacts` exactly as `ContactLinker.index` does (lowercased
+        // full name, first write wins), and shipping both would let the two
+        // disagree across the boundary.
+        let results = await CoreMemories.generate(CoreMemories.Inputs(
+            photos: filtered,
             leafFolders: inputs.leafFolders,
             contacts: inputs.contacts,
             personContactLinks: inputs.personContactLinks,
-            contactsByLowerName: inputs.contactsByLowerName,
             birthdaysEnabled: birthdaysEnabled,
             mePersonPath: inputs.mePersonPath,
             hiddenPeople: inputs.hiddenPeople,
@@ -315,7 +324,7 @@ final class MemoryCoordinator {
             seed: seed,
             seenMemoryIDs: seenMemoryIDs,
             surfacedClusters: surfacedClusters
-        )
+        ))
 
         // An expired BG task cancels mid-generation — don't publish a
         // potentially partial result set over a good cached one.
@@ -331,7 +340,7 @@ final class MemoryCoordinator {
         let now = clock.now()
         var updated = surfacedClusters
         for memory in results {
-            updated[MemoryEngine.clusterKey(for: memory.id)] = now
+            updated[CoreMemories.clusterKey(for: memory.id)] = now
         }
         surfacedClusters = updated
         cache.save(all)

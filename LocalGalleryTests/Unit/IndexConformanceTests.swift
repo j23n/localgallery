@@ -58,12 +58,21 @@ struct ConfTagDump: Codable, Equatable {
 
 // MARK: - Harness
 
-/// `SearchIndex` and `TagIndex` over one deterministic library.
+/// The library index over one deterministic library.
 ///
-/// Both types are pure functions of `allPhotos`, which makes them the easiest
-/// part of Phase 4 to port and the easiest to get subtly wrong: the sort
-/// tiebreak, the corpus join, and Swift's *canonical-equivalence* substring
-/// matching are all invisible until a user notices the grid reshuffled.
+/// The two fixtures were produced from the shipping Swift `SearchIndex` and
+/// `TagIndex` before the port; since Phase 4 step 4 this harness drives the
+/// **Rust core** through `CoreLibraryIndex`, and every assertion below is
+/// unchanged. The sort tiebreak, the corpus join, and Swift's
+/// *canonical-equivalence* substring matching are all invisible until a user
+/// notices the grid reshuffled — which is why they are pinned rather than
+/// re-derived.
+///
+/// Two shapes changed with the port, both of them reads rather than behaviour:
+/// the bucket table is reconstructed from the aggregated suggestions (one
+/// suggestion per bucket, carrying its key and its canonical spelling) plus
+/// `photos(forTag:)`, because the core exposes the buckets that way; and the
+/// index build is `async`, because it runs off the main actor.
 @MainActor
 final class IndexConformanceTests: XCTestCase {
 
@@ -123,16 +132,12 @@ final class IndexConformanceTests: XCTestCase {
         ]
     }
 
-    private func indexes() -> (search: SearchIndex, tags: TagIndex, photos: [PhotoFile], allTags: [TagSuggestion]) {
+    private func indexes() async -> (index: CoreLibraryIndex, photos: [PhotoFile], allTags: [TagSuggestion]) {
         let photos = library()
-        let search = SearchIndex()
-        search.build(allPhotos: photos)
-        let tags = TagIndex()
-        tags.build(allPhotos: photos)
-        let aggregated = TagIndex.aggregateTagsAndPeople(
-            photosForTag: tags.photosForTag, canonicalPath: tags.canonicalPath
-        )
-        return (search, tags, photos, aggregated.tags)
+        let index = CoreLibraryIndex()
+        index.build(allPhotos: photos)
+        await index.settle()
+        return (index, photos, index.allTags)
     }
 
     // MARK: SearchIndex dump
@@ -183,15 +188,15 @@ final class IndexConformanceTests: XCTestCase {
         ]
     }
 
-    private func searchDump() -> ConfSearchDump {
-        let (search, _, photos, allTags) = indexes()
+    private func searchDump() async -> ConfSearchDump {
+        let (index, photos, allTags) = await indexes()
         let tagByPath = Dictionary(uniqueKeysWithValues: allTags.map { ($0.fullPath.lowercased(), $0) })
 
         let queries: [ConfSearchQuery] = querySpecs().map { spec in
             let required = spec.requiredTagPaths.compactMap { tagByPath[$0.lowercased()] }
             XCTAssertEqual(required.count, spec.requiredTagPaths.count,
                            "query '\(spec.query)': a required tag is not in the aggregated tag list")
-            let results = search.search(query: spec.query, requiredTags: required, allTags: allTags)
+            let results = index.search(query: spec.query, requiredTags: required)
             return ConfSearchQuery(
                 query: spec.query,
                 requiredTagPaths: spec.requiredTagPaths,
@@ -219,7 +224,7 @@ final class IndexConformanceTests: XCTestCase {
                 "Matching is `corpus.contains(query)` on lowercased strings — Swift substring search, i.e. CANONICAL EQUIVALENCE, not byte equality. See the 'café' query.",
             ],
             photos: photos.map(ConfPhoto.init),
-            sortedPhotoIDs: search.sortedPhotos.map(\.id.uuidString),
+            sortedPhotoIDs: index.sortedPhotos.map(\.id.uuidString),
             corpus: corpus,
             queries: queries
         )
@@ -244,18 +249,24 @@ final class IndexConformanceTests: XCTestCase {
         }
     }
 
-    private func tagDump() -> ConfTagDump {
-        let (_, tags, photos, _) = indexes()
-        let aggregated = TagIndex.aggregateTagsAndPeople(
-            photosForTag: tags.photosForTag, canonicalPath: tags.canonicalPath
-        )
-        let buckets = tags.photosForTag.keys.sorted().map { key in
-            ConfTagBucket(
-                key: key,
-                canonicalPath: tags.canonicalPath[key],
-                photoIDs: (tags.photosForTag[key] ?? []).map(\.id.uuidString)
-            )
-        }
+    private func tagDump() async -> ConfTagDump {
+        let (index, photos, _) = await indexes()
+        let aggregated = (tags: index.allTags, people: index.peopleTags)
+        // The core exposes one aggregated suggestion per bucket — carrying the
+        // bucket key (`id`) and its canonical spelling (`fullPath`) — and the
+        // bucket's photos through `photos(forTag:)`. Reconstructing the table
+        // from those two is the FFI equivalent of reading `photosForTag` /
+        // `canonicalPath` off the Swift index, and it is 1:1 because a bucket
+        // with no canonical spelling cannot produce a suggestion.
+        let buckets = aggregated.tags
+            .sorted { $0.id < $1.id }
+            .map { suggestion in
+                ConfTagBucket(
+                    key: suggestion.id,
+                    canonicalPath: suggestion.fullPath,
+                    photoIDs: index.photos(forTag: suggestion).map(\.id.uuidString)
+                )
+            }
         return ConfTagDump(
             schema: 1,
             notes: [
@@ -276,15 +287,15 @@ final class IndexConformanceTests: XCTestCase {
 
     // MARK: Tests
 
-    func testSearchIndexMatchesTheCommittedFixture() throws {
+    func testSearchIndexMatchesTheCommittedFixture() async throws {
         try ConformanceFixtures.assertMatches(
-            searchDump(), fixture: Self.searchFixture, in: MemoriesConformance.directory
+            await searchDump(), fixture: Self.searchFixture, in: MemoriesConformance.directory
         )
     }
 
-    func testTagIndexMatchesTheCommittedFixture() throws {
+    func testTagIndexMatchesTheCommittedFixture() async throws {
         try ConformanceFixtures.assertMatches(
-            tagDump(), fixture: Self.tagFixture, in: MemoriesConformance.directory
+            await tagDump(), fixture: Self.tagFixture, in: MemoriesConformance.directory
         )
     }
 
@@ -299,15 +310,19 @@ final class IndexConformanceTests: XCTestCase {
 
     /// Rebuilding from the same input must produce the same everything — the
     /// grid-order-stability gate from the plan, checked at the index level.
-    func testRebuildIsStable() throws {
-        XCTAssertEqual(searchDump(), searchDump())
-        XCTAssertEqual(tagDump(), tagDump())
+    func testRebuildIsStable() async throws {
+        let searchA = await searchDump()
+        let searchB = await searchDump()
+        XCTAssertEqual(searchA, searchB)
+        let tagsA = await tagDump()
+        let tagsB = await tagDump()
+        XCTAssertEqual(tagsA, tagsB)
     }
 
     /// Invariants the fixture cannot state about itself.
-    func testIndexInvariants() throws {
-        let search = searchDump()
-        let tags = tagDump()
+    func testIndexInvariants() async throws {
+        let search = await searchDump()
+        let tags = await tagDump()
         XCTAssertEqual(Set(search.photos.map(\.id)).count, search.photos.count, "duplicate photo ids")
         XCTAssertEqual(search.sortedPhotoIDs.count, search.photos.count, "sort must not drop photos")
         XCTAssertEqual(Set(search.sortedPhotoIDs), Set(search.photos.map(\.id)))

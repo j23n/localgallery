@@ -1,7 +1,13 @@
 import XCTest
 @testable import LocalGallery
 
-/// `MemoryEngine.generate` over a set of synthetic libraries, dumped as JSON.
+/// The memory engine over a set of synthetic libraries, dumped as JSON.
+///
+/// The fixture was produced from the shipping **Swift** `MemoryEngine` before
+/// the port; since Phase 4 step 4 this harness drives the **Rust core** through
+/// `CoreMemories.generate` instead, and the assertions below are unchanged. A
+/// green run therefore means the FFI path reproduces the deleted Swift engine
+/// scenario for scenario, which is the exit criterion of the phase.
 ///
 /// This is the Phase-4 spec: `_plans/05-phase-4-indexes-memories.md` §1. Every
 /// scenario records the *complete* input snapshot (`MemoryCoordinator
@@ -87,16 +93,6 @@ final class MemoryEngineConformanceTests: XCTestCase {
             id: id, givenName: given, familyName: family,
             birthday: month.map { DateComponents(month: $0, day: day) }
         )
-    }
-
-    /// `ContactLinker.index`, reproduced: lowercased full name → contact,
-    /// first write wins.
-    private func contactsByLowerName(_ contacts: [ContactInfo]) -> [String: ContactInfo] {
-        var out: [String: ContactInfo] = [:]
-        for c in contacts where out[c.fullName.lowercased()] == nil {
-            out[c.fullName.lowercased()] = c
-        }
-        return out
     }
 
     // MARK: - The trip library
@@ -372,13 +368,20 @@ final class MemoryEngineConformanceTests: XCTestCase {
     // MARK: - Runner
 
     private func run(_ spec: ScenarioSpec) async -> ConfEngineScenario {
+        // The time-zone move is still how a non-UTC scenario is driven: the
+        // bridge reads `TimeZone.current.secondsFromGMT(for: now)` and hands
+        // the core a fixed offset, so moving the process moves the engine's
+        // calendar exactly as it moved `Calendar.current` before.
+        //
+        // `contactsByLowerName` is no longer passed. The core derives it from
+        // `contacts` the way `ContactLinker.index` does, which is what the
+        // fixture's `contactsByLowerNameIsDerivedFromContacts` always asserted.
         let memories = await MemoriesConformance.withTimeZone(spec.timeZone) {
-            await MemoryEngine.generate(
-                from: spec.photos,
+            await CoreMemories.generate(CoreMemories.Inputs(
+                photos: spec.photos,
                 leafFolders: spec.leafFolders,
                 contacts: spec.contacts,
                 personContactLinks: spec.links,
-                contactsByLowerName: contactsByLowerName(spec.contacts),
                 birthdaysEnabled: spec.birthdaysEnabled,
                 mePersonPath: spec.mePersonPath,
                 hiddenPeople: spec.hiddenPeople,
@@ -386,7 +389,7 @@ final class MemoryEngineConformanceTests: XCTestCase {
                 seed: spec.seed,
                 seenMemoryIDs: spec.seen,
                 surfacedClusters: spec.surfaced
-            )
+            ))
         }
 
         let links: [ConfLink] = spec.links.keys.sorted().map { path in
@@ -485,8 +488,8 @@ final class MemoryEngineConformanceTests: XCTestCase {
             let ids = Set(scenario.inputs.photos.map(\.id))
             for memory in scenario.expected {
                 XCTAssertTrue(
-                    clusters.insert(MemoryEngine.clusterKey(for: memory.id)).inserted,
-                    "\(scenario.name): two memories from cluster \(MemoryEngine.clusterKey(for: memory.id))"
+                    clusters.insert(CoreMemories.clusterKey(for: memory.id)).inserted,
+                    "\(scenario.name): two memories from cluster \(CoreMemories.clusterKey(for: memory.id))"
                 )
                 XCTAssertLessThanOrEqual(memory.photoCount, 75, "\(scenario.name)/\(memory.id)")
                 XCTAssertEqual(memory.photoCount, memory.photoIDs.count)

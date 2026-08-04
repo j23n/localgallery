@@ -515,3 +515,75 @@ pub fn generate_cancellable(
     let candidates = finalize(&cal, candidates);
     selection::select(inputs, &cal, candidates)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gallery_model::CivilDateTime;
+
+    /// Ported from the deleted `MemoryEngineSelectionTests`. The 60-second
+    /// window is upstream of every count check in the ladder, so it decides
+    /// what `MIN_PHOTOS` means; no fixture states it directly because every
+    /// scenario is spaced to survive it.
+    fn at(offset: f64) -> AppleDate {
+        AppleDate::from_unix_secs_f64(
+            CivilDateTime::new(2023, 5, 1, 10, 0, 0).as_naive_unix_secs() as f64 + offset,
+        )
+    }
+
+    #[test]
+    fn dedup_keeps_the_first_entry_of_each_rolling_window() {
+        let entries: Vec<DatedPhoto> = [0.0, 30.0, 90.0]
+            .iter()
+            .enumerate()
+            .map(|(i, o)| (i as u32, at(*o)))
+            .collect();
+        let kept = dedup_by_time_window(&entries);
+        // The 30 s shot is inside the first's window; the 90 s one starts anew.
+        assert_eq!(kept.iter().map(|e| e.0).collect::<Vec<_>>(), vec![0, 2]);
+    }
+
+    /// The `[PhotoFile]` overload: an undated photo passes through and does
+    /// **not** reset the window — there is nothing to dedup it against
+    /// (landmine 12). Only birthdays ever calls this.
+    #[test]
+    fn undated_photos_pass_through_the_dedup_without_resetting_the_window() {
+        let mut photos: Vec<PhotoFile> = (0..4)
+            .map(|i| PhotoFile::new(&format!("/lib/{i}.jpg"), format!("{i}"), 0))
+            .collect();
+        photos[0].date_taken = Some(at(0.0));
+        photos[1].date_taken = None;
+        photos[2].date_taken = Some(at(30.0));
+        photos[3].date_taken = Some(at(120.0));
+        let kept = dedup_photos_by_time_window(&photos, &[0, 1, 2, 3]);
+        assert_eq!(kept, vec![0, 1, 3]);
+    }
+
+    /// `finalize` is the one post-processing step every surfaced memory goes
+    /// through, including the widget's pre-published days.
+    #[test]
+    fn finalize_subtitles_a_small_memory_without_touching_its_photos() {
+        let cal = LocalCalendar::new(UtcOffset::UTC);
+        let ids: Vec<StableId> = (0..5)
+            .map(|i| StableId::for_photo(&format!("/lib/{i}.jpg")))
+            .collect();
+        let out = finalize(
+            &cal,
+            vec![Memory {
+                id: "trip-2023-5-1".to_string(),
+                kind: MemoryType::Trip,
+                title: "A trip".to_string(),
+                subtitle: None,
+                photo_ids: ids.clone(),
+                cover_photo_id: ids[2],
+                date_range: None,
+                score: 20.0,
+                years_ago: None,
+                person_name: None,
+            }],
+        );
+        assert_eq!(out[0].photo_ids, ids);
+        assert_eq!(out[0].cover_photo_id, ids[2]);
+        assert_eq!(out[0].subtitle.as_deref(), Some("5 photos"));
+    }
+}

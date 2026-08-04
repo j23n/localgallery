@@ -435,6 +435,8 @@ dependencies = [
 name = "gallery-ffi"
 version = "0.1.0"
 dependencies = [
+ "gallery-index",
+ "gallery-memories",
  "gallery-meta",
  "gallery-ml",
  "gallery-model",

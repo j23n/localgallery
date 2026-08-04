@@ -18,6 +18,10 @@
 //!   implements, the snapshot IO, and the metadata read path that replaced
 //!   `MetadataReader`. Unlike the two sessions above it is request/response —
 //!   see that module's docs for why it is still an object.
+//! * Phase 4 — [`library`]: [`LibraryIndex`] (the photo table, the sorted
+//!   order, the search corpus and the tag buckets) plus the memory engine as
+//!   free functions over an inputs snapshot, with [`MemoryGenerator`] carrying
+//!   the one piece of state a generation needs — its cancel flag.
 //!
 //! The two sessions are siblings sharing one cache file: [`support`] holds the
 //! run-thread mechanics both are built on.
@@ -25,6 +29,7 @@
 uniffi::setup_scaffolding!("GalleryCore");
 
 pub mod faces;
+pub mod library;
 pub mod scanner;
 mod support;
 pub mod tagging;
@@ -32,6 +37,12 @@ pub mod tagging;
 pub use faces::{
     ClusterState, ClusterSummary, FaceError, FaceFailure, FaceLibraryStats, FaceProgressListener,
     FaceRef, FaceRunSummary, FaceSession, FaceStats, ReclusterSummary, SidecarWriteReport,
+};
+pub use library::{
+    compute_scheduled_memories, generate_memories, memory_cluster_key, memory_country_name,
+    scheduled_memory_horizon_days, LibraryIndex, LibraryIndexSummary, LibraryTagSuggestions,
+    MemoryContact, MemoryDateEntry, MemoryGenerationInputs, MemoryGenerator, MemoryKind,
+    MemoryLeafFolder, MemoryPersonLink, MemoryRecord, ScheduledMemoryRecord, TagSuggestionRecord,
 };
 pub use scanner::{
     load_snapshot, parse_xmp_bytes, probe_snapshot_version, read_image_metadata, read_video_date,

@@ -777,3 +777,37 @@ mod tests {
         assert_eq!(GridCell::at(52.52, 13.40).lat_bin, 525);
     }
 }
+
+#[cfg(test)]
+mod prefix_tests {
+    use super::*;
+    use gallery_model::HierarchicalTag;
+
+    /// Ported from the deleted `MemoryEngineTripTests`. The trip conformance
+    /// scenario exercises this through a two-country trip; these are the
+    /// single-photo and no-overlap edges it cannot reach.
+    fn tagged(path: &str, tags: &[&str]) -> PhotoFile {
+        let mut p = PhotoFile::new(path, "x".to_string(), 0);
+        p.hierarchical_tags = tags.iter().map(|t| HierarchicalTag::new(t)).collect();
+        p
+    }
+
+    #[test]
+    fn the_shared_places_prefix_is_the_deepest_one_every_tagged_photo_agrees_on() {
+        let rome = tagged("/lib/rome.jpg", &["Places/Italy/Lazio/Rome"]);
+        let milan = tagged("/lib/milan.jpg", &["Places/Italy/Lombardy/Milan"]);
+        let bern = tagged("/lib/bern.jpg", &["Places/Switzerland/Bern"]);
+        let untagged = tagged("/lib/untagged.jpg", &[]);
+
+        let photos = vec![rome, milan, bern, untagged];
+        // An untagged photo does not veto the shared prefix.
+        assert_eq!(
+            deepest_shared_places_prefix(&photos, &[0, 1, 3]),
+            vec!["Italy".to_string()]
+        );
+        // Two countries share nothing below `Places`.
+        assert!(deepest_shared_places_prefix(&photos, &[0, 2]).is_empty());
+        // Nothing tagged at all.
+        assert!(deepest_shared_places_prefix(&photos, &[3]).is_empty());
+    }
+}

@@ -164,9 +164,14 @@ the key and check the file still loads warm with `nil`.
 
 Built by `scripts/gen_conformance_assets.py` — deterministic: the 8×8 base
 images are base64 blobs in the script (no ImageMagick, no encoder drift), the
-videos are hand-assembled QuickTime containers, and every XMP packet is
-embedded byte-for-byte via `exiftool -xmp<=`, which is what lets the region
+videos and HEIFs are hand-assembled ISO-BMFF containers, and every XMP packet
+is embedded byte-for-byte via `exiftool -xmp<=`, which is what lets the region
 fixtures pin element order.
+
+The HEIFs carry **no pixels**: the metadata reader never decodes, and a real
+HEVC payload would cost more than the whole 2 MB fixture budget. Their Exif
+item is lifted out of a JPEG exiftool wrote in the same run, so one invocation
+is the source of both files' EXIF.
 
 | group | count | covers |
 |---|---|---|
@@ -175,11 +180,11 @@ fixtures pin element order.
 | `xmp/` | 7 | embedded TagsList, competing tag vocabularies, CountryCode + IPTC namespace conflict, embedded regions in both orders, everything-at-once |
 | `sidecar/` | 16 | sidecar-only, every-field conflict, region/country gap filling, ignored dates+GPS, alternate prefix, attribute-bearing open tag, empty entries, case dedup, UTF-16, rdf:Bag, truncated, garbage, `mwg-rs` with no areas |
 | `regions/` | 9 | digiKam vs exiftool ordering, name as attribute, element-form coordinates, unit variants, name beyond the look-behind window, malformed first/last, non-numeric coords, unnamed |
-| `containers/` | 6 | PNG, PNG+XMP, zero byte, truncated, wrong extension both ways |
+| `containers/` | 10 | PNG, PNG+XMP, zero byte, truncated, wrong extension both ways, and four HEIFs — XMP item, Exif item, both at once, `mif1`-major brand |
 | `names/` | 4 | spaces, parentheses, emoji, uppercase extension, multiple dots |
 | `video/` | 6 | QuickTime `©day` with UTC / non-UTC offset / no offset / absent, QuickTime-branded `.mp4`, ISO-branded `.mp4` |
 
-~85 files, ~70 KB total.
+~90 files, ~75 KB total.
 
 ## The landmines, in one place
 
@@ -312,7 +317,7 @@ conservative way — the one that refuses rather than the one that guesses.
 | GPS | a coordinate with fewer than 3 rationals | missing components read as 0 |
 | region name lookback | the 2000 "characters" on a non-ASCII packet | counted in Unicode scalars, not grapheme clusters |
 | embedded regions | a malformed packet | a packet that does not parse yields no regions at all |
-| embedded XMP | HEIF/AVIF containers | **not read** — see `gallery-meta/src/media/container.rs` |
+| embedded XMP | a HEIF item using `construction_method` 1 or 2 | **not followed** — the `idat` and item-relative forms are legal, nothing that writes this metadata emits them, and a form nothing exercises is a form nothing checks. See `gallery-meta/src/media/isobmff.rs` |
 | `localizedStandardCompare` | locale-sensitive collation | Unicode order with numeric runs and case folding; no ICU |
 | extension table | anything outside `assets/` | a curated list in `gallery-scan/src/classify.rs`, erring narrow |
 | `DownloadStatus` | `downloading` / `stale` | collapsed into `placeholder`; nothing in the app reads them. The Swift probe collapses them at the boundary too (`status != .local`), so a manifest row is now only ever `local` or `placeholder`. |

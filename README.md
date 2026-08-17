@@ -31,6 +31,8 @@ Pair it with [Syncthing](https://syncthing.net/) (via [SyncTrain](https://apps.a
 - Xcode 16.0+
 - iOS 18.0+
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen)
+- [rustup](https://rustup.rs) — the tagging/faces/scanning core is Rust
+- Python 3 — only to build the on-device model pack, once
 
 ## Build
 
@@ -38,14 +40,40 @@ Pair it with [Syncthing](https://syncthing.net/) (via [SyncTrain](https://apps.a
 # Install XcodeGen if you don't have it
 brew install xcodegen
 
-# Generate the Xcode project
-xcodegen
+./scripts/prepare_pack.sh   # stage the model pack into build/pack
+./scripts/build_core.sh     # cargo → UniFFI → build/core
+xcodegen                    # generate LocalGallery.xcodeproj
 
 # Open in Xcode
 open LocalGallery.xcodeproj
 ```
 
-Then build and run on a simulator or device (iOS 18+).
+Then build and run on a simulator (iOS 18+).
+
+### Model pack
+
+On-device tagging and face grouping run against a *model pack* — an ONNX image
+encoder, the precomputed label embeddings, and optionally two face models. The
+pack is ~157 MB, so it is not committed; `scripts/build_model_pack/` builds it
+and `scripts/prepare_pack.sh` stages the newest build into
+`build/pack/<version>`, which the app bundles. Run `prepare_pack.sh` with no
+pack built and it prints the exact command that builds one.
+
+The app ships the staged pack, so a fresh install can tag and scan faces with
+no setup. Settings → Import Model Pack… still installs a newer pack over it;
+whichever pack has the higher version wins.
+
+**Licence:** the face models in the default (full) pack are insightface's
+`buffalo_sc` — SCRFD-500M and w600k_mbf — which are **research /
+non-commercial licensed**. That is fine for a personal build; anything
+distributed must either ship the tagging-only pack
+
+```bash
+PACK_VARIANT=tagging ./scripts/prepare_pack.sh
+```
+
+or substitute face models whose licence permits it. A tagging-only pack is a
+valid pack: the app simply hides the face-scanning controls.
 
 ## Tests
 
@@ -53,7 +81,7 @@ The `LocalGallery` scheme includes the unit-test target:
 
 ```bash
 xcodebuild test -project LocalGallery.xcodeproj -scheme LocalGallery \
-  -destination "platform=iOS Simulator,name=iPhone 16"
+  -destination "platform=iOS Simulator,name=iPhone 17 Pro"
 ```
 
 Tests live in `LocalGalleryTests/Unit` with shared fixtures in

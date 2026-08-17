@@ -111,6 +111,7 @@ final class SidecarRefreshCoalescerTests: XCTestCase {
         let tagging = TaggingService(
             cacheDatabaseURL: temp.appending("gallery-cache.sqlite"),
             modelPacksDirectory: temp.appending("ModelPacks", isDirectory: true),
+            bundledPackDirectory: nil,
             refresh: shared
         )
         let faces = FaceService(

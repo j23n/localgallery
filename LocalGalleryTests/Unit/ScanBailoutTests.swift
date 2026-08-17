@@ -47,6 +47,7 @@ final class ScanBailoutTests: XCTestCase {
                 thumbnailDir: temp.appending("thumbnails", isDirectory: true),
                 mlCacheDatabaseURL: temp.appending("gallery-cache.sqlite"),
                 modelPacksDirectoryURL: temp.appending("ModelPacks", isDirectory: true),
+                bundledModelPackURL: nil,
                 bookmarkKey: "rootFolderBookmark"
             ),
             defaults: defaults,

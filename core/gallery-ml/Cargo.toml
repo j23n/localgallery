@@ -38,9 +38,10 @@ serde_json = "1"
 sha2 = "0.10"
 
 # `download-binaries` fetches pyke's prebuilt static onnxruntime (including
-# `aarch64-apple-ios-sim`) at build time; `tls-native` uses the system TLS
-# stack so the build does not drag `ring` in. `ndarray`/`tracing` are dropped:
-# we hand ORT a flat `Vec<f32>` and read a flat slice back.
+# `aarch64-apple-ios` and `aarch64-apple-ios-sim`) at build time; `tls-native`
+# uses the system TLS stack so the build does not drag `ring` in.
+# `ndarray`/`tracing` are dropped: we hand ORT a flat `Vec<f32>` and read a
+# flat slice back.
 [dependencies.ort]
 version = "=2.0.0-rc.13"
 optional = true

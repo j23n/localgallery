@@ -12,9 +12,9 @@
 # sandboxing (ENABLE_USER_SCRIPT_SANDBOXING) fights cargo's file access, and a
 # sandbox escape hatch is worse than one explicit command.
 #
-# Simulator slice only (standing decision 3 in _plans/00-rust-core-overview.md).
-# Adding the device slice later means one more `cargo build --target
-# aarch64-apple-ios` and one more `-library` pair below.
+# Builds both the device (`aarch64-apple-ios`) and simulator
+# (`aarch64-apple-ios-sim`) slices into one xcframework so Xcode can switch
+# destinations without a rebuild.
 #
 # ## ONNX Runtime
 #
@@ -39,15 +39,21 @@
 # First build needs network access for that download. `ORT_LIB_LOCATION=<dir
 # containing libonnxruntime.a>` is the offline escape hatch and is honoured
 # both by `ort-sys` and by the merge step below — which validates whatever it
-# is handed (arm64, iOS-simulator platform) rather than trusting it, since a
-# macOS archive merged in here fails hundreds of lines into an Xcode link.
+# is handed (arm64, matching iOS / iOS-simulator platform) rather than trusting
+# it, since a macOS archive merged in here fails hundreds of lines into an
+# Xcode link. When building both slices, prefer letting ort-sys pick the
+# per-target cache entry over a single ORT_LIB_LOCATION.
 
 set -euo pipefail
 
-readonly TARGET="aarch64-apple-ios-sim"
+readonly DEVICE_TARGET="aarch64-apple-ios"
+readonly SIM_TARGET="aarch64-apple-ios-sim"
 readonly LIB_NAME="libgallery_ffi.a"
 readonly DYLIB_NAME="libgallery_ffi.dylib"
 readonly MODULE="GalleryCore"
+# LC_BUILD_VERSION platform ids (otool prints the numeric form).
+readonly PLATFORM_IOS=2
+readonly PLATFORM_IOSSIMULATOR=7
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CORE_DIR="$ROOT/core"
@@ -79,41 +85,17 @@ if ! command -v cargo >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "==> cargo build ($PROFILE, $TARGET)"
 # Match the app's deployment target. The `cc` crate reads this when it builds
 # rusqlite's bundled sqlite3; without it those objects are stamped with the
 # host SDK's version and every app link emits "built for newer
 # 'iOS-simulator' version". Keep in step with `project.yml`.
 export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-18.0}"
-(cd "$CORE_DIR" && cargo build -p gallery-ffi --target "$TARGET" --profile "$CARGO_PROFILE")
 
-BUILT_DIR="$CORE_DIR/target/$TARGET/$PROFILE"
-STATIC_LIB="$BUILT_DIR/$LIB_NAME"
-DYLIB="$BUILT_DIR/$DYLIB_NAME"
-[[ -f "$STATIC_LIB" ]] || { echo "error: $STATIC_LIB missing after build" >&2; exit 1; }
-[[ -f "$DYLIB" ]] || { echo "error: $DYLIB missing after build" >&2; exit 1; }
-
-# --- merge libonnxruntime.a into the staticlib -----------------------------
-#
-# `ort-sys`'s build script records where it put (or found) the prebuilt
-# archive in its cargo output log, as `-L native=<dir>`. Reading that is more
-# robust than re-deriving pyke's cache layout, and it automatically follows
-# ORT_LIB_LOCATION when the build was run offline.
-#
-# Two traps this used to fall into, both silent:
-#
-#   * Several `ort-sys-*` build directories accumulate across feature/profile
-#     changes, and the first glob hit is not the freshest. We sort by mtime.
-#   * A hand-set ORT_LIB_LOCATION (or a stale build dir) can point at a *macOS*
-#     archive. Merging it produces an xcframework that links until the
-#     simulator refuses the slice, hundreds of lines into an Xcode build log.
-#     We check the architecture and the platform load command before merging.
-
-# `libonnxruntime.a` must be arm64 *and* built for the iOS simulator. Every
-# member carries an LC_BUILD_VERSION / LC_VERSION_MIN with the platform, so one
-# object is enough to tell an iOS-simulator archive from a macOS one.
+# `libonnxruntime.a` must be arm64 *and* built for the requested Apple
+# platform. Every member carries an LC_BUILD_VERSION / LC_VERSION_MIN with the
+# platform, so one object is enough to tell an iOS archive from a macOS one.
 validate_ort_arch() {
-    local lib="$1" archs platforms
+    local lib="$1" expected_platform="$2" expected_name="$3" archs platforms
     archs="$(lipo -info "$lib" 2>/dev/null || true)"
     case "$archs" in
         *arm64*) ;;
@@ -123,18 +105,19 @@ validate_ort_arch() {
             return 1 ;;
     esac
     # `otool -l` over the whole archive prints one load-command dump per
-    # member; PLATFORM 7 is IOSSIMULATOR, 1 is MACOS.
+    # member; PLATFORM 2 is IOS, 7 is IOSSIMULATOR, 1 is MACOS.
     platforms="$(otool -l "$lib" 2>/dev/null | awk '/platform/ { print $2 }' | sort -u)"
-    if [[ -n "$platforms" ]] && ! grep -qx '7\|IOSSIMULATOR' <<<"$platforms"; then
-        echo "error: $lib is not built for the iOS simulator" >&2
+    if [[ -n "$platforms" ]] && ! grep -qx "$expected_platform\|$expected_name" <<<"$platforms"; then
+        echo "error: $lib is not built for $expected_name" >&2
         echo "       otool reports platform(s): $(tr '\n' ' ' <<<"$platforms")" >&2
-        echo "       (7 / IOSSIMULATOR expected; 1 / MACOS means a host archive)" >&2
+        echo "       ($expected_platform / $expected_name expected; 1 / MACOS means a host archive)" >&2
         return 1
     fi
     return 0
 }
 
 find_ort_lib() {
+    local built_dir="$1"
     if [[ -n "${ORT_LIB_LOCATION:-}" && -f "$ORT_LIB_LOCATION/libonnxruntime.a" ]]; then
         echo "$ORT_LIB_LOCATION/libonnxruntime.a"
         return 0
@@ -147,42 +130,71 @@ find_ort_lib() {
         while IFS= read -r dir; do
             [[ -f "$dir/libonnxruntime.a" ]] && { echo "$dir/libonnxruntime.a"; return 0; }
         done < <(sed -n 's/^cargo:rustc-link-search=native=//p' "$log")
-    done < <(ls -t "$BUILT_DIR"/build/ort-sys-*/output 2>/dev/null)
+    done < <(ls -t "$built_dir"/build/ort-sys-*/output 2>/dev/null)
     return 1
 }
 
-ORT_LIB="$(find_ort_lib || true)"
-if [[ -z "$ORT_LIB" ]]; then
-    echo "error: could not locate libonnxruntime.a for $TARGET." >&2
-    echo "       ort-sys downloads it on the first build (needs network);" >&2
-    echo "       set ORT_LIB_LOCATION=<dir with libonnxruntime.a> to build offline." >&2
-    exit 1
-fi
-validate_ort_arch "$ORT_LIB" || {
-    echo "       (${ORT_LIB_LOCATION:+ORT_LIB_LOCATION=$ORT_LIB_LOCATION; }target is $TARGET)" >&2
-    exit 1
+# Build one Rust target and merge its ORT archive. Sets MERGED_LIB to the
+# resulting archive path. (Avoid `$(build_and_merge …)` — bash suppresses
+# `set -e` inside command substitutions, so a failed cargo would race ahead.)
+build_and_merge() {
+    local target="$1" expected_platform="$2" expected_name="$3"
+    local built_dir static_lib ort_lib
+
+    echo "==> cargo build ($PROFILE, $target)"
+    (cd "$CORE_DIR" && cargo build -p gallery-ffi --target "$target" --profile "$CARGO_PROFILE")
+
+    built_dir="$CORE_DIR/target/$target/$PROFILE"
+    static_lib="$built_dir/$LIB_NAME"
+    [[ -f "$static_lib" ]] || { echo "error: $static_lib missing after build" >&2; exit 1; }
+    [[ -f "$built_dir/$DYLIB_NAME" ]] || {
+        echo "error: $built_dir/$DYLIB_NAME missing after build" >&2
+        exit 1
+    }
+
+    ort_lib="$(find_ort_lib "$built_dir" || true)"
+    if [[ -z "$ort_lib" ]]; then
+        echo "error: could not locate libonnxruntime.a for $target." >&2
+        echo "       ort-sys downloads it on the first build (needs network);" >&2
+        echo "       set ORT_LIB_LOCATION=<dir with libonnxruntime.a> to build offline." >&2
+        exit 1
+    fi
+    validate_ort_arch "$ort_lib" "$expected_platform" "$expected_name" || {
+        echo "       (${ORT_LIB_LOCATION:+ORT_LIB_LOCATION=$ORT_LIB_LOCATION; }target is $target)" >&2
+        exit 1
+    }
+
+    echo "==> merging $(basename "$ort_lib") into $LIB_NAME ($target)"
+    echo "    $ort_lib"
+    MERGED_LIB="$built_dir/libgallery_core_merged.a"
+    rm -f "$MERGED_LIB"
+    # `libtool -static` is the only Apple tool that merges archives while keeping
+    # every member's architecture and symbol table intact; `ar` on macOS mangles
+    # duplicate member names, which ORT's archive has plenty of.
+    #
+    # stderr is *not* suppressed. Two warning families are expected from ORT's
+    # archive and only those two are filtered — hiding the whole stream also hid
+    # the ones that matter (a table-of-contents failure, an object built for the
+    # wrong architecture), which is how a bad merge could reach Xcode unnoticed.
+    libtool -static -o "$MERGED_LIB" "$static_lib" "$ort_lib" 2> >(
+        grep -Ev 'same member name|has no symbols' >&2
+    )
+    [[ -f "$MERGED_LIB" ]] || { echo "error: libtool produced no archive" >&2; exit 1; }
+    validate_ort_arch "$MERGED_LIB" "$expected_platform" "$expected_name" || exit 1
+
+    echo "core:      $(du -h "$static_lib" | cut -f1)  $static_lib"
+    echo "+onnxrt:   $(du -h "$MERGED_LIB" | cut -f1)  $MERGED_LIB"
 }
 
-echo "==> merging $(basename "$ORT_LIB") into $LIB_NAME"
-echo "    $ORT_LIB"
-MERGED_LIB="$BUILT_DIR/libgallery_core_merged.a"
-rm -f "$MERGED_LIB"
-# `libtool -static` is the only Apple tool that merges archives while keeping
-# every member's architecture and symbol table intact; `ar` on macOS mangles
-# duplicate member names, which ORT's archive has plenty of.
-#
-# stderr is *not* suppressed. Two warning families are expected from ORT's
-# archive and only those two are filtered — hiding the whole stream also hid
-# the ones that matter (a table-of-contents failure, an object built for the
-# wrong architecture), which is how a bad merge could reach Xcode unnoticed.
-libtool -static -o "$MERGED_LIB" "$STATIC_LIB" "$ORT_LIB" 2> >(
-    grep -Ev 'same member name|has no symbols' >&2
-)
-[[ -f "$MERGED_LIB" ]] || { echo "error: libtool produced no archive" >&2; exit 1; }
-validate_ort_arch "$MERGED_LIB" || exit 1
+build_and_merge "$DEVICE_TARGET" "$PLATFORM_IOS" "IOS"
+DEVICE_MERGED="$MERGED_LIB"
+build_and_merge "$SIM_TARGET" "$PLATFORM_IOSSIMULATOR" "IOSSIMULATOR"
+SIM_MERGED="$MERGED_LIB"
 
 # UniFFI reads the interface metadata straight out of the built library, so the
-# bindings can never drift from the binary they describe.
+# bindings can never drift from the binary they describe. Either slice works;
+# the simulator dylib is enough and keeps the bindgen step independent of
+# which destination the developer will run next.
 #
 # Note: *not* `--xcframework`. That flag emits `framework module GalleryCoreFFI`,
 # which only resolves inside a real .framework bundle; a library-based
@@ -192,11 +204,12 @@ validate_ort_arch "$MERGED_LIB" || exit 1
 echo "==> uniffi-bindgen (swift)"
 STAGING="$(mktemp -d)"
 trap 'rm -rf "$STAGING"' EXIT
+SIM_DYLIB="$CORE_DIR/target/$SIM_TARGET/$PROFILE/$DYLIB_NAME"
 (cd "$CORE_DIR" && cargo run --quiet -p uniffi-bindgen --bin uniffi-bindgen-swift -- \
     --swift-sources --headers --modulemap \
     --module-name "${MODULE}FFI" \
     --modulemap-filename module.modulemap \
-    "$DYLIB" "$STAGING")
+    "$SIM_DYLIB" "$STAGING")
 
 for expected in "$MODULE.swift" "${MODULE}FFI.h" "module.modulemap"; do
     [[ -f "$STAGING/$expected" ]] || {
@@ -223,15 +236,14 @@ copy_if_changed "$STAGING/module.modulemap" "$HEADERS_DIR/module.modulemap"
 
 echo "==> $MODULE.xcframework"
 # -create-xcframework refuses to overwrite, so this is a clean rebuild every
-# time. It is fast (a copy) compared to the cargo build above.
+# time. It is fast (a copy) compared to the cargo builds above.
 rm -rf "$XCFRAMEWORK"
 xcodebuild -create-xcframework \
-    -library "$MERGED_LIB" -headers "$HEADERS_DIR" \
+    -library "$DEVICE_MERGED" -headers "$HEADERS_DIR" \
+    -library "$SIM_MERGED" -headers "$HEADERS_DIR" \
     -output "$XCFRAMEWORK" >/dev/null
 
 echo
-echo "core:      $(du -h "$STATIC_LIB" | cut -f1)  $STATIC_LIB"
-echo "+onnxrt:   $(du -h "$MERGED_LIB" | cut -f1)  $MERGED_LIB"
 echo "framework: $XCFRAMEWORK"
 echo "bindings:  $GENERATED_DIR/$MODULE.swift"
 echo

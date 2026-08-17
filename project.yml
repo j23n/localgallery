@@ -11,11 +11,12 @@ settings:
     SWIFT_VERSION: "6.0"
     IPHONEOS_DEPLOYMENT_TARGET: "18.0"
     SWIFT_STRICT_CONCURRENCY: complete
-    # GalleryCore.xcframework carries an arm64 simulator slice only (standing
-    # decision 3 in _plans/00-rust-core-overview.md). Debug builds already use
-    # the active arch, but Release builds both and would fail to link. Remove
-    # this once build_core.sh lipos in an x86_64 slice — until then, building
-    # the simulator app requires an Apple Silicon Mac.
+    DEVELOPMENT_TEAM: HN22UT76EY
+    # GalleryCore.xcframework carries arm64 device + arm64 simulator slices
+    # (no x86_64 sim). Debug builds already use the active arch, but Release
+    # builds both and would fail to link an Intel sim. Remove this once
+    # build_core.sh lipos in an x86_64 slice — until then, building the
+    # simulator app requires an Apple Silicon Mac.
     EXCLUDED_ARCHS[sdk=iphonesimulator*]: x86_64
 
 schemes:
@@ -127,8 +128,7 @@ targets:
           echo "note: set CFBundleVersion=$BUILD in $PLIST"
     dependencies:
       - target: LocalGalleryWidgets
-      # Static library — linked, never embedded. Simulator slice only for now
-      # (_plans/00-rust-core-overview.md, standing decision 3).
+      # Static library — linked, never embedded. Device + simulator arm64 slices.
       - framework: build/core/GalleryCore.xcframework
         embed: false
 

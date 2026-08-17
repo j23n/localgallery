@@ -4,14 +4,15 @@ struct AllPhotosView: View {
     @Environment(GalleryStore.self) private var store
     @Environment(AppRouter.self) private var router
     @State private var seedTags: [TagSuggestion] = []
+    @State private var showSettings = false
 
     var body: some View {
         Group {
             if store.allPhotos.isEmpty {
                 if store.isScanning {
-                    ProgressView("Scanning…")
+                    chrome { ProgressView("Scanning…") }
                 } else {
-                    emptyState
+                    chrome { emptyState }
                 }
             } else if !store.hasSortedPhotos {
                 // The library is loaded but the core has not published its sort
@@ -22,7 +23,7 @@ struct AllPhotosView: View {
                 // honest state; showing the photos unsorted would be worse,
                 // because the grid would then visibly reshuffle under the
                 // user's thumb the moment the sort lands.
-                ProgressView()
+                chrome { ProgressView() }
             } else {
                 PhotoGridScreen(
                     title: "Photos",
@@ -53,5 +54,29 @@ struct AllPhotosView: View {
 
     private var emptyState: some View {
         LibraryEmptyState(icon: "photo.stack", title: "No Photos")
+    }
+
+    /// Title and gear for the states `PhotoGridScreen` does not render. The
+    /// grid carries its own, so this wraps only the placeholders — applying it
+    /// to the whole tab would stack a second title and a second gear on top of
+    /// the grid's.
+    @ViewBuilder
+    private func chrome(@ViewBuilder _ content: () -> some View) -> some View {
+        content()
+            .navigationTitle("Photos")
+            .navigationBarTitleDisplayMode(.large)
+            .toolbar {
+                // Matches Collections and Folders: the banner is always in the
+                // principal slot and returns EmptyView when no scan is
+                // running, keeping the `store.scanProgress` read scoped to
+                // ScanProgressBanner.body.
+                ToolbarItem(placement: .principal) {
+                    ScanProgressBanner()
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    SettingsToolbarButton(isPresented: $showSettings)
+                }
+            }
+            .sheet(isPresented: $showSettings) { SettingsView() }
     }
 }

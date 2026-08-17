@@ -104,8 +104,13 @@ The `LocalGallery` scheme includes the unit-test target:
 
 ```bash
 xcodebuild test -project LocalGallery.xcodeproj -scheme LocalGallery \
-  -destination "platform=iOS Simulator,name=iPhone 17 Pro"
+  -destination "platform=iOS Simulator,name=iPhone 17 Pro" \
+  -testLanguage en -testRegion US
 ```
+
+The locale flags are required: the memories conformance fixtures record the
+simulator's locale and assert `en_US`, so a Mac in another region fails two of
+them for no reason.
 
 Tests live in `LocalGalleryTests/Unit` with shared fixtures in
 `LocalGalleryTests/Support`. For an architecture overview (scan pipeline,

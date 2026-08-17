@@ -11,8 +11,13 @@ core, generate the Xcode project, test:
 ./scripts/prepare_pack.sh        # newest build/model_packs/<version> → build/pack/<version> (bundled resource)
 ./scripts/build_core.sh          # cargo → UniFFI → build/core/{GalleryCore.xcframework,Generated}
 xcodegen                         # generates LocalGallery.xcodeproj
-xcodebuild test -project LocalGallery.xcodeproj -scheme LocalGallery -destination "platform=iOS Simulator,name=iPhone 17 Pro"
+xcodebuild test -project LocalGallery.xcodeproj -scheme LocalGallery -destination "platform=iOS Simulator,name=iPhone 17 Pro" -testLanguage en -testRegion US
 ```
+
+`-testLanguage en -testRegion US` is part of the command, not a flourish: the
+memories conformance fixtures record the simulator's locale and assert
+`en_US`, so a Mac whose region is anything else fails two of them for no
+reason (`core/fixtures/memories-conformance/README.md`).
 
 `prepare_pack.sh` is cheap and idempotent: it clones (APFS `clonefile`, so no
 time and no disk) the newest pack under `build/model_packs/` into the fixed

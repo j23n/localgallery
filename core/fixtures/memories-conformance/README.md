@@ -72,9 +72,10 @@ TEST_RUNNER_CONFORMANCE_REGEN=1 xcodebuild test \
   -only-testing:LocalGalleryTests/ScheduledMemoriesConformanceTests \
   -only-testing:LocalGalleryTests/IndexConformanceTests
 
-# 3. run it again without the flag — now it must be green
+# 3. run it again without the regen flag — now it must be green
 xcodebuild test -project LocalGallery.xcodeproj -scheme LocalGallery \
-  -destination "platform=iOS Simulator,name=iPhone 17 Pro"
+  -destination "platform=iOS Simulator,name=iPhone 17 Pro" \
+  -testLanguage en -testRegion US
 
 # 4. and the Rust side
 cd core && cargo test --workspace
@@ -83,11 +84,13 @@ cd core && cargo test --workspace
 `xcodebuild` only forwards host environment variables carrying the
 `TEST_RUNNER_` prefix, which it strips — hence the odd spelling.
 
-`-testLanguage en -testRegion US` is not optional. The `environment` block
-records `Locale.current.identifier` from the simulator, and the Rust harness
-asserts it is `en_US`; without the flags a regeneration on a machine whose
-simulator sits in another region writes that region into the file and the next
-`cargo test` fails on a line nobody meant to change.
+`-testLanguage en -testRegion US` is not optional, on either run. The
+`environment` block records `Locale.current.identifier` from the simulator and
+the Rust harness asserts it is `en_US`, so a simulator sitting in another
+region fails the comparison on a line nobody meant to change — on a
+regeneration by writing that region into the file, and on a plain verification
+run by reading `en_IT` where the fixture says `en_US`. That is why the flags
+are in the documented build command too.
 
 The rules from `ConformanceFixtures` apply unchanged:
 

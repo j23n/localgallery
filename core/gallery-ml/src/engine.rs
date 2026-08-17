@@ -303,9 +303,12 @@ impl TaggingEngine {
         //
         // 1. Rows a killed process or a panicking worker left claimed.
         self.cache.reclaim_abandoned()?;
-        // 2. Rows a *previous build* refused to decode.
+        // 2. Rows a *previous build* refused to decode. Keyed on
+        //    `DECODER_VERSION`, not on `PREPROCESS_VERSION`: shipping a decoder
+        //    for a new format must give those rows another chance without
+        //    invalidating a single cached embedding.
         self.cache
-            .reopen_skipped_for_decoder(crate::preprocess::PREPROCESS_VERSION)?;
+            .reopen_skipped_for_decoder(crate::preprocess::DECODER_VERSION)?;
         // 3. Rows whose file changed in place since we tagged it.
         self.restat_done_rows()?;
 
@@ -407,7 +410,7 @@ impl TaggingEngine {
         if !extension_supported(&item.path) {
             let _ = self
                 .cache
-                .finish_skipped(&item.path, crate::preprocess::PREPROCESS_VERSION);
+                .finish_skipped(&item.path, crate::preprocess::DECODER_VERSION);
             return Outcome::Skipped;
         }
         match self.process_inner(item, tagged_at, cancel) {

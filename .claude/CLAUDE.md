@@ -67,6 +67,11 @@ Phases 0–4:
 - **gallery-meta** — XMP sidecar read/write. Preservation-first
   read-modify-write: the core replaces only what it previously wrote (tracked
   under `photo-tools:Core*` sentinel fields) and never touches human keywords.
+  Phase 6 adds `media/isobmff.rs`: a bounded ISO-BMFF box walk that finds a
+  HEIC's XMP packet (an *item* behind `meta`/`iinf`/`iloc`, not a marker
+  segment) and its declared `ispe` extent. Every number in it came off disk, so
+  every read is clamped, the walk refuses a box that cannot advance it, and
+  `iloc` construction methods other than 0 are refused rather than followed.
   Two halves with **disjoint** ownership lists so they cannot retract each
   other: `write.rs` for machine tags (`CoreTags`/`CoreSubjects`/
   `CoreHierarchical`/`CoreModelPack`), and — Phase 2 — `faces.rs` + `regions.rs`
@@ -83,7 +88,16 @@ Phases 0–4:
   vectors and runs no inference; `pack_version` still drives re-scoring via
   `mark_stale_for_pack`. Every run starts by reclaiming abandoned `hashing`
   rows, re-opening `skipped` rows a previous decoder generation refused, and
-  re-statting `done` rows so an in-place edit is re-tagged. Phase 2 adds the
+  re-statting `done` rows so an in-place edit is re-tagged. **That re-open is
+  keyed on `DECODER_VERSION`, a separate constant from `PREPROCESS_VERSION`**
+  (Phase 6): the first says which formats this build can open and invalidates
+  nothing, the second says how pixels are produced and is half the embedding
+  key. Conflating them meant shipping a HEIC decoder would re-run inference
+  over every JPEG in the library. Decoding itself goes through the
+  `preprocess::ImageDecoder` seam, a static match rather than a registry so
+  which backend sees a photo is a property of the build. Two backends today:
+  `CrateDecoder` (`image`: JPEG, PNG) and `heif::HeifDecoder` (HEIC/HEIF, at
+  `DECODER_VERSION` 2). Phase 2 adds the
   sibling `face::FaceEngine` — detect / align / embed / quality / cluster, its
   own queue and tables in the same cache file, plus `face::naming`
   (`name_cluster` / `rename_person` / `unname_cluster` / `ignore_cluster` /

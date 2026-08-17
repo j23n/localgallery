@@ -184,6 +184,12 @@ pub struct GenerationInputs {
     /// `now` for every photo" — see [`crate::time`] for why per-photo offsets
     /// exist and what an empty table costs.
     pub photo_time_zone_offsets: Vec<i32>,
+    /// `Calendar.current.timeZone.secondsFromGMT(for:)` at each horizon day's
+    /// local noon, indexed by days from today. **May be empty**, meaning "use
+    /// the offset at `now` for every day". Read by [`crate::scheduled`] alone —
+    /// see [`Zone::at_horizon_day`] for why the table is longer than the
+    /// horizon.
+    pub horizon_time_zone_offsets: Vec<i32>,
     pub leaf_folders: Vec<LeafFolder>,
     pub contacts: Vec<Contact>,
     /// `People/*` tag path → explicit link.
@@ -212,6 +218,7 @@ impl GenerationInputs {
             photos: Vec::new(),
             ladder_photo_count: 0,
             photo_time_zone_offsets: Vec::new(),
+            horizon_time_zone_offsets: Vec::new(),
             leaf_folders: Vec::new(),
             contacts: Vec::new(),
             person_contact_links: HashMap::new(),
@@ -244,11 +251,12 @@ impl GenerationInputs {
 
     /// The offsets this run works in.
     pub fn zone(&self) -> Zone {
-        if self.photo_time_zone_offsets.is_empty() {
+        let zone = if self.photo_time_zone_offsets.is_empty() {
             Zone::fixed(self.time_zone)
         } else {
             Zone::new(self.time_zone, self.photo_time_zone_offsets.clone())
-        }
+        };
+        zone.with_horizon_offsets(self.horizon_time_zone_offsets.clone())
     }
 
     pub fn calendar(&self) -> LocalCalendar {

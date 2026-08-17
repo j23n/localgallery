@@ -7,6 +7,14 @@ any of them was ported, so the Rust implementation can be checked against
 something other than opinion. Where the Swift behaviour is buggy, the bug is
 pinned — fixing it is a separate, deliberate change.
 
+One such change has since happened: `_plans/10-widget-timezone-fix.md` fixed
+the GMT-rendered memory id (landmines 2 and 3) and regenerated
+`memory_engine.json` and `scheduled_memories.json` with it. Those two files no
+longer record "what the Swift did"; the Swift engine is deleted. They record
+what the core does, and their job is now regression rather than verification —
+which is why the new expectations were hand-computed into Rust unit tests
+first and the JSON regenerated second.
+
 One copy in the repo, two readers:
 
 | reader | how |
@@ -24,7 +32,7 @@ line.
 |---|---|---|
 | `seeded_rng.json` | 8 seeds × 8 draws: FNV-1a → SplitMix64 vectors, the daily-jitter draws, the day-seed construction | `SeededRNGConformanceTests` |
 | `memory_engine.json` | 15 `MemoryEngine.generate` scenarios: inputs snapshot → selected memories | `MemoryEngineConformanceTests` |
-| `scheduled_memories.json` | 4 scenarios of the widget's 7-day pre-publish horizon + the day-N parity check | `ScheduledMemoriesConformanceTests` |
+| `scheduled_memories.json` | 7 scenarios of the widget's 7-day pre-publish horizon + the day-N parity check, across five zones | `ScheduledMemoriesConformanceTests` |
 | `search_index.json` | 16 photos: the sorted order, the corpus, 16 query → result-list cases | `IndexConformanceTests` |
 | `tag_index.json` | 15 buckets: tag → photos, canonical spellings, `TagSuggestion` aggregation | `IndexConformanceTests` |
 
@@ -58,6 +66,7 @@ xcodegen
 TEST_RUNNER_CONFORMANCE_REGEN=1 xcodebuild test \
   -project LocalGallery.xcodeproj -scheme LocalGallery \
   -destination "platform=iOS Simulator,name=iPhone 17 Pro" \
+  -testLanguage en -testRegion US \
   -only-testing:LocalGalleryTests/SeededRNGConformanceTests \
   -only-testing:LocalGalleryTests/MemoryEngineConformanceTests \
   -only-testing:LocalGalleryTests/ScheduledMemoriesConformanceTests \
@@ -73,6 +82,12 @@ cd core && cargo test --workspace
 
 `xcodebuild` only forwards host environment variables carrying the
 `TEST_RUNNER_` prefix, which it strips — hence the odd spelling.
+
+`-testLanguage en -testRegion US` is not optional. The `environment` block
+records `Locale.current.identifier` from the simulator, and the Rust harness
+asserts it is `en_US`; without the flags a regeneration on a machine whose
+simulator sits in another region writes that region into the file and the next
+`cargo test` fails on a line nobody meant to change.
 
 The rules from `ConformanceFixtures` apply unchanged:
 
@@ -129,8 +144,11 @@ In order, because each depends on the one before it:
 
 ## The landmines, in one place
 
-Everything below is **pinned as-is**. A Rust implementation that "fixes" any of
-it diverges from the shipped app.
+Everything below is **pinned as-is** unless it says otherwise. A Rust
+implementation that "fixes" one of the pinned entries diverges from the shipped
+app. Entries 2 and 3 are the exception: they were fixed on purpose, and they
+still describe the old behaviour so the diff in the fixture is explicable years
+from now.
 
 ### Time, calendars and ids
 
@@ -143,27 +161,39 @@ it diverges from the shipped app.
    *process* (`NSTimeZone.default`) to produce them. In Rust this becomes an
    explicit input, which is strictly better — but it must be threaded to every
    stage, including the ones that currently read the ambient calendar.
-2. **A memory id's date is rendered in GMT; the day it is about is local.**
-   `onThisDay-<date>` and `yearsAgo-<n>-<date>` format `day` with an
-   `ISO8601DateFormatter` whose time zone defaults to GMT. In the
-   `non-utc-timezone-asia-tokyo` scenario the engine correctly selects the
-   photos from **June 12 local** and calls the memory
-   `onThisDay-2024-06-11`.
-3. **…and that makes the widget's pre-published ids wrong in every zone ahead
-   of GMT.** `computeScheduledMemories` walks days from
-   `Calendar.current.startOfDay(for: now)` — local midnight, which in Tokyo is
-   15:00 GMT the *previous* day. `scheduled_memories.json`'s
-   `asia-tokyo-horizon` scenario records the consequence: for three of the
-   seven horizon days, `scheduledButNotGeneratedLive` is non-empty and
-   `matchedIDs` is empty — the pre-published id is one day behind the id the
-   app generates live on that day, so **the widget deep link does not
-   resolve**. Worse, day +4's pre-published `onThisDay-2024-06-11` and day
-   +3's live `onThisDay-2024-06-11` are the *same id with different photos*.
-   In UTC (and behind GMT) parity holds and the Swift test asserts it.
-   This is a real bug in the shipping app, found by writing this fixture. It is
-   pinned rather than fixed: fixing it changes which widget deep links resolve
-   and belongs in its own change, ideally as part of the port.
-   Birthday ids carry no date and are immune.
+2. **A memory id's date names the local calendar day the memory is about.**
+   *Fixed in `_plans/10-widget-timezone-fix.md`; the invariant is now that
+   `onThisDay-<date>` and `yearsAgo-<n>-<date>` carry the same y/m/d the
+   generator filtered photos by.*
+   It used to format `day` with an `ISO8601DateFormatter` whose time zone
+   defaults to GMT, so in `non-utc-timezone-asia-tokyo` the engine selected the
+   photos from **June 12 local** and called the memory `onThisDay-2024-06-11`.
+   That scenario now expects `onThisDay-2024-06-12`, and the regenerated
+   `memory_engine.json` differs from the pre-fix file in exactly those two ids.
+3. **…which is what made the widget's pre-published ids resolve.**
+   *Fixed with entry 2; the invariant is now that the id pre-published for day
+   N is the id the live run produces on day N, in **every** zone and at every
+   hour — asserted for all seven scenarios rather than for the UTC ones alone.*
+   `computeScheduledMemories` walks days from local midnight, which in Tokyo is
+   15:00 GMT the *previous* day, while the id was rendered in GMT. The
+   `asia-tokyo-horizon` scenario recorded the consequence: for three of the
+   seven horizon days `scheduledButNotGeneratedLive` was non-empty and
+   `matchedIDs` empty, so **the widget deep link did not resolve** — and worse,
+   day +4's pre-published `onThisDay-2024-06-11` and day +3's live
+   `onThisDay-2024-06-11` were the *same id with different photos*. It is now
+   the regression test for the fix, alongside three zones added because the
+   original pair could not see the other two symptoms:
+   `america-los-angeles-evening-horizon` (behind GMT the **live** id rolled
+   forward after 17:00 local, which only an evening `now` shows),
+   `europe-berlin-dst-fallback-horizon` (a horizon that straddles a transition,
+   which needs a per-day offset table) and `asia-kathmandu-horizon` (+5:45,
+   because every offset here is arithmetic in seconds).
+   Birthday ids carry no date and were immune to all of it.
+   The user-visible cost of the fix is bounded and was accepted: seen (−30) and
+   cool-down (−25) history keyed by a calendar id is orphaned once, as is a
+   hidden calendar memory, and already-published widget snapshots carry old ids
+   until the next export. Density and trip ids are built from `YearMonthDay`
+   fields and never moved.
 4. **The day seed is the local calendar day.** `WidgetDayKey.string(for:)`
    renders `Calendar.current`'s y/m/d, so the same instant seeds differently in
    different zones (`seeded_rng.json` → `daySeeds`). The force-regenerate seed

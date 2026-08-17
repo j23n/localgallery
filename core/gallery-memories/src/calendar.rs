@@ -7,7 +7,7 @@
 use gallery_model::{AppleDate, PhotoFile};
 use std::collections::HashSet;
 
-use crate::time::{LocalCalendar, Zone};
+use crate::time::Zone;
 use crate::{dedup_by_time_window, ids_of, sorted_ascending, DatedPhoto, Memory, MemoryType};
 
 /// The milestones a "years ago" memory is allowed to sit on. **Exactly**
@@ -42,8 +42,9 @@ fn same_month_day_other_years(
 ///
 /// The id is **date-qualified** (`onThisDay-2024-06-11`): a constant id would
 /// let one viewing apply the 6-month seen penalty to every future day's
-/// on-this-day memory. The date in it is rendered in **GMT** while the day it
-/// selects is local — see [`LocalCalendar::iso_day_gmt`], landmine 2.
+/// on-this-day memory. The date in it names the **local** day the memory
+/// selects — see [`crate::time::LocalCalendar::iso_day`], which used to render
+/// it in GMT (landmine 2, fixed in `_plans/10`).
 pub fn generate_on_this_day(
     zone: &Zone,
     photos: &[PhotoFile],
@@ -51,7 +52,8 @@ pub fn generate_on_this_day(
     dated: &[DatedPhoto],
     min_photos: usize,
 ) -> Option<Memory> {
-    let current_year = zone.now().year(day);
+    let cal = zone.now();
+    let current_year = cal.year(day);
     let deduped = same_month_day_other_years(zone, day, dated, |y| y != current_year);
     if deduped.len() < min_photos {
         return None;
@@ -60,7 +62,7 @@ pub fn generate_on_this_day(
     let years: HashSet<i32> = deduped.iter().map(|e| zone.at(e.0).year(e.1)).collect();
     let ids = ids_of(photos, &deduped);
     Some(Memory {
-        id: format!("onThisDay-{}", LocalCalendar::iso_day_gmt(day)),
+        id: format!("onThisDay-{}", cal.iso_day(day)),
         kind: MemoryType::OnThisDay,
         title: "On this day".to_string(),
         subtitle: None,
@@ -93,7 +95,7 @@ pub fn generate_years_ago(
         }
         let ids = ids_of(photos, &deduped);
         out.push(Memory {
-            id: format!("yearsAgo-{}-{}", milestone, LocalCalendar::iso_day_gmt(day)),
+            id: format!("yearsAgo-{}-{}", milestone, cal.iso_day(day)),
             kind: MemoryType::YearsAgo,
             title: format!("On this day in {target_year}"),
             subtitle: None,
@@ -191,6 +193,31 @@ mod tests {
         assert!(generate_on_this_day(&cal(), &photos, today, &dated, 2).is_none());
         // …and one photo is enough once the threshold is one.
         assert!(generate_on_this_day(&cal(), &photos, today, &dated, 1).is_some());
+    }
+
+    /// The Tokyo half of `_plans/10`, hand-computed: `now` is 2024-06-11T15:30Z,
+    /// which is 2024-06-12 00:30 JST, and the photos are the June-12-local
+    /// ones. The memory is about June 12 and is now named after it — the same
+    /// call used to answer `onThisDay-2024-06-11`, which is landmine 2 and what
+    /// `non-utc-timezone-asia-tokyo` pinned.
+    #[test]
+    fn an_id_names_the_local_day_in_a_zone_ahead_of_gmt() {
+        let tokyo = Zone::fixed(UtcOffset::hours(9));
+        let today = utc(2024, 6, 11, 15, 30, 0);
+        // 2019-06-11T20:00Z is 2019-06-12 05:00 JST.
+        let photos = library(&[
+            utc(2019, 6, 11, 20, 0, 0),
+            utc(2019, 6, 11, 20, 2, 0),
+            utc(2019, 6, 11, 20, 4, 0),
+        ]);
+        let dated = photos_with_dates(&photos);
+        let memory = generate_on_this_day(&tokyo, &photos, today, &dated, 3).expect("a memory");
+        assert_eq!(memory.id, "onThisDay-2024-06-12");
+        assert_eq!(memory.photo_ids.len(), 3);
+        assert_eq!(
+            generate_years_ago(&tokyo, &photos, today, &dated, 3)[0].id,
+            "yearsAgo-5-2024-06-12"
+        );
     }
 
     #[test]

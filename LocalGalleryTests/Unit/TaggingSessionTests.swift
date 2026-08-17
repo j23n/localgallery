@@ -60,7 +60,14 @@ final class TaggingSessionTests: XCTestCase {
     /// The image fixtures this suite stages. `meadow.png` is covered on the
     /// Rust side; two photos are enough to exercise batching here and keep the
     /// simulator run short.
-    private static let stagedPhotos = ["gradient.jpg", "stripes.jpg"]
+    ///
+    /// `meadow.heic` is the third for a reason the other two cannot supply:
+    /// HEVC decode is the newest thing in the pinned pixel path, and the point
+    /// of this suite is that the simulator and the host agree. A HEIC that
+    /// decoded differently on arm64-simulator would produce different scores
+    /// and — at a threshold — different tags, which is exactly what
+    /// `expected_tags.json` is here to catch.
+    private static let stagedPhotos = ["gradient.jpg", "meadow.heic", "stripes.jpg"]
 
     private func resourceDirectory(_ name: String) throws -> URL {
         let bundle = Bundle(for: TaggingSessionTests.self)

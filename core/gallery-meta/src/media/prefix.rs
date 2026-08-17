@@ -18,7 +18,8 @@
 //! | JPEG | the `SOS` marker | nothing: everything after `SOS` is entropy-coded scan data, which is where both parsers already stopped |
 //! | PNG | the first `IDAT` chunk | an `iTXt`/`eXIf` chunk placed *after* the image data is missed. The spec allows it; no writer in the ecosystem does it — libpng, exiftool and ImageMagick all emit text and EXIF chunks ahead of `IDAT` |
 //! | TIFF/DNG | [`TIFF_PREFIX_BYTES`] | tag 700 (XMP) or an EXIF IFD stored past 8 MB into a large RAW is missed. Both are written near the front by every camera and by Adobe's converter |
-//! | HEIF, WebP, AVIF, unrecognised | [`DEFAULT_PREFIX_BYTES`] | nothing for a real photo — 16 MB reads an entire HEIC several times over. It exists so a 4 GB file named `.heic` cannot ask for 4 GB |
+//! | HEIF/AVIF | the far end of the `meta` box and of the items it locates | nothing: `iloc` states exactly where the XMP and Exif items end, so the read stops there instead of at [`DEFAULT_PREFIX_BYTES`]. A file whose items lie past that cap falls back to it and is read exactly as before |
+//! | WebP, unrecognised | [`DEFAULT_PREFIX_BYTES`] | nothing for a real photo — 16 MB reads an entire HEIC several times over. It exists so a 4 GB file named `.heic` cannot ask for 4 GB |
 //!
 //! Every one of those is a *narrowing*: the reader can now miss metadata it
 //! would previously have found, and can never find metadata it would previously
@@ -28,6 +29,8 @@
 use std::io::Read;
 
 use gallery_vfs::Vfs;
+
+use super::isobmff;
 
 /// First read. Sized so almost every file needs exactly one: a JPEG's `APP1`
 /// segments sit at the front and the format caps one at 64 KB, and a PNG's
@@ -131,13 +134,37 @@ fn metadata_end(bytes: &[u8]) -> Option<usize> {
     match bytes {
         [0xFF, 0xD8, ..] => jpeg_end(bytes),
         [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, ..] => png_end(bytes),
-        // TIFF and everything unrecognised have no cheap structural boundary;
-        // their cap *is* the boundary, reached by reading up to it.
-        _ => {
+        _ => heif_end(bytes).or_else(|| {
+            // TIFF, a HEIF whose `meta` is not in hand yet, and everything
+            // unrecognised have no cheap structural boundary; their cap *is*
+            // the boundary, reached by reading up to it.
             let cap = cap_for(bytes);
             (bytes.len() >= cap).then_some(cap)
-        }
+        }),
     }
+}
+
+/// Where a HEIF's metadata region ends: past the `meta` box, and past the far
+/// end of every item it locates.
+///
+/// `None` for anything that is not a HEIF, and for one whose `meta` box or
+/// located items are not all in the buffer yet — which is the read loop's
+/// signal to fetch more, bounded by [`cap_for`] exactly as before. So this can
+/// only ever *shorten* a HEIF read, never lengthen one.
+fn heif_end(bytes: &[u8]) -> Option<usize> {
+    if !isobmff::is_heif(bytes) {
+        return None;
+    }
+    let isobmff::MetaBox::Found { end, body } = isobmff::find_meta(bytes) else {
+        return None;
+    };
+    let items = isobmff::meta_items(body);
+    let mut needed = end;
+    for extent in items.xmp.iter().chain(&items.exif) {
+        let far = extent.offset.saturating_add(extent.length);
+        needed = needed.max(usize::try_from(far).unwrap_or(usize::MAX));
+    }
+    (needed <= bytes.len()).then_some(needed)
 }
 
 /// Offset just past the `SOS` marker, where JPEG scan data begins.
@@ -366,6 +393,63 @@ pub(crate) mod tests {
             DEFAULT_PREFIX_BYTES
         );
         assert_eq!(vfs.bytes_read(), DEFAULT_PREFIX_BYTES as u64);
+    }
+
+    /// `iloc` says where the items end, so a HEIC costs the front of the file
+    /// rather than the 16 MB cap an unwalkable container gets.
+    #[test]
+    fn a_heifs_prefix_stops_where_iloc_says_its_items_do() {
+        use super::super::isobmff::tests::{heif, xmp_item};
+
+        let vfs = CountingVfs::new();
+        let packet = br#"<digiKam:TagsList><rdf:Seq><rdf:li>Scenes/Beach</rdf:li></rdf:Seq></digiKam:TagsList>"#;
+        let mut file = heif(b"heic", &[xmp_item(packet)], 0);
+        // Pixel data after the items, which no metadata read needs.
+        file.extend_from_slice(&vec![0x5A; 8 << 20]);
+        vfs.insert("/lib/photo.heic", file);
+
+        let prefix = read_metadata_prefix(&vfs, "/lib/photo.heic");
+        assert!(prefix.len() < 1024, "prefix was {} bytes", prefix.len());
+        assert_eq!(
+            vfs.bytes_read(),
+            FIRST_CHUNK as u64,
+            "one chunk, off an 8 MB file"
+        );
+        assert_eq!(
+            super::super::extract_xmp(&prefix).as_deref(),
+            Some(&packet[..]),
+            "the packet has to survive the truncation"
+        );
+    }
+
+    /// An item beyond the first chunk is still reached — the loop reads on
+    /// until `iloc`'s far end is in hand, and no further.
+    #[test]
+    fn a_heif_whose_items_sit_past_the_first_chunk_is_read_to_them_and_no_more() {
+        use super::super::isobmff::tests::{heif, xmp_item};
+
+        let vfs = CountingVfs::new();
+        let packet = b"<x:xmpmeta><digiKam:TagsList/></x:xmpmeta>";
+        let padding = 1 << 20;
+        let mut file = heif(b"heic", &[xmp_item(packet)], padding);
+        file.extend_from_slice(&vec![0x5A; 8 << 20]);
+        vfs.insert("/lib/far.heic", file);
+
+        let prefix = read_metadata_prefix(&vfs, "/lib/far.heic");
+        assert!(
+            prefix.len() > padding && prefix.len() < padding + 4096,
+            "prefix was {} bytes for a packet {padding} bytes in",
+            prefix.len()
+        );
+        assert_eq!(
+            super::super::extract_xmp(&prefix).as_deref(),
+            Some(&packet[..])
+        );
+        assert!(
+            vfs.bytes_read() < (DEFAULT_PREFIX_BYTES as u64),
+            "read {} bytes, which is the unwalkable-container cap",
+            vfs.bytes_read()
+        );
     }
 
     #[test]

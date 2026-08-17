@@ -13,6 +13,7 @@
 pub mod container;
 pub mod embedded;
 pub mod exif_read;
+pub mod isobmff;
 pub mod prefix;
 pub mod swift_xmp;
 pub mod video;

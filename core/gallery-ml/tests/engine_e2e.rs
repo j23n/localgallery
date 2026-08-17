@@ -154,6 +154,39 @@ fn a_run_writes_the_expected_tags_into_real_sidecars() {
     assert_eq!(f.all_tags(), expected_tags_for(PHOTOS));
 }
 
+/// A HEIC is tagged on the same terms as a JPEG — Phase 6's exit criterion.
+///
+/// The two assertions are different claims. The first is the cross-target
+/// contract: `expected_tags.json` is read by the simulator suite too, so the
+/// host and an arm64 simulator have to agree on what a HEIC produces, not
+/// merely on the fact that it decoded. The second is that the decode landed on
+/// the *right picture* — `meadow.heic` is `meadow.png` re-encoded, and if the
+/// HEVC path had a wrong colour matrix or a mis-assembled plane the two would
+/// score differently and the tag sets would drift apart.
+#[test]
+fn a_heic_is_tagged_the_same_as_the_png_it_was_made_from() {
+    let f = Fixture::with_files(&["meadow.heic", "meadow.png"]);
+    f.enqueue_all(&["meadow.heic", "meadow.png"]);
+    let summary = f.run();
+
+    assert_eq!(summary.processed, 2);
+    assert_eq!(
+        summary.skipped, 0,
+        "the HEIC was refused as an unknown format"
+    );
+    assert_eq!(summary.failed, 0);
+    assert_eq!(
+        f.tags("meadow.heic"),
+        expected_tags()["meadow.heic"],
+        "the HEIC's tags moved"
+    );
+    assert_eq!(
+        f.tags("meadow.heic"),
+        f.tags("meadow.png"),
+        "one picture, two containers, two different tag sets"
+    );
+}
+
 #[test]
 fn sidecars_land_next_to_the_photo_with_the_suffix_preserved() {
     let f = Fixture::new();
@@ -1375,6 +1408,99 @@ fn skipped_rows_are_re_opened_when_the_decoder_generation_moves() {
     assert_eq!(summary.processed, 1, "the skipped row was never re-opened");
     assert_eq!(summary.skipped, 0);
     assert_eq!(f.tags("gradient.jpg"), expected_tags()["gradient.jpg"]);
+}
+
+/// A row skipped by *this* build stays skipped — the re-open is keyed on the
+/// generation, not on the state.
+#[test]
+fn a_row_skipped_by_this_build_is_not_re_opened_every_run() {
+    let f = Fixture::with_files(&["gradient.jpg"]);
+    let path = f.path("gradient.jpg");
+    f.enqueue_all(&["gradient.jpg"]);
+
+    let staged = CacheDb::open(f.dir.path().join("gallery-cache.sqlite")).unwrap();
+    assert!(staged.begin(&path).unwrap());
+    assert!(staged
+        .finish_skipped(&path, gallery_ml::DECODER_VERSION)
+        .unwrap());
+
+    let summary = f.run();
+    assert_eq!(summary.processed, 0, "nothing should have been claimable");
+    assert_eq!(
+        staged.item(&path).unwrap().unwrap().state,
+        WorkState::Skipped
+    );
+}
+
+/// The finding that shapes Phase 6: **the decoder generation and the preprocess
+/// version are two dials, and only one of them costs inference.**
+///
+/// `reopen_skipped_for_decoder` used to be handed `PREPROCESS_VERSION`, so the
+/// only way to give a previously-unsupported format another chance was to bump
+/// the constant that is also half the embedding-cache key — re-running the
+/// encoder over every JPEG in the library to pick up some HEICs, on a change
+/// that alters nothing about how a JPEG is decoded.
+///
+/// There is no source-level assertion available for "these are two different
+/// constants" (they are equal at 1 today, which is exactly why conflating them
+/// was easy). So this pins the property that matters instead: moving the
+/// decoder dial re-opens the skipped rows and leaves every cached embedding
+/// exactly where it was.
+#[test]
+fn moving_the_decoder_generation_re_opens_skipped_rows_without_touching_embeddings() {
+    let f = Fixture::with_files(&["gradient.jpg", "stripes.jpg"]);
+    f.enqueue_all(&["gradient.jpg", "stripes.jpg"]);
+
+    // One photo tagged for real, so there is a cached embedding to protect…
+    let scored = f.path("gradient.jpg");
+    // …and one staged as a format this build refused.
+    let refused = f.path("stripes.jpg");
+
+    let cache = CacheDb::open(f.dir.path().join("gallery-cache.sqlite")).unwrap();
+    assert!(cache.begin(&refused).unwrap());
+    assert!(cache
+        .finish_skipped(&refused, gallery_ml::DECODER_VERSION)
+        .unwrap());
+    assert_eq!(
+        f.run().processed,
+        1,
+        "only the un-skipped row was claimable"
+    );
+
+    let pack = ModelPack::load(test_pack_dir()).unwrap();
+    let key = pack.embedding_model_key();
+    let hash = gallery_ml::hash::content_hash(&StdVfs, &scored, &|| false)
+        .unwrap()
+        .expect("the tagged photo hashed");
+    let before = cache
+        .embedding(&hash, &key)
+        .unwrap()
+        .expect("the tagged photo cached an embedding");
+
+    // The next build ships a decoder for the refused format.
+    assert_eq!(
+        cache
+            .reopen_skipped_for_decoder(gallery_ml::DECODER_VERSION + 1)
+            .unwrap(),
+        1,
+        "the skipped row must come back"
+    );
+    assert_eq!(
+        cache.item(&refused).unwrap().unwrap().state,
+        WorkState::Pending
+    );
+
+    // …and the embedding key, which is the preprocess dial, has not moved.
+    assert_eq!(pack.embedding_model_key(), key);
+    assert_eq!(
+        cache.embedding(&hash, &key).unwrap().as_ref(),
+        Some(&before),
+        "a decoder bump must not cost one inference"
+    );
+    assert!(
+        key.ends_with(&format!("#p{}", gallery_ml::PREPROCESS_VERSION)),
+        "the embedding key is keyed on the preprocess version, not the decoder one: {key}"
+    );
 }
 
 /// R8: `begin`/`finish_*` were unconditional UPDATEs, so a "Reset Tagging Data"

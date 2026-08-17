@@ -17,6 +17,7 @@ Pair it with [Syncthing](https://syncthing.net/) (via [SyncTrain](https://apps.a
 - **People** — face-cropped person rail from MWG XMP regions, with optional address-book linking for birthday memories
 - **Home-screen widgets** — rotating photo, folder, tag, and memories widgets with deep links
 - **Video and Live Photos** — inline playback for videos and Live Photo motion
+- **HEIC** — iPhone's default photo format is read like any other: embedded XMP tags, on-device tagging, and face detection, decoded on a pure-Rust HEVC path rather than the platform decoder so two devices agree on the result
 - **Cloud folders** — file-provider folders (iCloud Drive, etc.) work via on-demand download, with `.xmp` sidecar caching for evicted files
 - **EXIF metadata** — camera, lens, exposure, GPS, and dimensions in a slide-up panel
 - **Hierarchical tags** — reads `digiKam:TagsList`-style XMP keywords with slash-separated paths (e.g. `Places/Japan/Tokyo`, `People/Anna`); see the [photo-tools schema](https://github.com/j23n/photo-tools/blob/main/docs/xmp-schema.md)
@@ -40,9 +41,15 @@ Pair it with [Syncthing](https://syncthing.net/) (via [SyncTrain](https://apps.a
 # Install XcodeGen if you don't have it
 brew install xcodegen
 
-./scripts/prepare_pack.sh   # stage the model pack into build/pack
-./scripts/build_core.sh     # cargo → UniFFI → build/core
-xcodegen                    # generate LocalGallery.xcodeproj
+# Stage the model pack into build/pack, which the app bundles
+./scripts/prepare_pack.sh
+
+# Build the Rust core (must run before xcodegen, and again after any change
+# under core/). Needs network access the first time — see below.
+./scripts/build_core.sh
+
+# Generate the Xcode project
+xcodegen
 
 # Open in Xcode
 open LocalGallery.xcodeproj
@@ -74,6 +81,22 @@ PACK_VARIANT=tagging ./scripts/prepare_pack.sh
 
 or substitute face models whose licence permits it. A tagging-only pack is a
 valid pack: the app simply hides the face-scanning controls.
+
+The first `build_core.sh` on a machine downloads a prebuilt static ONNX Runtime
+(~85 MB) into `~/Library/Caches/ort.pyke.io/`; offline builds work with
+`ORT_LIB_LOCATION` pointing at a directory containing `libonnxruntime.a`.
+Nothing else in the core needs a toolchain beyond `cargo` — image decoding,
+HEIC included, is pure Rust.
+
+### Third-party licences
+
+The app is MPL 2.0. Its dependencies are permissive and statically linked:
+ONNX Runtime (MIT), and for HEIC, `heif-oxide` + `rust_h265` (MIT OR
+Apache-2.0). No copyleft library is linked in — HEIC decoding deliberately
+does **not** use libheif/libde265, which are LGPL-3.0 and whose static linking
+obliges a distributor to let a user relink against a modified library. Swapping
+the decoder back to them would re-introduce that obligation; the seam that
+would make such a swap possible is `gallery_ml::preprocess::ImageDecoder`.
 
 ## Tests
 

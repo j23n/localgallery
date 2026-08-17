@@ -182,6 +182,22 @@ final class MetadataConformanceTests: XCTestCase {
             "JPEG bytes with a .txt extension. `UTType(filenameExtension: \"txt\")` conforms to neither .image nor .movie, so the scanner never sees this file.",
             "The metadata reader would happily read it — this entry pins the reader, not the scanner.",
         ],
+        "containers/heif_xmp.heic": [
+            "HEIC whose XMP packet is an ITEM in the ISO-BMFF `meta` box, located through `iinf`/`iloc` — not a marker segment like JPEG's APP1 or PNG's iTXt.",
+            "Before Phase 6 this file read as untagged: the container walk did not exist and `extract_xmp` fell through to None.",
+            "The fixture carries no pixels. The metadata reader never decodes, and a real HEVC payload would cost more than the whole 2 MB fixture budget.",
+        ],
+        "containers/heif_exif.heic": [
+            "HEIC with an Exif item and no XMP. This already worked before Phase 6 — kamadak-exif locates the Exif item itself — and the entry exists so that stays true.",
+        ],
+        "containers/heif_both.heic": [
+            "Exif item first in `mdat`, XMP item second. Only `iloc` says where each starts, so a reader that assumed the packet was at the front of `mdat` would hand the TIFF block to the XMP parser.",
+            "Both halves of a HEIC read at once: the date comes from kamadak-exif's own item walk, the tags and country from the core's.",
+        ],
+        "containers/heif_mif1_brand.heic": [
+            "Identical content to heif_xmp.heic, written with `mif1` as the MAJOR brand and `heic` only in the compatible list — how libheif and several Android encoders write the same file.",
+            "The brand check consults both, so which one an encoder picks is not something the reader depends on.",
+        ],
 
         // --- Filenames ------------------------------------------------------
         "names/spaces and (parens).jpg": ["Spaces and parentheses in the name; sidecar lookup is `url.appendingPathExtension(\"xmp\")`, i.e. it operates on path components, not on a re-parsed string."],

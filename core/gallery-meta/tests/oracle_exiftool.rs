@@ -599,3 +599,79 @@ fn exiftool_can_still_write_to_a_sidecar_we_produced() {
     assert!(as_list(map.get("XMP-digiKam:TagsList")).contains(&"People/Alice".to_string()));
     assert!(map.contains_key("XMP-mwg-rs:RegionInfo"));
 }
+
+// ---------------------------------------------------------------------------
+// The read side: the ISO-BMFF item walk
+// ---------------------------------------------------------------------------
+
+/// The HEIF container walk, judged by something other than itself.
+///
+/// `media/isobmff.rs` finds the XMP packet by following `iinf`/`iloc` — a
+/// hand-rolled walk over numbers that came off disk, with no second
+/// implementation in the tree to disagree with it. exiftool is that second
+/// implementation: it reads the same fixtures its own way, and if the two
+/// disagree about what is in them, the walk is wrong.
+#[test]
+#[ignore = "shells out to exiftool"]
+fn exiftool_finds_the_same_items_in_a_heic_that_the_container_walk_does() {
+    if !have_exiftool() {
+        eprintln!("exiftool not installed; skipping");
+        return;
+    }
+    let containers: std::path::PathBuf = [
+        env!("CARGO_MANIFEST_DIR"),
+        "..",
+        "fixtures",
+        "scan-conformance",
+        "assets",
+        "containers",
+    ]
+    .iter()
+    .collect();
+
+    let vfs = gallery_vfs::StdVfs::new();
+    for (name, has_packet) in [
+        ("heif_xmp.heic", true),
+        ("heif_both.heic", true),
+        ("heif_mif1_brand.heic", true),
+        ("heif_exif.heic", false),
+    ] {
+        let path = containers.join(name);
+        let map = exiftool_json(&path);
+        let got = gallery_meta::media::read_image_metadata(&vfs, path.to_str().unwrap());
+
+        assert_eq!(
+            as_list(by_tag(&map, "TagsList")),
+            got.hierarchical_tags
+                .iter()
+                .map(|t| t.full_path.clone())
+                .collect::<Vec<_>>(),
+            "{name}: tags"
+        );
+        // The reader uppercases the country code; exiftool reports the
+        // packet's own case, which these fixtures write lowercase.
+        assert_eq!(
+            by_tag(&map, "CountryCode").and_then(Value::as_str),
+            got.country_code
+                .as_deref()
+                .map(str::to_ascii_lowercase)
+                .as_deref(),
+            "{name}: country"
+        );
+        // The date comes from the Exif item, which `kamadak-exif` locates for
+        // itself — so agreement here says the two walks landed on the same
+        // `iloc` entry, not just that one of them worked.
+        assert_eq!(
+            by_tag(&map, "DateTimeOriginal")
+                .and_then(Value::as_str)
+                .is_some(),
+            got.capture_wall_clock.is_some(),
+            "{name}: date"
+        );
+        assert_eq!(
+            gallery_meta::media::extract_xmp(&std::fs::read(&path).unwrap()).is_some(),
+            has_packet,
+            "{name}: packet presence"
+        );
+    }
+}

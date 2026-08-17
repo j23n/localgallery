@@ -14,7 +14,8 @@
     "fixtures land on THESE sets and not on 'everything' or 'nothing', which",
     "are the two ways a threshold test passes without testing anything.",
     "Regenerate the pack with tests/make_test_pack.py; update this file with",
-    "cargo test -p gallery-ml --test engine_e2e -- --ignored --nocapture."
+    "cargo test -p gallery-ml --test engine_e2e -- --ignored --nocapture.",
+    "meadow.heic is meadow.png re-encoded as HEIC (tests/make_heic_fixtures.sh). Identical lists are the point: one picture in two containers must score the same, which is a far stronger claim about the HEVC path than 'it decoded'."
   ],
   "tags": {
     "gradient.jpg": [
@@ -22,13 +23,18 @@
       "Objects/Vehicle/Car",
       "Scenes/Nature/Forest"
     ],
-    "stripes.jpg": [
-      "Scenes/Urban/Street"
+    "meadow.heic": [
+      "Objects/Animal/Dog",
+      "Objects/Vehicle/Car",
+      "Scenes/Nature/Forest"
     ],
     "meadow.png": [
       "Objects/Animal/Dog",
       "Objects/Vehicle/Car",
       "Scenes/Nature/Forest"
+    ],
+    "stripes.jpg": [
+      "Scenes/Urban/Street"
     ]
   }
 }

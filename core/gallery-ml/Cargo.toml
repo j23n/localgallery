@@ -30,6 +30,10 @@ image = { version = "=0.25.10", default-features = false, features = [
 ] }
 fast_image_resize = "=6.1.0"
 kamadak-exif = "=0.6.1"
+# HEIC: the ISO-BMFF container over a pure-Rust HEVC decoder. No C, no build
+# script, no licence constraint — see `src/heif.rs` for why this replaced the
+# libheif/libde265 vendoring `_plans/08` recommended.
+heif-oxide = "=0.1.0"
 
 # --- everything else ------------------------------------------------------
 rusqlite = { version = "0.40", features = ["bundled"] }

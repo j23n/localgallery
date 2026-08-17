@@ -186,6 +186,90 @@ def make_movie(day_text: str | None, brand: bytes = b"qt  ") -> bytes:
 
 
 # --------------------------------------------------------------------------
+# HEIF builder
+# --------------------------------------------------------------------------
+#
+# Hand-assembled for the same reason `make_movie` is: an encoder in the loop
+# would make the fixture a function of whatever libheif the generating machine
+# had. These carry no pixels at all — the metadata reader never decodes, and a
+# real HEVC payload would cost far more than the 2 MB fixture budget allows.
+# The mirror of this builder lives in `gallery-meta/src/media/isobmff.rs`'s
+# tests; both write `iloc` version 1 with 32-bit offsets, construction method 0.
+
+XMP_MIME = b"application/rdf+xml"
+
+
+def _infe(item_id: int, item_type: bytes, content_type: bytes | None) -> bytes:
+    body = struct.pack(">HH", item_id, 0) + item_type + b"\x00"
+    if content_type is not None:
+        body += content_type + b"\x00"
+    return _full(b"infe", 2, 0, body)
+
+
+def _iloc(entries: list[tuple[int, int, int]]) -> bytes:
+    # offset_size 4, length_size 4, base_offset_size 0, index_size 0.
+    body = b"\x44\x00" + struct.pack(">H", len(entries))
+    for item_id, offset, length in entries:
+        body += struct.pack(">HHHH", item_id, 0, 0, 1)  # id, method 0, dref 0, 1 extent
+        body += struct.pack(">II", offset, length)
+    return _full(b"iloc", 1, 0, body)
+
+
+def make_heic(items: list[tuple[bytes, bytes | None, bytes]], brand: bytes = b"heic") -> bytes:
+    """`ftyp` + `meta` + `mdat`, with every item at the offset `iloc` records.
+
+    `items` is (item_type, content_type, payload). Assembled twice because the
+    `iloc` offsets have to name an `mdat` that sits after the `iloc` itself;
+    every field is fixed-width, so the second pass is byte-identical in size.
+    """
+    ftyp = _box(b"ftyp", brand + struct.pack(">I", 0) + brand + b"mif1")
+    hdlr = _full(b"hdlr", 0, 0, b"\x00" * 4 + b"pict" + b"\x00" * 12 + b"\x00")
+
+    def meta_for(mdat_start: int) -> bytes:
+        infes = b""
+        entries: list[tuple[int, int, int]] = []
+        at = mdat_start + 8  # past the `mdat` header
+        for n, (item_type, content_type, payload) in enumerate(items):
+            infes += _infe(n + 1, item_type, content_type)
+            entries.append((n + 1, at, len(payload)))
+            at += len(payload)
+        iinf = _full(b"iinf", 0, 0, struct.pack(">H", len(items)) + infes)
+        return _full(b"meta", 0, 0, hdlr + iinf + _iloc(entries))
+
+    meta = meta_for(len(ftyp) + len(meta_for(0)))
+    mdat = _box(b"mdat", b"".join(payload for _t, _c, payload in items))
+    return ftyp + meta + mdat
+
+
+def exif_item_payload(jpeg_path: str) -> bytes:
+    """The Exif item body for a HEIF, taken from a JPEG exiftool just wrote.
+
+    A HEIF Exif item is a four-byte offset to the TIFF header followed by the
+    TIFF block — the same block a JPEG carries in its `APP1` after `Exif\\0\\0`.
+    Lifting it keeps one exiftool invocation as the source of both files'
+    EXIF and avoids hand-rolling an IFD writer.
+    """
+    with open(jpeg_path, "rb") as f:
+        data = f.read()
+    i = 2
+    while i + 4 <= len(data):
+        if data[i] != 0xFF:
+            break
+        marker = data[i + 1]
+        if marker in (0xD8, 0xD9, 0x01) or 0xD0 <= marker <= 0xD7:
+            i += 2
+            continue
+        if marker == 0xDA:
+            break
+        length = struct.unpack(">H", data[i + 2:i + 4])[0]
+        payload = data[i + 4:i + 2 + length]
+        if marker == 0xE1 and payload.startswith(b"Exif\x00\x00"):
+            return struct.pack(">I", 0) + payload[6:]
+        i += 2 + length
+    sys.exit(f"no Exif APP1 in {jpeg_path}")
+
+
+# --------------------------------------------------------------------------
 # writers
 # --------------------------------------------------------------------------
 
@@ -542,6 +626,31 @@ def build() -> None:
     run(["exiftool", "-overwrite_original", f"-xmp<={blob}",
          os.path.join(OUT, "containers", "png_with_xmp.png")])
     os.remove(blob)
+
+    # HEIF: the XMP packet is an *item* in a `meta` box, not a marker segment.
+    # One with a packet, one with Exif only, and one where both are present and
+    # the XMP item sits behind a kilobyte of `mdat` the reader must step over.
+    heic_xmp = packet(tags_list(["Places/Japan/Kyoto"])
+                      + "   <photo-tools:CountryCode>jp</photo-tools:CountryCode>\n"
+                      ).encode("utf-8")
+    write("containers/heif_xmp.heic", make_heic([(b"mime", XMP_MIME, heic_xmp)]))
+
+    jpg("containers/heif_exif.donor.tmp.jpg", ["-EXIF:DateTimeOriginal=2022:09:18 11:22:33"])
+    donor = os.path.join(OUT, "containers", "heif_exif.donor.tmp.jpg")
+    exif_payload = exif_item_payload(donor)
+    os.remove(donor)
+    write("containers/heif_exif.heic", make_heic([(b"Exif", None, exif_payload)]))
+    # Exif first, XMP second: `iloc` is what says where each one starts, and a
+    # reader that assumed the packet was at the front of `mdat` would read the
+    # TIFF block instead.
+    write("containers/heif_both.heic", make_heic([
+        (b"Exif", None, exif_payload),
+        (b"mime", XMP_MIME, heic_xmp),
+    ]))
+    # `mif1` major brand with `heic` only in the compatible list — how libheif
+    # and some Android encoders write the same file.
+    write("containers/heif_mif1_brand.heic",
+          make_heic([(b"mime", XMP_MIME, heic_xmp)], brand=b"mif1"))
 
     write("containers/zero_byte.jpg", b"")
     write("containers/truncated.jpg", BASE_JPG[:40])

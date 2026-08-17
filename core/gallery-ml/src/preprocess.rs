@@ -52,7 +52,42 @@ use crate::error::{ErrorCode, MlError, MlResult};
 /// Stored alongside cached embeddings so a preprocessing change invalidates
 /// them: the embedding cache is keyed by content hash, and the content hash
 /// says nothing about how we turned those bytes into a tensor.
+///
+/// **Not** [`DECODER_VERSION`]; see there for why they are two constants.
 pub const PREPROCESS_VERSION: u32 = 1;
+
+/// Bumped whenever the *set of formats this crate can open* changes.
+///
+/// A photo the engine cannot decode is recorded `skipped` and stamped with the
+/// generation that refused it; the next run re-opens every `skipped` row whose
+/// stamp is not the current one. So this is the only thing that makes a
+/// previously-refused file get another chance, and it is the number to move
+/// when a new decoder ships.
+///
+/// # Why this is not [`PREPROCESS_VERSION`]
+///
+/// It used to be, and that was a trap. `PREPROCESS_VERSION` is half the
+/// embedding-cache key (the other half is the encoder's SHA-256), so bumping it
+/// to give skipped HEICs another chance would also have invalidated every
+/// cached embedding in the library and re-run inference over every JPEG that
+/// was already scored — hours of CPU, for a change that alters nothing about
+/// how a JPEG is decoded or resized.
+///
+/// The two are equal at 1 today, which is exactly why conflating them was easy.
+/// They answer different questions and they move for different reasons:
+///
+/// | constant | moves when | invalidates |
+/// |---|---|---|
+/// | [`PREPROCESS_VERSION`] | the pixel pipeline changes — resize kernel, normalisation, orientation | every cached embedding and face result |
+/// | `DECODER_VERSION` | the openable format set changes | nothing; it only re-opens rows that produced no result at all |
+///
+/// # History
+///
+/// | value | change |
+/// |---|---|
+/// | 1 | JPEG and PNG |
+/// | 2 | HEIC/HEIF ([`crate::heif`]). Every `.heic` a previous build recorded `skipped` re-opens on the next run; nothing that was scored is re-scored |
+pub const DECODER_VERSION: u32 = 2;
 
 /// A decoded image is refused past this many pixels.
 ///
@@ -60,7 +95,7 @@ pub const PREPROCESS_VERSION: u32 = 1;
 /// phone produces, and well below the point where a malformed header can talk
 /// us into a multi-gigabyte allocation. Four workers each holding a 120 MP RGB
 /// buffer is already 1.4 GB, which is why this is not larger.
-const MAX_PIXELS: u64 = 120_000_000;
+pub(crate) const MAX_PIXELS: u64 = 120_000_000;
 
 /// The *resize destination* is refused past this many pixels.
 ///
@@ -76,27 +111,105 @@ const MAX_PIXELS: u64 = 120_000_000;
 /// input, which no photograph reaches and no panorama needs.
 const MAX_RESIZE_PIXELS: u64 = 16_000_000;
 
-/// The image formats v1 decodes.
+/// The image formats this crate knows how to name.
 ///
-/// HEIC is the conspicuous gap: iPhones shoot it by default. It needs
-/// libheif/libde265 (C, LGPL, non-trivial to cross-compile) or a pure-Rust
-/// decoder that does not exist at production quality yet, and the determinism
-/// doctrine forbids reaching for `CGImageSource`. Until then HEIC photos are
-/// recorded as [`ErrorCode::UnsupportedFormat`] and skipped.
+/// Naming a format and being able to decode it are separate: [`decoder_for`]
+/// answers the second question, and a kind with no decoder behind it is an
+/// [`ErrorCode::UnsupportedFormat`] skip rather than a half-decode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageKind {
     /// JFIF/EXIF JPEG.
     Jpeg,
     /// PNG.
     Png,
+    /// HEIF or AVIF container. Only the HEVC-coded, 4:2:0 forms decode — see
+    /// [`crate::heif`].
+    Heic,
 }
 
 impl ImageKind {
-    fn format(self) -> ImageFormat {
+    /// The `image` crate's name for this format, for the formats it handles.
+    fn format(self) -> Option<ImageFormat> {
         match self {
-            ImageKind::Jpeg => ImageFormat::Jpeg,
-            ImageKind::Png => ImageFormat::Png,
+            ImageKind::Jpeg => Some(ImageFormat::Jpeg),
+            ImageKind::Png => Some(ImageFormat::Png),
+            ImageKind::Heic => None,
         }
+    }
+}
+
+/// The decode seam: bytes in, pixels out.
+///
+/// The narrowest trait that lets one format's backend be replaced without
+/// touching the pipeline around it — [`crate::ImageEncoder`]'s shape, applied
+/// to decode. It exists for the same reason: the backend most likely to have to
+/// change is the one whose build nobody controls, and when that happens the
+/// change should be contained to an `impl` rather than spread through
+/// [`decode_oriented`].
+///
+/// Two things it deliberately does **not** do. It does not apply orientation —
+/// that is one decision in one place, above — and it does not choose itself:
+/// [`decoder_for`] is a static match, not a registry, so what decodes a given
+/// photo is a property of the build and not of what happened to be registered
+/// first. Both are determinism-doctrine constraints, not style.
+///
+/// Adding an implementation that widens the openable format set means bumping
+/// [`DECODER_VERSION`], and only that.
+pub trait ImageDecoder: Send + Sync {
+    /// Turn `bytes`, already sniffed as `kind`, into pixels.
+    ///
+    /// `path` labels errors and nothing else.
+    fn decode(&self, path: &str, bytes: &[u8], kind: ImageKind) -> MlResult<DynamicImage>;
+
+    /// Short identifier for logs and error messages.
+    fn backend_name(&self) -> &'static str;
+
+    /// Whether the returned pixels already carry the file's own rotation.
+    ///
+    /// JPEG and PNG say no: their orientation is an EXIF tag that
+    /// [`decode_oriented`] applies. HEIC says yes, because its rotation is an
+    /// `irot`/`imir` item property the container decoder must honour to produce
+    /// a coherent image at all — and a HEIC can carry *both*, so applying EXIF
+    /// on top of an already-oriented image rotates it twice.
+    fn output_is_oriented(&self) -> bool {
+        false
+    }
+}
+
+/// The backend for every format the `image` crate handles: `zune-jpeg` for
+/// JPEG, `png` for PNG, both pinned to exact versions in `Cargo.toml`.
+pub struct CrateDecoder;
+
+impl ImageDecoder for CrateDecoder {
+    fn decode(&self, path: &str, bytes: &[u8], kind: ImageKind) -> MlResult<DynamicImage> {
+        let format = kind.format().ok_or_else(|| MlError::Preprocess {
+            path: path.to_string(),
+            code: ErrorCode::UnsupportedFormat,
+            detail: format!("{kind:?} is not an `image` crate format"),
+        })?;
+        image::load_from_memory_with_format(bytes, format).map_err(|e| MlError::Preprocess {
+            path: path.to_string(),
+            code: ErrorCode::Decode,
+            detail: e.to_string(),
+        })
+    }
+
+    fn backend_name(&self) -> &'static str {
+        "image"
+    }
+}
+
+static CRATE_DECODER: CrateDecoder = CrateDecoder;
+
+/// The backend that decodes `kind` in this build, or `None` when nothing does.
+///
+/// A static match rather than a registry: which decoder sees a photo has to be
+/// a property of the compiled binary, because two builds that disagree about it
+/// produce two different embeddings from the same bytes.
+pub fn decoder_for(kind: ImageKind) -> Option<&'static dyn ImageDecoder> {
+    match kind {
+        ImageKind::Jpeg | ImageKind::Png => Some(&CRATE_DECODER),
+        ImageKind::Heic => Some(&crate::heif::HEIF_DECODER),
     }
 }
 
@@ -104,7 +217,7 @@ impl ImageKind {
 ///
 /// Checked before the file is read, so a 4 GB video is not streamed through
 /// SHA-256 only to be rejected by the sniffer.
-pub const SUPPORTED_EXTENSIONS: &[&str] = &["jpg", "jpeg", "jpe", "png"];
+pub const SUPPORTED_EXTENSIONS: &[&str] = &["jpg", "jpeg", "jpe", "png", "heic", "heif"];
 
 /// Whether `path`'s extension is one this crate will attempt.
 pub fn extension_supported(path: &str) -> bool {
@@ -119,12 +232,21 @@ pub fn extension_supported(path: &str) -> bool {
 }
 
 /// Identify `bytes` by magic number.
+///
+/// HEIF has no magic number in the usual sense — it is an ISO-BMFF file whose
+/// `ftyp` box declares a brand — so that arm is a bounded box read rather than
+/// a prefix compare, shared with the metadata side
+/// ([`gallery_meta::media::isobmff::is_heif`]) so the two cannot disagree about
+/// what a HEIC is.
 pub fn sniff(bytes: &[u8]) -> Option<ImageKind> {
     if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
         return Some(ImageKind::Jpeg);
     }
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         return Some(ImageKind::Png);
+    }
+    if gallery_meta::media::isobmff::is_heif(bytes) {
+        return Some(ImageKind::Heic);
     }
     None
 }
@@ -229,19 +351,16 @@ pub fn preprocess(path: &str, bytes: &[u8], cfg: &PreprocessConfig) -> MlResult<
 /// by accident. Every caller sees the same bytes, so the determinism story is
 /// unchanged: this *is* the pinned path, just named.
 pub fn decode_oriented(path: &str, bytes: &[u8]) -> MlResult<RgbImage> {
-    let kind = sniff(bytes).ok_or_else(|| MlError::Preprocess {
+    let unsupported = |detail: String| MlError::Preprocess {
         path: path.to_string(),
         code: ErrorCode::UnsupportedFormat,
-        detail: "not a JPEG or PNG (magic bytes)".into(),
-    })?;
+        detail,
+    };
+    let kind = sniff(bytes).ok_or_else(|| unsupported("unrecognised magic bytes".into()))?;
+    let decoder = decoder_for(kind)
+        .ok_or_else(|| unsupported(format!("{kind:?} has no decoder in this build")))?;
 
-    let decoded = image::load_from_memory_with_format(bytes, kind.format()).map_err(|e| {
-        MlError::Preprocess {
-            path: path.to_string(),
-            code: ErrorCode::Decode,
-            detail: e.to_string(),
-        }
-    })?;
+    let decoded = decoder.decode(path, bytes, kind)?;
 
     let pixels = u64::from(decoded.width()) * u64::from(decoded.height());
     if pixels == 0 || pixels > MAX_PIXELS {
@@ -256,7 +375,13 @@ pub fn decode_oriented(path: &str, bytes: &[u8]) -> MlResult<RgbImage> {
         });
     }
 
-    Ok(apply_orientation(decoded, read_exif_orientation(bytes)).into_rgb8())
+    // A backend that already applied the container's own rotation must not have
+    // EXIF orientation applied on top of it — see
+    // [`ImageDecoder::output_is_oriented`].
+    let exif_orientation = (!decoder.output_is_oriented())
+        .then(|| read_exif_orientation(bytes))
+        .flatten();
+    Ok(apply_orientation(decoded, exif_orientation).into_rgb8())
 }
 
 /// The EXIF `Orientation` value (1–8), or `None` when absent/unreadable.
@@ -514,7 +639,9 @@ mod tests {
         assert!(extension_supported("/a/b/IMG_1.JPG"));
         assert!(extension_supported("/a/b/IMG_1.jpeg"));
         assert!(extension_supported("/a/b/x.png"));
-        assert!(!extension_supported("/a/b/x.heic"));
+        assert!(extension_supported("/a/b/x.heic"));
+        assert!(extension_supported("/a/b/IMG_1.HEIC"));
+        assert!(extension_supported("/a/b/x.heif"));
         assert!(!extension_supported("/a/b/x.mov"));
         assert!(!extension_supported("/a/b/noextension"));
         // A dot in a directory name must not be mistaken for the extension.
@@ -525,9 +652,15 @@ mod tests {
     fn sniffing_beats_the_extension() {
         assert_eq!(sniff(&[0xFF, 0xD8, 0xFF, 0xE0]), Some(ImageKind::Jpeg));
         assert_eq!(sniff(b"\x89PNG\r\n\x1a\n\x00"), Some(ImageKind::Png));
-        // The HEIC brand box — the known gap. It must sniff as unsupported,
-        // not fall through to the JPEG decoder.
-        assert_eq!(sniff(b"\x00\x00\x00\x18ftypheic"), None);
+        // **Inverted in Phase 6, deliberately.** This used to assert that the
+        // HEIC brand box sniffed as `None` — the right answer while there was
+        // no HEIC decoder, because falling through to the JPEG decoder would
+        // have been worse than refusing. There is a decoder now, so the same
+        // bytes must name the format instead.
+        assert_eq!(sniff(b"\x00\x00\x00\x18ftypheic"), Some(ImageKind::Heic));
+        assert_eq!(sniff(b"\x00\x00\x00\x18ftypmif1"), Some(ImageKind::Heic));
+        // An MP4 is an ISO-BMFF file too, and is still not an image.
+        assert_eq!(sniff(b"\x00\x00\x00\x18ftypisom"), None);
         assert_eq!(sniff(b""), None);
     }
 
@@ -578,6 +711,43 @@ mod tests {
         // Plane 0 all 1.0, planes 1 and 2 all 0.0.
         assert!(t.data[0..4].iter().all(|v| (*v - 1.0).abs() < 1e-5));
         assert!(t.data[4..12].iter().all(|v| v.abs() < 1e-5));
+    }
+
+    /// Every kind [`sniff`] can name must have a backend behind it, or the
+    /// sniffer is promising something the pipeline cannot deliver — a photo
+    /// that hashes, opens, and then fails at the last step for no reason the
+    /// user can act on.
+    #[test]
+    fn every_sniffable_kind_has_a_decoder_behind_it() {
+        for (kind, backend, oriented) in [
+            (ImageKind::Jpeg, "image", false),
+            (ImageKind::Png, "image", false),
+            (ImageKind::Heic, "heif-oxide", true),
+        ] {
+            let decoder = decoder_for(kind).unwrap_or_else(|| panic!("no decoder for {kind:?}"));
+            assert_eq!(decoder.backend_name(), backend, "{kind:?}");
+            assert_eq!(decoder.output_is_oriented(), oriented, "{kind:?}");
+        }
+    }
+
+    /// The seam carries the decode, so a failure inside it has to arrive as a
+    /// `Decode` error on the photo rather than as anything the run notices.
+    #[test]
+    fn the_seam_reports_a_backend_failure_as_a_decode_error() {
+        let err = decoder_for(ImageKind::Png)
+            .unwrap()
+            .decode("/a/x.png", b"\x89PNG\r\n\x1a\n truncated", ImageKind::Png)
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                MlError::Preprocess {
+                    code: ErrorCode::Decode,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
     }
 
     #[test]

@@ -154,6 +154,39 @@ fn a_run_writes_the_expected_tags_into_real_sidecars() {
     assert_eq!(f.all_tags(), expected_tags_for(PHOTOS));
 }
 
+/// A HEIC is tagged on the same terms as a JPEG — Phase 6's exit criterion.
+///
+/// The two assertions are different claims. The first is the cross-target
+/// contract: `expected_tags.json` is read by the simulator suite too, so the
+/// host and an arm64 simulator have to agree on what a HEIC produces, not
+/// merely on the fact that it decoded. The second is that the decode landed on
+/// the *right picture* — `meadow.heic` is `meadow.png` re-encoded, and if the
+/// HEVC path had a wrong colour matrix or a mis-assembled plane the two would
+/// score differently and the tag sets would drift apart.
+#[test]
+fn a_heic_is_tagged_the_same_as_the_png_it_was_made_from() {
+    let f = Fixture::with_files(&["meadow.heic", "meadow.png"]);
+    f.enqueue_all(&["meadow.heic", "meadow.png"]);
+    let summary = f.run();
+
+    assert_eq!(summary.processed, 2);
+    assert_eq!(
+        summary.skipped, 0,
+        "the HEIC was refused as an unknown format"
+    );
+    assert_eq!(summary.failed, 0);
+    assert_eq!(
+        f.tags("meadow.heic"),
+        expected_tags()["meadow.heic"],
+        "the HEIC's tags moved"
+    );
+    assert_eq!(
+        f.tags("meadow.heic"),
+        f.tags("meadow.png"),
+        "one picture, two containers, two different tag sets"
+    );
+}
+
 #[test]
 fn sidecars_land_next_to_the_photo_with_the_suffix_preserved() {
     let f = Fixture::new();

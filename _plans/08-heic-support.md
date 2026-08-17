@@ -117,6 +117,62 @@ option A cannot be built, behind the same trait.
 There is no production-quality pure-Rust HEVC decoder. (`rav1d`/`dav1d` are
 AV1, which is AVIF, not HEIC.) Not available; revisit if that changes.
 
+> **CORRECTION, at implementation time: it changed, and this is what shipped.**
+>
+> `heif-oxide` (ISO-BMFF container) over `rust_h265` (HEVC Main/Main 10, 4:2:0)
+> now exists and does the job. It was measured before being taken, against the
+> real files this phase is about:
+>
+> | file | result |
+> |---|---|
+> | 1920×1080 8-bit single-item HEIC | RMSE 1.02 vs ImageIO, 31 ms |
+> | 4000×2250 **grid-tiled** | RMSE 0.79 vs ImageIO, 54 ms |
+> | `irot`-rotated | RMSE 0.83, dimensions transposed correctly |
+> | 25 repeat decodes of each | one digest each — bit-stable |
+>
+> The residual is chroma upsampling, not decode error: HEVC is bit-exact at the
+> YUV level by specification, which is the same property that made Option A
+> attractive.
+>
+> Every reason Option A was recommended survives the swap, and most of them get
+> *better*:
+>
+> - **Cross-compile** — the "riskiest hour" is zero hours. No build script, no
+>   C, no CMake (which is not even installed on the build machine). Both
+>   `aarch64-apple-ios` and `aarch64-apple-ios-sim` build from plain `cargo
+>   build --target`. `build_core.sh` is untouched: no extra archives to merge,
+>   no `HEIF_LIB_LOCATION` env override to invent.
+> - **Licence** — MIT OR Apache-2.0 instead of LGPL-3.0. The "documented future
+>   constraint" on an App Store release does not need documenting, because it
+>   does not exist. This is the single biggest win and it was not the reason for
+>   the swap.
+> - **Doctrine** — zero `unsafe` in either crate and no SIMD dispatch, so it is
+>   *more* deterministic than the JPEG path, whose resize kernel is already
+>   architecture-selected. Linux and Android get a real decoder.
+>
+> Two things it costs, both handled rather than hoped about:
+>
+> 1. **It panics on malformed input where the incumbents do not.** Measured on
+>    an identical 10 705-case corruption sweep: `image`'s JPEG and PNG decoders
+>    panicked **0** times, this one **1 388**. That is not survivable by
+>    default — the engine's `catch_unwind` wraps the *whole worker scope*, so
+>    one bad file would abort the run, and the row would be re-claimed and abort
+>    the next one. `heif::HeifDecoder::decode` therefore catches its own panic
+>    and reports `ErrorCode::Decode` for that one photo. Worth noting the
+>    counterfactual: libde265's equivalent failure is a segfault, which cannot
+>    be caught at all.
+> 2. **4:2:0 only.** A 4:4:4 HEIC (macOS's own `DefaultDesktop.heic`) is
+>    refused. That is precisely the "Apple ships a HEIC variant libheif does not
+>    read" row of the risk table below, and its response is unchanged: a
+>    `skipped` row stamped with the current `DECODER_VERSION`, which re-opens by
+>    itself the day a wider decoder ships.
+>
+> Both crates are at 0.1.0, which is the real risk. It is contained by the very
+> seam this plan asked for: swapping the backend is one `impl` plus a
+> `DECODER_VERSION` bump, and that bump re-opens the skipped rows without
+> invalidating a single cached embedding. Option A remains the fallback, with
+> its recipe intact above.
+
 ## Order of work
 
 ### 1. HEIC metadata (`gallery-meta`) — lands alone
@@ -159,8 +215,12 @@ plumbing that is already proven.
 
 ### 3. HEIC decode
 
-- `libheif`/`libde265` vendored; `build_core.sh` merges the extra archives and
-  validates the slices with the existing `lipo`/`otool` checks.
+> **As built:** `heif-oxide` + `rust_h265` instead of the vendored C — see the
+> correction under Option C. `build_core.sh` needed no change at all, so the
+> first bullet below did not happen. Everything after it did.
+
+- ~~`libheif`/`libde265` vendored; `build_core.sh` merges the extra archives and
+  validates the slices with the existing `lipo`/`otool` checks.~~
 - `preprocess.rs`: `ImageKind::Heic`, `heic` + `heif` in `SUPPORTED_EXTENSIONS`,
   `sniff` recognising the brand set (and the existing "must sniff as
   unsupported" test inverted, deliberately, with a comment saying why).
@@ -188,6 +248,17 @@ rows re-open on `DECODER_VERSION` too, and a HEIC-heavy library will produce a
 large first face run — worth a line in the Settings summary rather than a
 surprise.
 
+> **Not done, deliberately.** The re-open is in and tested on both queues
+> (`the_face_queue_re_opens_skipped_rows_on_the_same_decoder_dial`), but the
+> *Settings line* reporting how many rows re-opened is not. It is a count
+> `reopen_skipped_for_decoder` already returns and currently discards; surfacing
+> it means widening `RunSummary` **and** `FaceRunSummary`, both FFI records,
+> both error-path constructions, both Swift services and two `SettingsView`
+> rows. That is an eight-file change through the FFI for a progress label, and
+> it is not worth making it at the end of the phase that also swapped the
+> decoder. The first run after this ships is long either way; this only decides
+> whether the user is told why.
+
 ## Test plan
 
 - Rust: the malformed-container battery, orientation, bit depth, tiling,
@@ -204,8 +275,9 @@ surprise.
 
 | Risk | Response |
 |---|---|
-| LGPL static linking blocks a future App Store release | Documented now, not discovered later. The `ImageDecoder` seam is what makes a decoder swap a contained change. |
-| Cross-compiling two C libraries for four slices | The riskiest hour of the phase. Land step 2 first so failure here does not block the metadata win, and keep `ORT_LIB_LOCATION`'s precedent of an env override for a prebuilt archive. |
+| ~~LGPL static linking blocks a future App Store release~~ | **Gone.** The decoder that shipped is MIT/Apache-2.0. |
+| ~~Cross-compiling two C libraries for four slices~~ | **Gone.** Pure Rust; `cargo build --target` and nothing else. The `ImageDecoder` seam still earns its keep — it is what makes swapping back to Option A, or forward to something else, a contained change. |
+| A 0.1.0 decoder is wrong in a way the fixtures do not catch | The new risk, taken knowingly. Bounded by: goldens on three fixtures, a corruption sweep, an ImageIO cross-check before adoption, and a swap that costs one `impl` and a `DECODER_VERSION` bump. |
 | A HEIC-heavy library re-opens thousands of skipped rows at once | Correct behaviour, but the first run after this ships is long. The queue is resumable and cancellable already; the Settings summary should say how many rows re-opened. |
 | Apple ships a HEIC variant libheif does not read | It becomes a `skipped` row with the current `DECODER_VERSION`, which is exactly the mechanism this phase is built on. |
 | Double-rotation between `irot` and EXIF | One decision, one test, one fixture — called out above because face regions inherit the error invisibly. |

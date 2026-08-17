@@ -176,6 +176,61 @@ pub fn find_meta(bytes: &[u8]) -> MetaBox<'_> {
     MetaBox::Absent
 }
 
+/// The largest image extent this file *declares*, from the `ispe` properties.
+///
+/// The point is to have a number **before** decoding. A HEIC's dimensions live
+/// in the container, so a caller can refuse a file that claims 40 000 × 40 000
+/// without ever handing it to a decoder and asking for the buffer.
+///
+/// Deliberately the **maximum** over every `ispe`, not the primary item's.
+/// Resolving "the primary item's own extent" means `pitm` plus the `ipma`
+/// association table, and it would let a file declare a modest primary
+/// alongside an enormous auxiliary. The maximum needs neither, and it errs in
+/// the only safe direction: a file refused here is a skipped photo, while a
+/// file waved through is an allocation nobody bounded.
+pub fn max_declared_extent(bytes: &[u8]) -> Option<(u32, u32)> {
+    let MetaBox::Found { body, .. } = find_meta(bytes) else {
+        return None;
+    };
+    // `meta` is a FullBox; the QuickTime-shaped fallback is the same one
+    // [`meta_items`] makes, for the same reason.
+    [4usize, 0]
+        .into_iter()
+        .filter_map(|skip| body.get(skip..).and_then(largest_ispe))
+        .max()
+}
+
+/// Walk `iprp` → `ipco` for `ispe` properties and take the largest.
+fn largest_ispe(meta_children: &[u8]) -> Option<(u32, u32)> {
+    let mut largest: Option<(u32, u32)> = None;
+    for (kind, iprp) in boxes(meta_children) {
+        if &kind != b"iprp" {
+            continue;
+        }
+        for (kind, ipco) in boxes(iprp) {
+            if &kind != b"ipco" {
+                continue;
+            }
+            for (kind, property) in boxes(ipco) {
+                if &kind != b"ispe" {
+                    continue;
+                }
+                // FullBox header, then two 32-bit extents.
+                let mut c = Cursor::new(property);
+                let (Some(_), Some(_), Some(w), Some(h)) = (c.u8(), c.take(3), c.u32(), c.u32())
+                else {
+                    continue;
+                };
+                let area = u64::from(w) * u64::from(h);
+                if largest.is_none_or(|(lw, lh)| area > u64::from(lw) * u64::from(lh)) {
+                    largest = Some((w, h));
+                }
+            }
+        }
+    }
+    largest
+}
+
 /// Read `iinf` and `iloc` out of a `meta` box body.
 pub fn meta_items(meta_body: &[u8]) -> MetaItems {
     // `meta` is a FullBox, so its children start four bytes in. QuickTime's
@@ -752,6 +807,52 @@ pub(crate) mod tests {
             0,
         );
         assert_eq!(extract_xmp(&file).as_deref(), Some(PACKET));
+    }
+
+    /// The pre-decode bound. A number that is wrong here is a buffer nobody
+    /// sized, so the hostile shapes matter as much as the well-formed one.
+    #[test]
+    fn the_declared_extent_is_read_before_anything_is_decoded() {
+        fn with_ispe(extents: &[(u32, u32)]) -> Vec<u8> {
+            let mut ipco = Vec::new();
+            for (w, h) in extents {
+                let mut body = vec![0u8, 0, 0, 0];
+                body.extend_from_slice(&w.to_be_bytes());
+                body.extend_from_slice(&h.to_be_bytes());
+                ipco.extend_from_slice(&boxed(b"ispe", &body));
+            }
+            let mut ftyp = b"heic".to_vec();
+            ftyp.extend_from_slice(&0u32.to_be_bytes());
+            ftyp.extend_from_slice(b"heic");
+            let mut out = boxed(b"ftyp", &ftyp);
+            out.extend_from_slice(&full(b"meta", 0, &boxed(b"iprp", &boxed(b"ipco", &ipco))));
+            out
+        }
+
+        assert_eq!(
+            max_declared_extent(&with_ispe(&[(4032, 3024)])),
+            Some((4032, 3024))
+        );
+        // The largest wins, whatever order the properties appear in.
+        assert_eq!(
+            max_declared_extent(&with_ispe(&[(320, 240), (4032, 3024), (64, 64)])),
+            Some((4032, 3024))
+        );
+        // An absurd claim is *reported*, not clamped — refusing it is the
+        // caller's decision and it needs the real number to make it.
+        assert_eq!(
+            max_declared_extent(&with_ispe(&[(u32::MAX, u32::MAX)])),
+            Some((u32::MAX, u32::MAX))
+        );
+        // Nothing to report is `None`, not a zero that reads as "tiny".
+        assert_eq!(max_declared_extent(&with_ispe(&[])), None);
+        assert_eq!(max_declared_extent(&heif(b"heic", &[], 0)), None);
+        assert_eq!(max_declared_extent(b"not a container"), None);
+
+        // A truncated `ispe` yields nothing rather than half a dimension.
+        let mut cut = with_ispe(&[(4032, 3024)]);
+        cut.truncate(cut.len() - 4);
+        assert_eq!(max_declared_extent(&cut), None);
     }
 
     fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {

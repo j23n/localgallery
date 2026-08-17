@@ -4,14 +4,30 @@ SwiftUI iOS photo gallery app that browses user-selected folders without importi
 
 ## Build & test
 
-Three commands from a clean checkout — build the Rust core, generate the Xcode
-project, test:
+Four commands from a clean checkout — stage the model pack, build the Rust
+core, generate the Xcode project, test:
 
 ```
+./scripts/prepare_pack.sh        # newest build/model_packs/<version> → build/pack/<version> (bundled resource)
 ./scripts/build_core.sh          # cargo → UniFFI → build/core/{GalleryCore.xcframework,Generated}
 xcodegen                         # generates LocalGallery.xcodeproj
 xcodebuild test -project LocalGallery.xcodeproj -scheme LocalGallery -destination "platform=iOS Simulator,name=iPhone 17 Pro"
 ```
+
+`prepare_pack.sh` is cheap and idempotent: it clones (APFS `clonefile`, so no
+time and no disk) the newest pack under `build/model_packs/` into the fixed
+path `project.yml` bundles, and skips when that is already staged. The
+version-named directory is kept inside `build/pack` — `PackResolver` compares
+the bundled and imported packs *by directory name*, so a pack flattened to
+`pack/` would compare as the literal string "pack". It does
+**not** build a pack — `build_pack.py` needs torch and ~1 GB of weights, and a
+clean checkout must not depend on a Python/PyTorch toolchain — so with nothing
+built it exits non-zero printing the exact `build_pack.py` invocation. That
+message at the start of the build is the whole point; without the check a
+missing pack surfaces as a code-signing error at the end of it.
+`PACK_VARIANT=tagging` stages a pack without face models: the insightface
+`buffalo_sc` models in the full pack are research / non-commercial licensed, so
+anything distributed ships the tagging variant (see README).
 
 Swap `test` for `build` to just compile. `build_core.sh` must run before
 `xcodegen` (the project references generated paths) and again after any change

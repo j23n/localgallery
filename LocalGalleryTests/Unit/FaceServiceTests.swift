@@ -46,7 +46,8 @@ final class FaceServiceTests: XCTestCase {
             version: "gallery-ml-facepack-1",
             labelCount: 6,
             hasFaces: true,
-            directory: try bundleResource("facepack")
+            directory: try bundleResource("facepack"),
+            source: .bundled
         )
     }
 
@@ -55,7 +56,8 @@ final class FaceServiceTests: XCTestCase {
             version: "gallery-ml-testpack-1",
             labelCount: 6,
             hasFaces: false,
-            directory: try bundleResource("testpack")
+            directory: try bundleResource("testpack"),
+            source: .bundled
         )
     }
 
@@ -421,7 +423,8 @@ final class FaceServiceTests: XCTestCase {
                 version: "gallery-ml-facepack-1",
                 labelCount: 6,
                 hasFaces: true,
-                directory: directory
+                directory: directory,
+                source: .bundled
             )
         }
 

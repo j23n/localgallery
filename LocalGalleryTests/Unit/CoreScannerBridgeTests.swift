@@ -314,6 +314,7 @@ final class CoreScannerBridgeTests: XCTestCase {
             thumbnailDir: temp.appending("thumbnails", isDirectory: true),
             mlCacheDatabaseURL: temp.appending("gallery-cache.sqlite"),
             modelPacksDirectoryURL: temp.appending("ModelPacks", isDirectory: true),
+            bundledModelPackURL: nil,
             bookmarkKey: "rootFolderBookmark"
         )
         let defaults = TestUserDefaults.make()
@@ -406,6 +407,7 @@ final class CoreScannerBridgeTests: XCTestCase {
             thumbnailDir: temp.appending("thumbnails", isDirectory: true),
             mlCacheDatabaseURL: temp.appending("gallery-cache.sqlite"),
             modelPacksDirectoryURL: temp.appending("ModelPacks", isDirectory: true),
+            bundledModelPackURL: nil,
             bookmarkKey: "rootFolderBookmark"
         )
         let defaults = TestUserDefaults.make()

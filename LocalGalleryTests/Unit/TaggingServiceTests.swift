@@ -16,10 +16,11 @@ final class TaggingServiceTests: XCTestCase {
         return temp
     }
 
-    private func makeService(_ temp: TempDir) -> TaggingService {
+    private func makeService(_ temp: TempDir, bundled: URL? = nil) -> TaggingService {
         TaggingService(
             cacheDatabaseURL: temp.appending("gallery-cache.sqlite"),
             modelPacksDirectory: temp.appending("ModelPacks", isDirectory: true),
+            bundledPackDirectory: bundled,
             refresh: SidecarRefreshCoalescer(interval: TaggingService.refreshInterval)
         )
     }
@@ -34,12 +35,29 @@ final class TaggingServiceTests: XCTestCase {
 
     /// Install the committed test pack where the service will find it.
     @discardableResult
-    private func installTestPack(in temp: TempDir) throws -> URL {
+    private func installTestPack(in temp: TempDir, named name: String = "gallery-ml-testpack-1")
+        throws -> URL
+    {
         let packs = temp.appending("ModelPacks", isDirectory: true)
         try FileManager.default.createDirectory(at: packs, withIntermediateDirectories: true)
-        let installed = packs.appendingPathComponent("gallery-ml-testpack-1", isDirectory: true)
+        let installed = packs.appendingPathComponent(name, isDirectory: true)
         try FileManager.default.copyItem(at: try bundleResource("testpack"), to: installed)
         return installed
+    }
+
+    /// A stand-in for `LocalGallery.app/pack/`: a root holding one pack.
+    ///
+    /// The real bundled pack is 157 MB and the test bundle has no business
+    /// hashing it — what these tests check is the resolution rule, and the
+    /// committed test pack exercises it for ~16 KB.
+    private func stageBundledPack(in temp: TempDir, named name: String) throws -> URL {
+        let root = temp.appending("bundle", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(
+            at: try bundleResource("testpack"),
+            to: root.appendingPathComponent(name, isDirectory: true)
+        )
+        return root
     }
 
     /// Counts refreshes and can hold the first one open.
@@ -271,5 +289,69 @@ final class TaggingServiceTests: XCTestCase {
         guard case .pack = service.lastError else {
             return XCTFail("expected a pack error, got \(String(describing: service.lastError))")
         }
+    }
+
+    /// A build that bundles a pack is usable with no import step at all — the
+    /// whole point of shipping one.
+    func testTheBundledPackIsFoundWithoutAnImport() async throws {
+        let temp = makeTemp()
+        let bundle = try stageBundledPack(in: temp, named: "gallery-ml-testpack-1")
+        let service = makeService(temp, bundled: bundle)
+
+        await service.refreshAvailability()
+        XCTAssertTrue(service.isAvailable)
+        XCTAssertTrue(service.hasBundledPack)
+        XCTAssertEqual(service.pack?.source, .bundled)
+    }
+
+    /// The import path still wins for a newer pack, and removing it falls back
+    /// to the bundled one rather than leaving the app with nothing.
+    func testRemovingAnImportedPackFallsBackToTheBundledOne() async throws {
+        let temp = makeTemp()
+        let bundle = try stageBundledPack(in: temp, named: "gallery-ml-testpack-1")
+        let imported = try installTestPack(in: temp, named: "gallery-ml-testpack-2")
+        let service = makeService(temp, bundled: bundle)
+
+        await service.refreshAvailability()
+        XCTAssertEqual(service.pack?.source, .imported)
+        XCTAssertEqual(service.pack?.directory, imported)
+
+        await service.removeImportedPack()
+        XCTAssertEqual(service.pack?.source, .bundled)
+        XCTAssertTrue(service.isAvailable, "removing the import left the app with no pack")
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: imported.path),
+            "the imported pack directory survived its own removal"
+        )
+    }
+
+    /// An older import must not shadow the bundled pack: after an app update
+    /// ships a newer one, "imported always wins" would pin every existing
+    /// install to the stale pack with nothing to say why.
+    func testAStaleImportedPackDoesNotShadowANewerBundledOne() async throws {
+        let temp = makeTemp()
+        let bundle = try stageBundledPack(in: temp, named: "gallery-ml-testpack-2")
+        try installTestPack(in: temp, named: "gallery-ml-testpack-1")
+        let service = makeService(temp, bundled: bundle)
+
+        await service.refreshAvailability()
+        XCTAssertEqual(service.pack?.source, .bundled)
+    }
+
+    /// Nothing to remove is not an error — the button is hidden for a bundled
+    /// pack, and calling anyway must leave it alone rather than delete it.
+    func testRemovingWithNoImportedPackLeavesTheBundledOneAlone() async throws {
+        let temp = makeTemp()
+        let bundle = try stageBundledPack(in: temp, named: "gallery-ml-testpack-1")
+        let service = makeService(temp, bundled: bundle)
+        await service.refreshAvailability()
+
+        await service.removeImportedPack()
+        XCTAssertEqual(service.pack?.source, .bundled)
+        XCTAssertTrue(
+            FileManager.default.fileExists(
+                atPath: bundle.appendingPathComponent("gallery-ml-testpack-1").path
+            )
+        )
     }
 }

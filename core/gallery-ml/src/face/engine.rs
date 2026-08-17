@@ -414,7 +414,7 @@ impl FaceEngine {
         // Between-runs housekeeping, mirroring the tagging engine's.
         self.cache.face_reclaim_abandoned()?;
         self.cache
-            .face_reopen_skipped_for_decoder(crate::preprocess::PREPROCESS_VERSION)?;
+            .face_reopen_skipped_for_decoder(crate::preprocess::DECODER_VERSION)?;
         self.restat_done_rows()?;
 
         let root_prefix = opts.root_prefix.as_deref().map(normalize_root_prefix);
@@ -544,7 +544,7 @@ impl FaceEngine {
         if !extension_supported(&item.path) {
             let _ = self
                 .cache
-                .face_finish_skipped(&item.path, crate::preprocess::PREPROCESS_VERSION);
+                .face_finish_skipped(&item.path, crate::preprocess::DECODER_VERSION);
             return Outcome::Skipped;
         }
         match self.process_inner(item, cancel) {

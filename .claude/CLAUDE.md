@@ -67,7 +67,15 @@ Phases 0–4:
   vectors and runs no inference; `pack_version` still drives re-scoring via
   `mark_stale_for_pack`. Every run starts by reclaiming abandoned `hashing`
   rows, re-opening `skipped` rows a previous decoder generation refused, and
-  re-statting `done` rows so an in-place edit is re-tagged. Phase 2 adds the
+  re-statting `done` rows so an in-place edit is re-tagged. **That re-open is
+  keyed on `DECODER_VERSION`, a separate constant from `PREPROCESS_VERSION`**
+  (Phase 6): the first says which formats this build can open and invalidates
+  nothing, the second says how pixels are produced and is half the embedding
+  key. They are equal at 1 today, which is exactly why conflating them was easy
+  — and conflating them meant shipping a HEIC decoder would re-run inference
+  over every JPEG in the library. Decoding itself goes through the
+  `preprocess::ImageDecoder` seam, a static match rather than a registry so
+  which backend sees a photo is a property of the build. Phase 2 adds the
   sibling `face::FaceEngine` — detect / align / embed / quality / cluster, its
   own queue and tables in the same cache file, plus `face::naming`
   (`name_cluster` / `rename_person` / `unname_cluster` / `ignore_cluster` /

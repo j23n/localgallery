@@ -88,7 +88,11 @@ final class MemoryCoordinatorTests: XCTestCase {
         await h.coordinator.runScheduledRefresh()
 
         XCTAssertTrue(h.coordinator.hasGeneratedToday)
-        XCTAssertEqual(h.coordinator.all.map(\.id), ["onThisDay-2024-06-11"])
+        // Sorted, not in rail order: the twelve 2019 photos clear both the
+        // on-this-day floor and the 5-year milestone, and which of the two
+        // sorts first is the seeded jitter's business, not this test's.
+        XCTAssertEqual(h.coordinator.all.map(\.id).sorted(),
+                       ["onThisDay-2024-06-11", "yearsAgo-5-2024-06-11"])
     }
 
     func testGenerateIfNeededPublishesAndGatesEventually() async throws {
@@ -131,13 +135,17 @@ final class MemoryCoordinatorTests: XCTestCase {
         let h = makeHarness(photos: libraryPhotos())
         defer { cleanup(h) }
         await h.coordinator.runScheduledRefresh()
-        guard let id = h.coordinator.all.first?.id else { return XCTFail("no memory generated") }
+        // The library produces both an on-this-day and a 5-years-ago memory,
+        // so this asserts the hidden one is subtracted rather than that the
+        // list empties.
+        let all = h.coordinator.all.map(\.id)
+        guard let id = all.first else { return XCTFail("no memory generated") }
 
-        XCTAssertEqual(h.coordinator.visible.map(\.id), [id])
+        XCTAssertEqual(h.coordinator.visible.map(\.id), all)
         h.coordinator.hide(id)
-        XCTAssertTrue(h.coordinator.visible.isEmpty)
+        XCTAssertEqual(h.coordinator.visible.map(\.id), all.filter { $0 != id })
         h.coordinator.unhide(id)
-        XCTAssertEqual(h.coordinator.visible.map(\.id), [id])
+        XCTAssertEqual(h.coordinator.visible.map(\.id), all)
     }
 
     func testBirthdayMemoryOfHiddenPersonIsFilteredFromVisible() async {

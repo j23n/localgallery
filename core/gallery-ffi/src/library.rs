@@ -457,6 +457,18 @@ pub struct MemoryGenerationInputs {
     /// the penalty windows are computed in this offset; each *photo* is bucketed
     /// in its own (see [`Self::photo_time_zone_offsets`]).
     pub time_zone_offset_seconds: i32,
+    /// `Calendar.current.timeZone.secondsFromGMT(for: <that day's local noon>)`
+    /// for each day of the pre-publish horizon, indexed by days from today —
+    /// entry 0 is today.
+    ///
+    /// **Empty is legal** and means "use `time_zone_offset_seconds` for every
+    /// day", the behaviour before this field existed. Supplying it matters for
+    /// a zone with DST: seven days can straddle a transition, and a
+    /// pre-published item's validity window is compared against the wall clock.
+    /// Noon rather than midnight because midnight is the instant a transition
+    /// can land on. Only `compute_scheduled_memories` reads it; a table two
+    /// entries longer than the horizon covers the last window's close.
+    pub horizon_offset_seconds: Vec<i32>,
     /// Drives the daily jitter: the day key for a normal run, a time-based
     /// value for force-regenerate.
     pub seed: String,
@@ -535,6 +547,7 @@ impl MemoryGenerationInputs {
             hidden_people: self.hidden_people.into_iter().collect(),
             now: AppleDate(self.now),
             time_zone: UtcOffset(self.time_zone_offset_seconds),
+            horizon_time_zone_offsets: self.horizon_offset_seconds,
             seed: self.seed,
             seen_memory_ids: date_map(self.seen_memory_ids),
             surfaced_clusters: date_map(self.surfaced_clusters),
@@ -758,6 +771,7 @@ mod tests {
             hidden_people: Vec::new(),
             now,
             time_zone_offset_seconds: 0,
+            horizon_offset_seconds: Vec::new(),
             seed: "seed".to_string(),
             seen_memory_ids: Vec::new(),
             surfaced_clusters: Vec::new(),
@@ -950,6 +964,58 @@ mod tests {
             compute_scheduled_memories(inputs, 7, vec!["onThisDay-2024-06-11".to_string()]);
         assert_eq!(hidden.len(), all.len() - 1);
         assert!(!hidden.iter().any(|s| s.memory.id == "onThisDay-2024-06-11"));
+    }
+
+    /// `_plans/10`'s exit criterion across the boundary: what the widget
+    /// pre-publishes for a day is what the rail generates when that day
+    /// arrives, in a zone ahead of GMT. Tokyo's horizon used to name the
+    /// previous GMT day and the deep link resolved to nothing.
+    #[test]
+    fn a_tokyo_horizon_pre_publishes_the_ids_the_live_run_produces() {
+        let jst = 9 * 3600;
+        let mut inputs = empty_inputs(739_508_400.0); // 2024-06-08T03:00:00Z, 12:00 JST
+        inputs.photos = on_this_day_library(12); // 2019-06-11T12:00Z, 21:00 JST
+        inputs.time_zone_offset_seconds = jst;
+        let scheduled = compute_scheduled_memories(inputs.clone(), 7, Vec::new());
+        assert!(scheduled
+            .iter()
+            .any(|s| s.memory.id == "onThisDay-2024-06-11"));
+
+        // Noon JST on the day it is about.
+        let mut live = inputs;
+        live.now = 739_767_600.0; // 2024-06-11T03:00:00Z
+        assert!(generate_memories(live)
+            .iter()
+            .any(|m| m.id == "onThisDay-2024-06-11"));
+    }
+
+    /// The per-day offset table is the horizon's half of the DST story: a
+    /// window opens at the midnight of **its own** day, not at the run's. The
+    /// offsets are synthetic — a zone that loses an hour three days out — since
+    /// the point is that the table is read at all.
+    #[test]
+    fn the_horizon_offset_table_moves_a_window_and_an_empty_one_does_not() {
+        let plus_two = 2 * 3600;
+        let plus_one = 3600;
+        let mut inputs = empty_inputs(739_533_600.0); // 2024-06-08T10:00:00Z, 12:00 local
+        inputs.photos = on_this_day_library(12);
+        inputs.time_zone_offset_seconds = plus_two;
+        let single = compute_scheduled_memories(inputs.clone(), 7, Vec::new());
+
+        inputs.horizon_offset_seconds = vec![plus_two; 3]
+            .into_iter()
+            .chain(std::iter::repeat_n(plus_one, 6))
+            .collect();
+        let per_day = compute_scheduled_memories(inputs, 7, Vec::new());
+
+        let opens = |items: &[ScheduledMemoryRecord]| {
+            items
+                .iter()
+                .find(|s| s.memory.id == "onThisDay-2024-06-11")
+                .map(|s| s.valid_from)
+        };
+        assert_eq!(opens(&single), Some(739_749_600.0)); // 2024-06-10T22:00:00Z, +2
+        assert_eq!(opens(&per_day), Some(739_753_200.0)); // 2024-06-10T23:00:00Z, +1
     }
 
     #[test]

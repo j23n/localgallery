@@ -13,7 +13,8 @@
 //! resolved per instant by the caller, not once per run. The workspace has no
 //! tz database and no date dependency (see `gallery_model::date`), so a
 //! [`LocalCalendar`] is one offset; a [`Zone`] is the offsets the platform's
-//! real calendar returned, one per photo plus one for `now`.
+//! real calendar returned: one per photo, one per horizon day, and one for
+//! `now`.
 //!
 //! That split exists because resolving a single offset at `now` and applying it
 //! to the whole library is wrong for every DST user, in a way that is invisible
@@ -28,8 +29,11 @@
 //! > seen (−30) and cool-down (−25) penalties stop matching the history the
 //! > user's own taps wrote. Twice a year, for half the world.
 //!
-//! So: **photo day-bucketing uses the photo's own offset** ([`Zone::at`]) and
-//! **today / horizon math uses the offset at `now`** ([`Zone::now`]).
+//! So: **photo day-bucketing uses the photo's own offset** ([`Zone::at`]),
+//! **today and every rendered date use the offset at `now`** ([`Zone::now`]),
+//! and **the widget horizon's validity windows use the offset of the day they
+//! open** ([`Zone::at_horizon_day`]) — a seven-day horizon can straddle a DST
+//! transition, and a window is compared against the wall clock.
 //!
 //! ### What is still approximate
 //!
@@ -41,18 +45,21 @@
 //! offsets on `Memory` itself, which is a wire change for a one-hour label
 //! error on two days a year.
 //!
-//! *Instants derived from a day.* [`LocalCalendar::instant_at_midnight`] and
-//! [`LocalCalendar::start_of_day`] are always the `now` calendar's. Both are
-//! only ever compared against `now`, so there is nothing per-photo about them.
+//! *A horizon day's midnight.* [`Zone::at_horizon_day`] is sampled at that
+//! day's local **noon**, so on the two days a year a transition falls between
+//! midnight and noon the window opens an hour early or late. Sampling at
+//! midnight instead would ask the platform for the offset of the one instant a
+//! transition can make ambiguous or non-existent, which is worse.
 //!
 //! **For the FFI layer:** pass `time_zone_offset_seconds` =
-//! `Calendar.current.timeZone.secondsFromGMT(for: now)` and one
-//! `secondsFromGMT(for: photo.dateTaken)` per photo. Passing no per-photo
-//! offsets is allowed and means "use the `now` offset for everything" — the
-//! pre-fix behaviour, and what a caller with no real calendar can still do.
-//! Both fixture zones (`UTC`, `Asia/Tokyo`) have no DST, so every per-photo
-//! offset there equals the constant and the conformance suite cannot tell the
-//! two apart.
+//! `Calendar.current.timeZone.secondsFromGMT(for: now)`, one
+//! `secondsFromGMT(for: photo.dateTaken)` per photo, and one
+//! `secondsFromGMT(for: <local noon of that day>)` per horizon day. Passing no
+//! per-photo or no per-day offsets is allowed and means "use the `now` offset
+//! for everything" — the pre-fix behaviour, and what a caller with no real
+//! calendar can still do. Both original fixture zones (`UTC`, `Asia/Tokyo`)
+//! have no DST, so every per-photo offset there equals the constant; only
+//! `europe-berlin-dst-fallback-horizon` can tell the two apart.
 
 use gallery_model::{AppleDate, CivilDateTime};
 
@@ -63,8 +70,8 @@ const SECONDS_PER_DAY: f64 = 86_400.0;
 pub struct UtcOffset(pub i32);
 
 impl UtcOffset {
-    /// GMT. Also the zone every memory **id** is rendered in — see
-    /// [`LocalCalendar::iso_day_gmt`].
+    /// GMT. Once the zone every memory **id** was rendered in, whatever the
+    /// user's own was — see [`LocalCalendar::iso_day`].
     pub const UTC: UtcOffset = UtcOffset(0);
 
     /// Hours east of Greenwich.
@@ -80,7 +87,8 @@ pub struct LocalCalendar {
     pub offset: UtcOffset,
 }
 
-/// The offsets a run works in: one for `now`, and one per photo.
+/// The offsets a run works in: one for `now`, one per photo, one per horizon
+/// day.
 ///
 /// Cheap to carry and cheap to ask — [`Self::at`] is an index into a `Vec<i32>`
 /// and returns a `Copy` calendar, so a per-photo call site costs the same as
@@ -94,6 +102,9 @@ pub struct Zone {
     /// behaviour before per-photo offsets existed, and still what a caller
     /// without a real calendar passes.
     per_photo: Vec<i32>,
+    /// Indexed by days from today: entry 0 is today, entry 1 tomorrow. Same
+    /// empty-means-fallback rule as `per_photo`.
+    horizon: Vec<i32>,
 }
 
 impl Zone {
@@ -103,6 +114,7 @@ impl Zone {
         Zone {
             at_now: LocalCalendar::new(offset),
             per_photo: Vec::new(),
+            horizon: Vec::new(),
         }
     }
 
@@ -111,7 +123,15 @@ impl Zone {
         Zone {
             at_now: LocalCalendar::new(at_now),
             per_photo,
+            horizon: Vec::new(),
         }
+    }
+
+    /// The offsets the platform resolved for the horizon's own days. Only
+    /// [`crate::scheduled`] reads them.
+    pub fn with_horizon_offsets(mut self, horizon: Vec<i32>) -> Self {
+        self.horizon = horizon;
+        self
     }
 
     /// The calendar for `now`: today's day, the horizon's days, the six-month
@@ -125,6 +145,21 @@ impl Zone {
     /// table degrades to the old behaviour instead of panicking.
     pub fn at(&self, photo_index: u32) -> LocalCalendar {
         match self.per_photo.get(photo_index as usize) {
+            Some(offset) => LocalCalendar::new(UtcOffset(*offset)),
+            None => self.at_now,
+        }
+    }
+
+    /// The calendar in force `days` after today — the offset a pre-published
+    /// horizon day's validity window opens and closes in.
+    ///
+    /// `days` is the offset from today, not a position in a 1-based list: day
+    /// 0 is today and the last horizon day's `valid_to` is midnight of the day
+    /// *after* it, so the table a caller fills is two entries longer than the
+    /// horizon. A day it does not cover falls back to [`Self::now`], the same
+    /// degradation [`Self::at`] documents.
+    pub fn at_horizon_day(&self, days: i64) -> LocalCalendar {
+        match usize::try_from(days).ok().and_then(|d| self.horizon.get(d)) {
             Some(offset) => LocalCalendar::new(UtcOffset(*offset)),
             None => self.at_now,
         }
@@ -144,6 +179,27 @@ pub struct YearMonthDay {
     pub year: i32,
     pub month: u32,
     pub day: u32,
+}
+
+impl YearMonthDay {
+    /// `n` days later in the proleptic Gregorian calendar.
+    ///
+    /// Civil arithmetic rather than `86_400 × n` on an instant, because the
+    /// widget horizon has to step from one calendar day to the next in a zone
+    /// whose offset may change in between: adding a day's worth of seconds at
+    /// the run's single `now` offset lands at 23:00 the previous evening when
+    /// the clock falls back, and `_plans/10-widget-timezone-fix.md` is about
+    /// exactly the class of id drift that produces.
+    pub fn adding_days(self, n: i64) -> YearMonthDay {
+        let midnight =
+            CivilDateTime::new(self.year, self.month, self.day, 0, 0, 0).as_naive_unix_secs();
+        let c = CivilDateTime::from_unix_secs_f64((midnight + n * 86_400) as f64);
+        YearMonthDay {
+            year: c.year,
+            month: c.month,
+            day: c.day,
+        }
+    }
 }
 
 /// A `(month, day)` pair — birthdays and the on-this-day filter.
@@ -235,16 +291,19 @@ impl LocalCalendar {
         self.ymd(a) == self.ymd(b)
     }
 
-    /// **The id's date is rendered in GMT while the day it is about is local.**
+    /// **The date a memory id carries: the local calendar day it is about.**
     ///
-    /// `MemoryEngine`'s `iso8601Day` is a bare `ISO8601DateFormatter` with
-    /// `.withFullDate`, and its time zone defaults to GMT. In Tokyo the engine
-    /// correctly selects the June-12-local photos and calls the result
-    /// `onThisDay-2024-06-11`. Landmine 2, and the root of the widget
-    /// deep-link drift in landmine 3 — pinned, not fixed.
-    pub fn iso_day_gmt(t: AppleDate) -> String {
-        let c = CivilDateTime::from_unix_secs_f64(t.unix_secs_f64());
-        format!("{:04}-{:02}-{:02}", c.year, c.month, c.day)
+    /// It used to render the instant in GMT (`MemoryEngine`'s `iso8601Day` is a
+    /// bare `ISO8601DateFormatter`, whose time zone defaults to GMT), so in
+    /// Tokyo the engine selected the June-12-local photos and called the result
+    /// `onThisDay-2024-06-11` — landmine 2, and the root of the widget
+    /// deep-link drift in landmine 3, because the daily rail passed `now` and
+    /// the horizon passed local midnight and the two only render the same date
+    /// in UTC. Reading both through the local calendar makes them agree by
+    /// construction: `_plans/10-widget-timezone-fix.md`.
+    pub fn iso_day(&self, t: AppleDate) -> String {
+        let d = self.ymd(t);
+        format!("{:04}-{:02}-{:02}", d.year, d.month, d.day)
     }
 }
 
@@ -273,16 +332,105 @@ mod tests {
         );
         let start = tokyo.start_of_day(noon_jst);
         assert_eq!(start, utc(2024, 6, 7, 15, 0));
-        // …and that is where the widget's pre-published id drift comes from.
-        assert_eq!(LocalCalendar::iso_day_gmt(start), "2024-06-07");
+        // …which used to be where the widget's pre-published id drift came
+        // from: rendering that instant in GMT said "2024-06-07". Read in the
+        // calendar that produced it, it names the day it opens (_plans/10).
+        assert_eq!(tokyo.iso_day(start), "2024-06-08");
     }
 
     #[test]
-    fn the_id_is_gmt_even_when_the_day_is_local() {
+    fn the_id_names_the_local_day_not_the_gmt_one() {
         let tokyo = LocalCalendar::new(UtcOffset::hours(9));
         let t = utc(2024, 6, 11, 15, 30); // 2024-06-12 00:30 JST
         assert_eq!(tokyo.month_day(t), MonthDay { month: 6, day: 12 });
-        assert_eq!(LocalCalendar::iso_day_gmt(t), "2024-06-11");
+        // Landmine 2 was "2024-06-11" — the memory is about June 12 local and
+        // was named after the GMT instant. Fixed in _plans/10.
+        assert_eq!(tokyo.iso_day(t), "2024-06-12");
+    }
+
+    /// The matrix `_plans/10` asks for. For every offset and every time of day,
+    /// the id the daily rail renders from `now` and the id the horizon renders
+    /// from that day's local midnight must be the same string, and it must name
+    /// the day the user is living in. Before the fix the first diverged from
+    /// the second after 09:00 in Tokyo and after 17:00 in Los Angeles.
+    #[test]
+    fn the_live_and_scheduled_ids_agree_in_every_zone_at_every_hour() {
+        for seconds in [
+            -11 * 3600,
+            -7 * 3600,
+            0,
+            5 * 3600 + 45 * 60,
+            9 * 3600,
+            13 * 3600,
+        ] {
+            let cal = LocalCalendar::new(UtcOffset(seconds));
+            for (hour, minute) in [(0, 30), (9, 0), (12, 0), (18, 0), (23, 30)] {
+                // The instant whose LOCAL wall clock is 2024-06-11 hour:minute.
+                let now = AppleDate::from_unix_secs_f64(
+                    CivilDateTime::new(2024, 6, 11, hour, minute, 0).as_naive_unix_secs() as f64
+                        - f64::from(seconds),
+                );
+                let live = cal.iso_day(now);
+                let scheduled = cal.iso_day(cal.instant_at_midnight(cal.ymd(now)));
+                assert_eq!(live, "2024-06-11", "offset {seconds} at {hour}:{minute:02}");
+                assert_eq!(scheduled, live, "offset {seconds} at {hour}:{minute:02}");
+            }
+        }
+    }
+
+    /// The horizon table is indexed by days from today and degrades the way the
+    /// per-photo one does, so a caller with no real calendar gets a
+    /// single-offset horizon rather than a panic.
+    #[test]
+    fn a_missing_horizon_offset_falls_back_to_now() {
+        let cet = 3600;
+        let cest = 2 * 3600;
+        let zone = Zone::fixed(UtcOffset(cest)).with_horizon_offsets(vec![cest, cest, cet]);
+        assert_eq!(zone.at_horizon_day(0).offset, UtcOffset(cest));
+        assert_eq!(zone.at_horizon_day(2).offset, UtcOffset(cet));
+        assert_eq!(
+            zone.at_horizon_day(8).offset,
+            UtcOffset(cest),
+            "past the table"
+        );
+        assert_eq!(
+            Zone::fixed(UtcOffset(cest)).at_horizon_day(3).offset,
+            UtcOffset(cest),
+            "no table at all"
+        );
+    }
+
+    /// Stepping the horizon in civil days rather than in seconds is what makes
+    /// it immune to a transition inside the seven days.
+    #[test]
+    fn civil_days_step_across_months_and_leap_days() {
+        let feb28 = YearMonthDay {
+            year: 2024,
+            month: 2,
+            day: 28,
+        };
+        assert_eq!(feb28.adding_days(1).day, 29);
+        assert_eq!(
+            feb28.adding_days(2),
+            YearMonthDay {
+                year: 2024,
+                month: 3,
+                day: 1
+            }
+        );
+        assert_eq!(
+            YearMonthDay {
+                year: 2023,
+                month: 12,
+                day: 28
+            }
+            .adding_days(7),
+            YearMonthDay {
+                year: 2024,
+                month: 1,
+                day: 4
+            }
+        );
     }
 
     #[test]

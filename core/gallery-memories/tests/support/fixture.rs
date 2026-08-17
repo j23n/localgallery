@@ -47,14 +47,18 @@ pub fn parse_utc(s: &str) -> AppleDate {
     AppleDate::from_unix_secs_f64(civil.as_naive_unix_secs() as f64 + millis / 1000.0)
 }
 
-/// The fixtures name IANA zones; this crate takes a fixed UTC offset. Both
-/// zones the fixtures use are fixed-offset, so the mapping is exact — see the
-/// `time` module docs for what a DST zone would cost.
+/// The engine fixture names IANA zones; this crate takes a fixed UTC offset.
+/// Both zones `memory_engine.json` uses are fixed-offset, so the mapping is
+/// exact.
+///
+/// `scheduled_memories.json` does not go through here: since it grew a scenario
+/// whose offset changes *inside* the horizon it records the offsets Foundation
+/// resolved as fields of its own, which is the only honest way for a crate with
+/// no tz database to read one.
 pub fn offset_for(zone: &str) -> UtcOffset {
     match zone {
         "UTC" => UtcOffset::UTC,
         "Asia/Tokyo" => UtcOffset::hours(9),
-        "America/Los_Angeles" => UtcOffset::hours(-8),
         other => panic!("no fixed offset recorded for {other}"),
     }
 }
@@ -249,17 +253,20 @@ pub fn inputs_from(
     me_person_path: &str,
     hidden_people: &[String],
     now: &str,
-    time_zone: &str,
+    time_zone: UtcOffset,
     seed: &str,
 ) -> GenerationInputs {
     let contacts: Vec<Contact> = contacts.iter().map(ConfContact::to_contact).collect();
     let photos: Vec<_> = photos.iter().map(ConfPhoto::to_photo_file).collect();
     GenerationInputs {
         // No fixture scenario has cloud placeholders, so the whole table is the
-        // scored pool — and no per-photo offsets, because both fixture zones
-        // are fixed-offset and every offset would equal the constant.
+        // scored pool — and none needs per-photo offsets: every scenario photo
+        // sits near midday, so the ±1 h a DST zone would contribute cannot move
+        // one onto another day. The horizon offsets are the caller's to fill;
+        // those a scenario can observe.
         ladder_photo_count: photos.len(),
         photo_time_zone_offsets: Vec::new(),
+        horizon_time_zone_offsets: Vec::new(),
         photos,
         leaf_folders: folders.iter().map(ConfFolder::to_leaf_folder).collect(),
         contacts,
@@ -268,7 +275,7 @@ pub fn inputs_from(
         me_person_path: me_person_path.to_string(),
         hidden_people: string_set(hidden_people),
         now: parse_utc(now),
-        time_zone: offset_for(time_zone),
+        time_zone,
         seed: seed.to_string(),
         seen_memory_ids: HashMap::new(),
         surfaced_clusters: HashMap::new(),

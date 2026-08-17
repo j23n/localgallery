@@ -1,12 +1,28 @@
 //! `scheduled_memories.json`, run against `gallery_memories::compute_scheduled`.
 //!
-//! Four scenarios × a 7-day horizon, plus the day-N parity check the widget
+//! Seven scenarios × a 7-day horizon, plus the day-N parity check the widget
 //! deep links depend on: the id pre-published for day N must be the id the live
 //! pipeline produces on day N, with identical content.
 //!
-//! In UTC that holds and is asserted. In `Asia/Tokyo` it does **not**, and the
-//! fixture pins the failure — the horizon walks local midnights while the id is
-//! rendered in GMT. See `scheduled::compute_scheduled`'s docs and landmine 3.
+//! The live half of that check runs at the scenario's **own wall-clock time**,
+//! not at noon. Noon is the one hour of the day at which both halves of the old
+//! bug cancel out in every zone, so a fixture that only ever looked there could
+//! not see the mirrored evening failure behind GMT
+//! (`america-los-angeles-evening-horizon`). Every scenario that predates that
+//! one is set at local noon, so their parity blocks are unchanged by it.
+//!
+//! It holds in every scenario since `_plans/10-widget-timezone-fix.md`. It used
+//! not to: the horizon walked local midnights while the id was rendered in GMT,
+//! so `asia-tokyo-horizon` recorded three of seven days with an empty
+//! `matchedIDs`. That scenario is now the regression test for the fix, and
+//! landmines 2 and 3 in the fixture README describe what it used to record.
+//!
+//! **Schema 2** carries the resolved offsets — `timeZoneOffsetSeconds` and the
+//! per-horizon-day `horizonOffsetSeconds` — beside the IANA `timeZone` name.
+//! This crate has no tz database, so a scenario whose offset changes *inside*
+//! the horizon (`europe-berlin-dst-fallback-horizon`) is only reproducible from
+//! the numbers Foundation resolved. The name stays as provenance: it is what
+//! makes the numbers legible.
 
 #[path = "support/fixture.rs"]
 mod fixture;
@@ -14,7 +30,7 @@ mod fixture;
 use std::collections::{HashMap, HashSet};
 
 use fixture::*;
-use gallery_memories::{compute_scheduled, generate, GenerationInputs, LocalCalendar};
+use gallery_memories::{compute_scheduled, generate, GenerationInputs, LocalCalendar, UtcOffset};
 use gallery_model::AppleDate;
 use serde::Deserialize;
 
@@ -30,8 +46,15 @@ struct ScheduledDump {
 struct Scenario {
     name: String,
     notes: Vec<String>,
+    /// Provenance for the two offset fields below, and the zone the Swift
+    /// harness moved the process to.
     #[serde(rename = "timeZone")]
     time_zone: String,
+    #[serde(rename = "timeZoneOffsetSeconds")]
+    time_zone_offset_seconds: i32,
+    /// One per day from today, sampled at that day's local noon.
+    #[serde(rename = "horizonOffsetSeconds")]
+    horizon_offset_seconds: Vec<i32>,
     today: String,
     #[serde(rename = "horizonDays")]
     horizon_days: i64,
@@ -76,7 +99,7 @@ impl Scenario {
     /// The snapshot both halves run over. `seed` is filled in per parity day;
     /// the scheduled pass never reads it.
     fn to_inputs(&self, now: &str, seed: &str) -> GenerationInputs {
-        inputs_from(
+        let mut inputs = inputs_from(
             &self.photos,
             &[],
             &self.contacts,
@@ -85,9 +108,11 @@ impl Scenario {
             "",
             &[],
             now,
-            &self.time_zone,
+            UtcOffset(self.time_zone_offset_seconds),
             seed,
-        )
+        );
+        inputs.horizon_time_zone_offsets = self.horizon_offset_seconds.clone();
+        inputs
     }
 
     fn observed_items(&self) -> Vec<Item> {
@@ -97,7 +122,11 @@ impl Scenario {
         compute_scheduled(&inputs, HORIZON_DAYS, &HashSet::new())
             .into_iter()
             .map(|s| Item {
-                day_offset: cal.day_difference(start_of_today, s.valid_from),
+                // Rounded, not floored: a window opens at ITS day's offset, so
+                // across a transition it sits an hour either side of a whole
+                // number of days from today's midnight. Flooring reports the
+                // previous day when the clocks go forward.
+                day_offset: ((s.valid_from.0 - start_of_today.0) / 86_400.0).round() as i64,
                 valid_from: s.valid_from.to_utc_string(),
                 valid_to: s.valid_to.to_utc_string(),
                 memory: ConfMemory::of(&s.memory),
@@ -117,12 +146,17 @@ impl Scenario {
         let cal = base.calendar();
         let start_of_today = cal.start_of_day(base.now);
 
+        // The scenario's own time of day, carried onto each horizon day — see
+        // the module docs for why noon would hide half the bug this fixture is
+        // the regression test for.
+        let seconds_into_day = base.now.0 - start_of_today.0;
+
         (1..=HORIZON_DAYS)
             .map(|offset| {
                 let day = cal.adding_days(start_of_today, offset);
-                let noon = AppleDate(day.0 + 12.0 * 3600.0);
+                let same_hour = AppleDate(day.0 + seconds_into_day);
                 let mut live_inputs = self.to_inputs(&self.today, &Self::day_key(&cal, day));
-                live_inputs.now = noon;
+                live_inputs.now = same_hour;
                 let live = generate(&live_inputs);
                 let live_by_id: HashMap<String, ConfMemory> = live
                     .iter()
@@ -159,8 +193,8 @@ fn dump() -> ScheduledDump {
 #[test]
 fn every_scenario_reproduces_its_horizon() {
     let dump = dump();
-    assert_eq!(dump.schema, 1);
-    assert!(dump.scenarios.len() >= 4);
+    assert_eq!(dump.schema, 2, "schema 2 carries the resolved offsets");
+    assert!(dump.scenarios.len() >= 7);
 
     for scenario in &dump.scenarios {
         assert!(
@@ -193,11 +227,12 @@ fn every_scenario_reproduces_its_parity_block() {
     }
 }
 
-/// The plan's acceptance criterion, asserted where it holds.
+/// The acceptance criterion, asserted in **every** zone since `_plans/10`.
+/// Before it, this held in UTC alone and the filter here said so.
 #[test]
-fn utc_pre_published_ids_match_the_live_run_on_their_day() {
+fn pre_published_ids_match_the_live_run_on_their_day() {
     let dump = dump();
-    for scenario in dump.scenarios.iter().filter(|s| s.time_zone == "UTC") {
+    for scenario in &dump.scenarios {
         let items = scenario.observed_items();
         let parity = scenario.observed_parity(&items);
         for day in &parity {
@@ -222,55 +257,152 @@ fn utc_pre_published_ids_match_the_live_run_on_their_day() {
     }
 }
 
-/// …and the pinned bug where it does not. A port that "fixes" the GMT id
-/// rendering changes which widget deep links resolve, so the drift is asserted
-/// rather than merely tolerated.
+/// The scenario the fix was written for, asserted in the sharpest form the old
+/// behaviour failed: Tokyo pre-published `onThisDay-2024-06-11` on day **+4**
+/// while the live run produced it on day **+3** — the same id with different
+/// photos behind it. Now the horizon names June 11 on the day June 11 is, every
+/// day of it resolves, and no two days share an id.
 #[test]
-fn the_tokyo_horizon_still_drifts_by_a_day() {
+fn the_tokyo_horizon_no_longer_drifts_by_a_day() {
     let dump = dump();
     let tokyo = dump
         .scenarios
         .iter()
         .find(|s| s.time_zone == "Asia/Tokyo")
-        .expect("the non-UTC scenario is part of the spec");
+        .expect("the zone the bug was found in is part of the spec");
     let items = tokyo.observed_items();
     let parity = tokyo.observed_parity(&items);
 
-    let drifted: Vec<&ParityDay> = parity
-        .iter()
-        .filter(|p| !p.scheduled_but_not_generated_live.is_empty())
-        .collect();
-    assert!(
-        !drifted.is_empty(),
-        "the Tokyo id drift disappeared — if that was deliberate, this test, \
-         the fixture and the README section it points at all need rewriting"
-    );
-    for day in &drifted {
+    for day in &parity {
         assert!(
-            day.matched_ids.is_empty(),
-            "+{}: the drift is total for calendar-tied items",
+            day.scheduled_but_not_generated_live.is_empty(),
+            "+{}: pre-published ids the live run never produces: {:?}",
+            day.day_offset,
+            day.scheduled_but_not_generated_live
+        );
+        assert_eq!(
+            day.matched_ids.len(),
+            day.scheduled_ids.len(),
+            "+{}: every pre-published id must resolve",
             day.day_offset
         );
+        assert!(day.content_identical, "+{}", day.day_offset);
     }
-    // Birthday ids are not date-qualified, so they survive it.
-    assert!(
-        parity
+    // Day +3 is Tokyo's June 11 and is the only day that can carry that id.
+    let day_of = |id: &str| -> Vec<i64> {
+        items
             .iter()
-            .any(|p| p.matched_ids.iter().any(|id| id.starts_with("birthday-"))),
-        "birthday ids carry no date and must still match across the drift"
+            .filter(|i| i.memory.id == id)
+            .map(|i| i.day_offset)
+            .collect()
+    };
+    assert_eq!(day_of("onThisDay-2024-06-11"), vec![3]);
+    // Birthday ids carry no date and were immune to the drift; they still are.
+    assert!(parity
+        .iter()
+        .any(|p| p.matched_ids.iter().any(|id| id.starts_with("birthday-"))));
+}
+
+/// The three zones `_plans/10` added, checked against **hand-computed**
+/// windows rather than against whatever the regeneration produced. Each is a
+/// symptom the original pair (UTC and Tokyo, both DST-free, both at local noon)
+/// could not see.
+#[test]
+fn the_zone_scenarios_open_their_windows_where_the_arithmetic_says() {
+    let dump = dump();
+    let named = |name: &str| -> &Scenario {
+        dump.scenarios
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("no scenario `{name}`"))
+    };
+    let window = |s: &Scenario, id: &str| -> (i64, String, String) {
+        let item = s
+            .scheduled
+            .iter()
+            .find(|i| i.memory.id == id)
+            .unwrap_or_else(|| panic!("{}: no `{id}`", s.name));
+        (
+            item.day_offset,
+            item.valid_from.clone(),
+            item.valid_to.clone(),
+        )
+    };
+
+    // Los Angeles, −7, `now` 18:00 local on 2024-06-08 — the hour at which the
+    // live id used to roll forward to the 12th while the horizon kept
+    // pre-publishing the 11th. Local midnight of the 11th is 07:00Z.
+    let la = named("america-los-angeles-evening-horizon");
+    assert_eq!(la.time_zone_offset_seconds, -7 * 3600);
+    assert_eq!(la.today, "2024-06-09T01:00:00.000Z");
+    assert_eq!(
+        window(la, "onThisDay-2024-06-11"),
+        (
+            3,
+            "2024-06-11T07:00:00.000Z".into(),
+            "2024-06-12T07:00:00.000Z".into()
+        )
     );
-    // The sharpest form: day +4 pre-publishes the very id day +3 generates
-    // live, with different photos behind it.
-    let scheduled_plus_4: Vec<&str> = items
-        .iter()
-        .filter(|i| i.day_offset == 4)
-        .map(|i| i.memory.id.as_str())
-        .collect();
-    assert!(scheduled_plus_4.contains(&"onThisDay-2024-06-11"));
-    assert!(parity[2]
-        .live_generated_ids
-        .iter()
-        .any(|id| id == "onThisDay-2024-06-11"));
+
+    // Berlin, with the horizon straddling the October fallback. The offset is
+    // sampled at each day's local noon, so it is +1 from the 27th on, and the
+    // 26th's `valid_to` is the 27th's `valid_from` — contiguous across the
+    // transition rather than an hour short of it.
+    let berlin = named("europe-berlin-dst-fallback-horizon");
+    assert_eq!(berlin.time_zone_offset_seconds, 2 * 3600);
+    assert_eq!(
+        berlin.horizon_offset_seconds,
+        vec![7200, 7200, 7200, 3600, 3600, 3600, 3600, 3600, 3600],
+        "one per day from today, two entries past the horizon so the last \
+         window can close"
+    );
+    assert_eq!(
+        window(berlin, "onThisDay-2024-10-26"),
+        (
+            2,
+            "2024-10-25T22:00:00.000Z".into(),
+            "2024-10-26T23:00:00.000Z".into()
+        )
+    );
+    assert_eq!(
+        window(berlin, "onThisDay-2024-10-27"),
+        (
+            3,
+            "2024-10-26T23:00:00.000Z".into(),
+            "2024-10-27T23:00:00.000Z".into()
+        )
+    );
+
+    // Kathmandu, +5:45. `now` is 00:45 local, so "today" is already the 9th and
+    // day +2 is the 11th; local midnight of it is 18:15Z the evening before.
+    // Nothing else in this suite proves the arithmetic is in seconds.
+    let kathmandu = named("asia-kathmandu-horizon");
+    assert_eq!(kathmandu.time_zone_offset_seconds, 5 * 3600 + 45 * 60);
+    assert_eq!(
+        window(kathmandu, "onThisDay-2024-06-11"),
+        (
+            2,
+            "2024-06-10T18:15:00.000Z".into(),
+            "2024-06-11T18:15:00.000Z".into()
+        )
+    );
+}
+
+/// The invariant `asia-tokyo-horizon` should always have had, now cheap enough
+/// to demand of every scenario: an id belongs to one horizon day.
+#[test]
+fn no_two_horizon_days_share_an_id() {
+    for scenario in &dump().scenarios {
+        let mut seen: HashMap<String, i64> = HashMap::new();
+        for item in scenario.observed_items() {
+            if let Some(other) = seen.insert(item.memory.id.clone(), item.day_offset) {
+                panic!(
+                    "{}: `{}` is pre-published for both +{} and +{}",
+                    scenario.name, item.memory.id, other, item.day_offset
+                );
+            }
+        }
+    }
 }
 
 /// Only calendar-tied types are pre-published, day 0 never is, and every item

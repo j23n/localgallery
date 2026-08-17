@@ -187,6 +187,38 @@ enum CoreMemories {
         return photos.map { Int32(zone.secondsFromGMT(for: $0.dateTaken ?? fallback)) }
     }
 
+    /// `Calendar.current.timeZone.secondsFromGMT(for:)` at the local **noon** of
+    /// each day of the pre-publish horizon, indexed by days from today.
+    ///
+    /// The core steps the horizon in civil days and has no tz database, so this
+    /// table is the only way a pre-published item's validity window can open at
+    /// the midnight of *its own* day rather than at the run's offset: seven days
+    /// can straddle a DST transition, and the widget compares that window
+    /// against the wall clock.
+    ///
+    /// Noon rather than midnight because midnight is the one instant a
+    /// transition can make ambiguous or non-existent; noon is unambiguous in
+    /// every real zone, at the cost of an hour on the two days a year a
+    /// transition falls before it.
+    ///
+    /// The table runs to `horizonDays + 1` because the last horizon day's
+    /// window *closes* at the midnight of the day after it.
+    ///
+    /// `Calendar.current.timeZone` for the reason spelled out at the
+    /// `timeZoneOffsetSeconds` call site below. Read by
+    /// `ScheduledMemoriesConformanceTests`, which records what the app resolved
+    /// so a crate with no zone database can reproduce the horizon.
+    static func horizonOffsets(for now: Date) -> [Int32] {
+        let calendar = Calendar.current
+        let zone = calendar.timeZone
+        let startOfToday = calendar.startOfDay(for: now)
+        return (0...(horizonDays + 1)).map { day in
+            let noon = calendar.date(byAdding: .day, value: day, to: startOfToday)
+                .flatMap { calendar.date(bySettingHour: 12, minute: 0, second: 0, of: $0) }
+            return Int32(zone.secondsFromGMT(for: noon ?? now))
+        }
+    }
+
     private static func record(from inputs: Inputs) -> MemoryGenerationInputs {
         MemoryGenerationInputs(
             photos: inputs.photos.map(CoreScanner.record(of:)),
@@ -238,6 +270,7 @@ enum CoreMemories {
             // through the current calendar every time, which is what the
             // deleted engine read.
             timeZoneOffsetSeconds: Int32(Calendar.current.timeZone.secondsFromGMT(for: inputs.now)),
+            horizonOffsetSeconds: horizonOffsets(for: inputs.now),
             seed: inputs.seed,
             seenMemoryIds: inputs.seenMemoryIDs.map {
                 MemoryDateEntry(key: $0.key, date: $0.value.timeIntervalSinceReferenceDate)

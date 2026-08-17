@@ -13,6 +13,17 @@ Phases (each ships independently; each has its own plan file):
 | 2 | `03-phase-2-faces.md` | Face detect/embed/cluster + naming UI → `People/*` + MWG-RS regions | shipped |
 | 3 | `04-phase-3-scanner-metadata.md` | `MetadataReader` + `FolderScanner` move into core behind a VFS trait | shipped — both Swift types deleted |
 | 4 | `05-phase-4-indexes-memories.md` | Search/tag indexes + MemoryEngine port; Swift engine deleted | shipped — `SearchIndex`, `TagIndex`, `MemoryEngine` + its 4 extensions deleted |
+| 5 | `07-face-editing-and-rename.md` | Cluster merge/split, merge proposals surfaced, rename-person UI | planned |
+| 6 | `08-heic-support.md` | HEIC embedded XMP, then HEVC decode for tagging + faces | planned |
+| 7 | `09-bundled-model-pack.md` | Ship the model pack in the app bundle; import becomes an override | planned |
+| 8 | `10-widget-timezone-fix.md` | Fix the pinned memory-id / widget-horizon timezone bug | shipped — ids name the local day; both memories fixtures regenerated |
+
+Phases 5–8 are the follow-ups the extraction deliberately deferred, not a
+second extraction: 5 and 8 finish behaviours the earlier phases left
+half-built, 6 closes the one format gap that costs a modern iPhone library most
+of its photos, and 7 is distribution. They are independent of each other and
+can ship in any order; 8 was the smallest and the only one that fixed a bug
+users could hit today.
 
 With Phase 4 the extraction is **complete for the behaviours it set out to
 move**: no ordering, matching, or memory-selection rule is implemented twice.
@@ -41,10 +52,11 @@ sidecar-manifest field, MemoryEngine architecture rules for the port).
 2. **Library snapshot stays JSON.** The Rust core reads/writes the existing
    `LibrarySnapshot` JSON shape byte-compatibly (Phase 3). No SQLite migration
    for library state; revisit only if 100k-photo load times hurt.
-3. **Simulator-only for now.** No device signing, no folder-management /
-   security-scope work beyond what exists. Build targets: `aarch64-apple-darwin`
-   (tests) + `aarch64-apple-ios-sim`. Device slice (`aarch64-apple-ios`) and
-   Android (`cargo-ndk`) are deferred but the design must not preclude them.
+3. **Device + simulator slices.** Build targets: `aarch64-apple-darwin`
+   (tests) + `aarch64-apple-ios` + `aarch64-apple-ios-sim`. Android
+   (`cargo-ndk`) is deferred but the design must not preclude it. Folder-
+   management / security-scope work beyond what exists stays out of scope
+   for the core port.
 4. **Sidecars are the portable truth.** Durable results (tags, people, face
    regions) are written to `IMG_1234.jpg.xmp` sidecars per the photo-tools
    schema (`photo-tools/docs/xmp-schema.md`). The core **never rewrites image

@@ -183,6 +183,44 @@ final class PeopleStore {
         onWidgetAffectingChange?()
     }
 
+    /// Carry every persisted decision about a person across a rename.
+    ///
+    /// All four of this type's persisted keys are tag paths, and the rescan
+    /// that follows a rename cannot tell a renamed person from a new one — so
+    /// without this the user silently loses their "me" person, their pins,
+    /// their hidden set and their cover photos, and nothing tells them until
+    /// they go looking. Called by the Store after the core reports the sidecars
+    /// written and before the rescan publishes the new path.
+    ///
+    /// Collisions are possible, because renaming onto an existing person is a
+    /// supported merge at the name level. Each key resolves one: the hidden set
+    /// collapses (set semantics), the feature list keeps one entry in the older
+    /// position, and the cover photo the user picked for the *new* name wins —
+    /// that is the name they just chose.
+    func renamePerson(from old: String, to new: String) {
+        guard old != new else { return }
+
+        if hiddenPeople.contains(old) {
+            hiddenPeople.remove(old)
+            hiddenPeople.insert(new)
+        }
+        if let index = featuredPeople.firstIndex(of: old) {
+            featuredPeople[index] = new
+            // A rename onto somebody already featured would otherwise leave the
+            // person pinned twice, which renders as two identical rail entries.
+            var seen = Set<String>()
+            featuredPeople = featuredPeople.filter { seen.insert($0).inserted }
+        }
+        if let photo = featuredPhotoByPerson.removeValue(forKey: old),
+           featuredPhotoByPerson[new] == nil {
+            featuredPhotoByPerson[new] = photo
+        }
+        if mePersonPath == old {
+            mePersonPath = new
+        }
+        onWidgetAffectingChange?()
+    }
+
     // MARK: Cover photo / face region
 
     /// The photo chosen as the card image for a person. When the user hasn't

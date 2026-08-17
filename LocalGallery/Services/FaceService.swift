@@ -11,9 +11,10 @@ import os
 /// off-actor open/release, root-scoped runs, the shared
 /// `SidecarRefreshCoalescer` — and different in exactly one: the core's face
 /// surface has calls that write to disk *without* being a run. Naming a
-/// cluster, un-naming it, ignoring it and renaming a person all rewrite
-/// sidecars, and all of them are refused by the core while a run is in flight.
-/// So `isRunning` gates the review UI's buttons, not just its progress row.
+/// cluster, un-naming it, ignoring it, merging two, splitting one and renaming
+/// a person all rewrite sidecars, and all of them are refused by the core while
+/// a run is in flight. So `isRunning` gates the review UI's buttons, not just
+/// its progress row.
 ///
 /// ## How results surface
 ///
@@ -82,9 +83,22 @@ final class FaceService {
         var url: URL
         var region: FaceRegion
         var quality: Double
-        /// Stable within a cluster listing: a photo can hold two faces of the
-        /// same person, so the path alone is not unique.
-        var id: String { "\(url.path)#\(region.centerX),\(region.centerY)" }
+        /// The core's handle on this face, opaque here and handed straight back
+        /// to `split(cluster:faces:)`. A photo can hold two faces of the same
+        /// person, so neither the path nor the rectangle identifies one.
+        var key: String
+        var id: String { key }
+    }
+
+    /// Two clusters the core thinks are the same person.
+    ///
+    /// Ids only, joined against `allClusters` where it is rendered — the core
+    /// deliberately does not re-send the exemplars the app already holds.
+    struct Proposal: Equatable, Sendable, Identifiable {
+        var a: Int64
+        var b: Int64
+        var similarity: Double
+        var id: String { "\(a)-\(b)" }
     }
 
     /// One cluster, as the review grid renders it.
@@ -107,6 +121,10 @@ final class FaceService {
     /// Every cluster the core knows about, refreshed by `refreshClusters()`
     /// after each run and after each naming action.
     private(set) var allClusters: [Cluster] = []
+    /// Outstanding merge suggestions, strongest first. Read alongside
+    /// `allClusters` because the review screen renders them together and a
+    /// proposal naming a cluster that list no longer has is not renderable.
+    private(set) var mergeProposals: [Proposal] = []
 
     /// Faces can run: a pack is installed and it ships face models.
     var isAvailable: Bool { installedPack?()?.hasFaces == true }
@@ -173,6 +191,12 @@ final class FaceService {
     /// The library root a run is confined to. Same reason as tagging's: the
     /// core's cache DB outlives any one root.
     @ObservationIgnored var libraryRoot: (@MainActor () -> URL?)?
+    /// A person's name changed in the sidecars, `(old, new)`. `GalleryStore`
+    /// wires this to the per-person state keyed by tag path — the hidden set,
+    /// the pins, the cover photos, the "me" person, the contact links — none of
+    /// which the rescan can migrate on its own, because by the time it lands a
+    /// renamed person is indistinguishable from a new one.
+    @ObservationIgnored var onPersonRenamed: (@MainActor (String, String) -> Void)?
     /// Called when freshly written sidecars need to be pulled into the app.
     /// `GalleryStore` wires this to a light rescan.
     @ObservationIgnored var onSidecarsWritten: (@MainActor () async -> Void)? {
@@ -352,11 +376,14 @@ final class FaceService {
         await ensurePackChecked?()
         guard let pack = installedPack?(), pack.hasFaces else {
             allClusters = []
+            mergeProposals = []
             return
         }
         do {
             let session = try await openSession(packDirectory: pack.directory)
-            allClusters = try await Self.readClusters(from: session)
+            let review = try await Self.readReview(from: session)
+            allClusters = review.clusters
+            mergeProposals = review.proposals
         } catch {
             lastError = FaceServiceError(error)
             Log.ml.error("Reading face clusters failed: \(Log.r.error(error))")
@@ -404,10 +431,71 @@ final class FaceService {
     }
 
     /// Rename a person everywhere the core has written them.
+    ///
+    /// `onPersonRenamed` runs between the core's success and the rescan: the
+    /// app's own per-person state is keyed by tag path, and a rescan that
+    /// published the new path before that state moved would show the person
+    /// un-pinned, un-hidden and without their cover photo for the length of it.
     @discardableResult
     func rename(person old: String, to new: String) async -> Bool {
         await mutate("renaming \(Log.r.person(old))") { session, root in
             try session.renamePerson(old: old, new: new, rootPrefix: root)
+        } afterWrite: { [weak self] in
+            self?.onPersonRenamed?(old, new)
+        }
+    }
+
+    /// Fold one cluster into another. `into` survives; `from` disappears.
+    ///
+    /// The direction is the caller's decision — see `PeopleReviewView` for the
+    /// policy (the named group survives; between two named ones the bigger).
+    /// The core only carries it out.
+    @discardableResult
+    func merge(into: Int64, from: Int64) async -> Bool {
+        await mutate("merging cluster \(from) into \(into)") { session, root in
+            try session.mergeClusters(into: into, from: from, rootPrefix: root)
+        }
+    }
+
+    /// Move faces out of a cluster and into a new one.
+    ///
+    /// A selection the core no longer recognises is counted, not fatal: this
+    /// screen can be open across a run that deleted a face, and losing the
+    /// whole gesture over one stale crop would be the worse answer.
+    @discardableResult
+    func split(cluster id: Int64, faces: [String]) async -> Bool {
+        await mutate("splitting cluster \(id)") { session, root in
+            let result = try session.splitCluster(clusterId: id, faceKeys: faces, rootPrefix: root)
+            if result.ignoredKeys > 0 {
+                Log.ml.info("Split of cluster \(id) skipped \(result.ignoredKeys) faces the core no longer has")
+            }
+            return result.report
+        }
+    }
+
+    /// Forget one merge suggestion — the user said these two are not the same
+    /// person. Writes nothing to disk, so it does not go through `mutate`.
+    func dismissProposal(_ proposal: Proposal) async {
+        guard !isCoreBusy else {
+            lastError = .alreadyRunning
+            return
+        }
+        guard let pack = installedPack?(), pack.hasFaces else { return }
+        do {
+            let session = try await openSession(packDirectory: pack.directory)
+            let (a, b) = (proposal.a, proposal.b)
+            try await Task.detached(priority: .userInitiated) { () -> Result<Void, FaceServiceError> in
+                do {
+                    return .success(try session.dismissMergeProposal(a: a, b: b))
+                } catch {
+                    return .failure(FaceServiceError(error))
+                }
+            }.value.get()
+            mergeProposals.removeAll { $0 == proposal }
+            lastError = nil
+        } catch {
+            lastError = FaceServiceError(error)
+            Log.ml.error("Dismissing a merge suggestion failed: \(Log.r.error(error))")
         }
     }
 
@@ -461,7 +549,8 @@ final class FaceService {
     /// it meant would try to write sidecars outside the app's security scope.
     private func mutate(
         _ what: String,
-        _ body: @escaping @Sendable (FaceSession, String?) throws -> SidecarWriteReport
+        _ body: @escaping @Sendable (FaceSession, String?) throws -> SidecarWriteReport,
+        afterWrite: (@MainActor () -> Void)? = nil
     ) async -> Bool {
         guard !isCoreBusy else {
             lastError = .alreadyRunning
@@ -482,6 +571,10 @@ final class FaceService {
                     return .failure(FaceServiceError(error))
                 }
             }.value.get()
+            // Before the refresh below, not after: whatever app-side state this
+            // write invalidates has to move while the library still describes
+            // the old world.
+            afterWrite?()
             Log.ml.info(
                 "\(what): \(report.written) written, \(report.unchanged) unchanged, \(report.skipped) skipped, \(report.failed) failed"
             )
@@ -607,12 +700,21 @@ final class FaceService {
         }.value.get()
     }
 
-    private nonisolated static func readClusters(
+    /// The two reads the review screen needs, in one crossing.
+    ///
+    /// Together rather than separately because a proposal is a pair of cluster
+    /// ids and nothing else: read against a different snapshot of the cluster
+    /// list, it can name a group that list does not have.
+    private nonisolated static func readReview(
         from session: FaceSession
-    ) async throws -> [Cluster] {
-        try await Task.detached(priority: .userInitiated) { () -> Result<[Cluster], FaceServiceError> in
+    ) async throws -> (clusters: [Cluster], proposals: [Proposal]) {
+        try await Task.detached(priority: .userInitiated) {
+            () -> Result<(clusters: [Cluster], proposals: [Proposal]), FaceServiceError> in
             do {
-                return .success(try session.clusters().map(Cluster.init))
+                return .success((
+                    clusters: try session.clusters().map(Cluster.init),
+                    proposals: try session.mergeProposals().map(Proposal.init)
+                ))
             } catch {
                 return .failure(FaceServiceError(error))
             }
@@ -636,8 +738,15 @@ extension FaceService.Face {
                 width: ref.width,
                 height: ref.height
             ),
-            quality: Double(ref.quality)
+            quality: Double(ref.quality),
+            key: ref.faceKey
         )
+    }
+}
+
+extension FaceService.Proposal {
+    init(_ proposal: MergeProposal) {
+        self.init(a: proposal.a, b: proposal.b, similarity: Double(proposal.similarity))
     }
 }
 
@@ -735,6 +844,10 @@ enum FaceServiceError: Error, Sendable, Equatable {
     /// The cluster is gone — a re-cluster pass rebuilt the partition under a
     /// list the screen was still holding.
     case clusterGone
+    /// The merge or split named something the core no longer recognises. Same
+    /// cause as `clusterGone` and a different sentence, because the user is
+    /// looking at a selection they made rather than at a list.
+    case staleSelection
     case alreadyRunning
     case cancelled
 
@@ -771,6 +884,12 @@ enum FaceServiceError: Error, Sendable, Equatable {
             self = .invalidName(reason)
         case .ClusterNotFound:
             self = .clusterGone
+        // The three ways an edit can name something the core no longer has: a
+        // cluster that was rebuilt, a face that was deleted, a pair that has
+        // already been merged. All of them mean the screen is stale, which is
+        // the one thing the user can act on.
+        case .InvalidMerge, .InvalidSplit, .InvalidFaceKey:
+            self = .staleSelection
         case .Cancelled:
             self = .cancelled
         case .AlreadyRunning:
@@ -804,6 +923,7 @@ enum FaceServiceError: Error, Sendable, Equatable {
                 : "\(n) photos' sidecars could not be written."
         case .invalidName(let d): return "That name can't be used: \(d)"
         case .clusterGone: return "That group no longer exists — pull to refresh."
+        case .staleSelection: return "That selection is out of date — pull to refresh and try again."
         case .alreadyRunning: return "A scan is running — try again when it finishes."
         case .cancelled: return "The face scan was cancelled."
         }

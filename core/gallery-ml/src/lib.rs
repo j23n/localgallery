@@ -92,5 +92,8 @@ pub use face::{
     NoFaceProgress, ReclusterSummary, SidecarWritePlan, ALIGN_VERSION,
 };
 pub use pack::{ClusteringConfig, FaceSpec, Manifest, ModelPack, RootConfig};
-pub use preprocess::{PreprocessConfig, ResizeFilter, Tensor, PREPROCESS_VERSION};
+pub use preprocess::{
+    CrateDecoder, ImageDecoder, ImageKind, PreprocessConfig, ResizeFilter, Tensor, DECODER_VERSION,
+    PREPROCESS_VERSION,
+};
 pub use tagger::{ScoredTag, ZeroShotTagger};

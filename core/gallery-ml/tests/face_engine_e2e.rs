@@ -410,6 +410,40 @@ fn an_unsupported_extension_is_skipped_and_a_corrupt_image_fails() {
     assert_eq!(stats.pending, 1);
 }
 
+/// The face queue's skip path is the tagging queue's, and it moves on the same
+/// dial: a HEIC-heavy library that a tagging-only build refused must come back
+/// when a decoder ships, without the pack key or a single face embedding
+/// changing. The two engines hold separate connections to one cache file, so
+/// "both queues" is a claim worth checking on both.
+#[test]
+fn the_face_queue_re_opens_skipped_rows_on_the_same_decoder_dial() {
+    let f = Fixture::with_files(&[BRIGHT]);
+    let path = f.path(BRIGHT);
+    f.enqueue_all(&[BRIGHT]);
+
+    let cache = CacheDb::open(f.dir.path().join("gallery-cache.sqlite")).unwrap();
+    assert!(cache.face_begin(&path).unwrap());
+    assert!(cache
+        .face_finish_skipped(&path, gallery_ml::DECODER_VERSION)
+        .unwrap());
+
+    // This build's own generation leaves it alone…
+    assert_eq!(f.run().processed, 0, "nothing should have been claimable");
+    assert_eq!(
+        cache.face_item(&path).unwrap().unwrap().state,
+        WorkState::Skipped
+    );
+
+    // …and the next build's brings it back.
+    assert_eq!(
+        cache
+            .face_reopen_skipped_for_decoder(gallery_ml::DECODER_VERSION + 1)
+            .unwrap(),
+        1
+    );
+    assert!(f.run().faces_found > 0, "the re-opened row actually ran");
+}
+
 #[test]
 fn cancellation_stops_promptly_releases_the_row_and_resumes() {
     struct CancelAfterFirst {

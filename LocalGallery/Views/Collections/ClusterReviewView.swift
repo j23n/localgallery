@@ -1,24 +1,23 @@
 import SwiftUI
 
-/// One face cluster, up close: every face in it, a name field, and "Not a
-/// person".
+/// One face cluster, up close: every face in it, a name field, "Not a person",
+/// and the two ways to reshape the group — merge it into another, or pull the
+/// wrong faces out of it.
 ///
-/// Naming writes `People/<Name>` keywords and MWG regions into the `.xmp`
-/// sidecar of every photo the cluster reaches, so both actions are irreversible
-/// from the user's point of view even though the core can retract them — and
-/// both are refused while *either* core engine is running, which is why the
-/// buttons disable on `faces.isCoreBusy` rather than queueing.
+/// All four write `People/<Name>` keywords and MWG regions into the `.xmp`
+/// sidecar of every photo the cluster reaches, so they are irreversible from
+/// the user's point of view even though the core can retract them — and all
+/// four are refused while *either* core engine is running, which is why the
+/// controls disable on `faces.isCoreBusy` rather than queueing.
 ///
 /// ## Naming somebody who already has a group
 ///
-/// `name_cluster` names **this** group; it does not merge it into another one,
-/// and the core has no merge operation yet. Two groups can carry one name, and
-/// that is a supported state — a person photographed across ten years really
-/// does cluster into more than one group, and naming both is how they end up as
-/// one person in the library. What it is *not* is a merge, so this screen says
-/// which of the two it is rather than letting the user infer the wrong one:
-/// the photos join that person everywhere the app shows people, and the groups
-/// stay separate here. `existingGroupNote` is that sentence.
+/// `name_cluster` names **this** group; it does not fold it into another one.
+/// Two groups can carry one name, and that is a supported state — a person
+/// photographed across ten years really does cluster into more than one group.
+/// Merging them is now possible and is a *different* action, so this screen
+/// says which of the two the user is about to do rather than letting them infer
+/// the wrong one. `existingGroupNote` is that sentence.
 struct ClusterReviewView: View {
     let clusterID: Int64
 
@@ -30,6 +29,14 @@ struct ClusterReviewView: View {
     @State private var isLoading = true
     @State private var isSaving = false
     @State private var showIgnoreAlert = false
+    /// Multi-select over the face grid. Off by default: the ordinary reason to
+    /// open this screen is to name the group, and a grid that responds to taps
+    /// by selecting would make that harder for the sake of the rarer action.
+    @State private var isSelecting = false
+    @State private var selection: Set<String> = []
+    @State private var showSplitAlert = false
+    @State private var showMergePicker = false
+    @State private var pendingMerge: MergeDirection?
     @FocusState private var nameFocused: Bool
 
     private let columns = [GridItem(.adaptive(minimum: 76), spacing: 8)]
@@ -84,7 +91,13 @@ struct ClusterReviewView: View {
             $0.id != clusterID && $0.name?.localizedCaseInsensitiveCompare(trimmedName) == .orderedSame
         }
         guard let name = match?.name else { return nil }
-        return "Another group is already named “\(name)”. These photos join \(name) everywhere the app shows people — the two groups stay separate here, because merging groups isn’t supported yet."
+        return "Another group is already named “\(name)”. These photos join \(name) everywhere the app shows people, and the two groups stay separate here — use “Merge with…” if they should become one."
+    }
+
+    /// A split of every face would leave the source empty and the new group an
+    /// exact copy, so the core refuses it; the button says so by being off.
+    private var canSplit: Bool {
+        !selection.isEmpty && selection.count < faces.count && !isSaving && !store.faces.isCoreBusy
     }
 
     var body: some View {
@@ -154,7 +167,7 @@ struct ClusterReviewView: View {
                 }
             }
 
-            Section(faceSectionTitle) {
+            Section {
                 if isLoading {
                     HStack(spacing: 8) {
                         ProgressView()
@@ -165,15 +178,36 @@ struct ClusterReviewView: View {
                 } else {
                     LazyVGrid(columns: columns, spacing: 8) {
                         ForEach(faces) { face in
-                            PersonThumbnailView(
-                                url: face.url,
-                                region: face.region,
-                                size: 76,
-                                cornerRadius: 10
-                            )
+                            faceCell(face)
                         }
                     }
                     .padding(.vertical, 4)
+
+                    if isSelecting {
+                        Button {
+                            showSplitAlert = true
+                        } label: {
+                            Label("Move to New Group", systemImage: "square.on.square.dashed")
+                        }
+                        .disabled(!canSplit)
+                    }
+                }
+            } header: {
+                HStack {
+                    Text(faceSectionTitle)
+                    Spacer(minLength: 0)
+                    if !isLoading && faces.count > 1 {
+                        Button(isSelecting ? "Done" : "Select") {
+                            isSelecting.toggle()
+                            selection.removeAll()
+                        }
+                        .font(.system(size: 13, weight: .medium))
+                        .textCase(nil)
+                    }
+                }
+            } footer: {
+                if isSelecting {
+                    Text("Pick the faces that are somebody else. They move into a new group of their own, and keep no name.")
                 }
             }
         }
@@ -181,17 +215,93 @@ struct ClusterReviewView: View {
         .navigationTitle(cluster?.name ?? "Unnamed Person")
         .navigationBarTitleDisplayMode(.inline)
         .background(Design.bg)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    showMergePicker = true
+                } label: {
+                    Label("Merge with…", systemImage: "arrow.triangle.merge")
+                }
+                .disabled(isSaving || store.faces.isCoreBusy)
+            }
+        }
+        .sheet(isPresented: $showMergePicker) {
+            if let cluster {
+                ClusterPickerView(source: cluster) { pendingMerge = $0 }
+            }
+        }
         .alert("Not a person?", isPresented: $showIgnoreAlert) {
             Button("Cancel", role: .cancel) { }
             Button("Dismiss Group", role: .destructive) { ignore() }
         } message: {
             Text("This group won’t be offered again, and anything already written for it is taken back out of the sidecars.")
         }
+        .alert("Move faces out?", isPresented: $showSplitAlert) {
+            Button("Cancel", role: .cancel) { }
+            Button("Move", role: .destructive) { split() }
+        } message: {
+            Text(splitMessage)
+        }
+        // Presented from the direction itself, not from a separate flag: the
+        // title and the message both have to name the group that survives, and
+        // that is decided in the picker.
+        .alert(
+            pendingMerge?.buttonLabel ?? "Merge",
+            isPresented: Binding(
+                get: { pendingMerge != nil },
+                set: { if !$0 { pendingMerge = nil } }
+            ),
+            presenting: pendingMerge
+        ) { direction in
+            Button("Cancel", role: .cancel) { }
+            Button("Merge") { merge(direction) }
+        } message: { direction in
+            Text(direction.confirmation)
+        }
         .task(id: clusterID) {
             name = cluster?.name ?? ""
             faces = await store.faces.faces(inCluster: clusterID)
             isLoading = false
         }
+    }
+
+    private func faceCell(_ face: FaceService.Face) -> some View {
+        PersonThumbnailView(
+            url: face.url,
+            region: face.region,
+            size: 76,
+            cornerRadius: 10
+        )
+        .overlay(alignment: .bottomTrailing) {
+            if isSelecting {
+                Image(systemName: selection.contains(face.id) ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 18))
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(.white, selection.contains(face.id) ? Design.accentColor : .black.opacity(0.35))
+                    .padding(4)
+            }
+        }
+        .opacity(isSelecting && !selection.contains(face.id) ? 0.55 : 1)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            guard isSelecting else { return }
+            if selection.contains(face.id) {
+                selection.remove(face.id)
+            } else {
+                selection.insert(face.id)
+            }
+        }
+    }
+
+    /// Says the retraction in words when the group is named — that is the part
+    /// of a split that reaches somebody's files.
+    private var splitMessage: String {
+        let count = selection.count
+        let faces = count == 1 ? "This face" : "These \(count) faces"
+        guard let name = cluster?.name else {
+            return "\(faces) move into a new group of their own."
+        }
+        return "\(faces) will no longer be tagged \(name), and move into a new group of their own."
     }
 
     private var faceSectionTitle: String {
@@ -219,6 +329,42 @@ struct ClusterReviewView: View {
             let ok = await store.faces.ignore(cluster: clusterID)
             isSaving = false
             if ok { dismiss() }
+        }
+    }
+
+    /// Stays on the screen afterwards: the group the user is looking at still
+    /// exists, it is just smaller, and the faces they moved out are exactly
+    /// what they wanted to stop seeing here.
+    private func split() {
+        let keys = Array(selection)
+        isSaving = true
+        Task {
+            let ok = await store.faces.split(cluster: clusterID, faces: keys)
+            if ok {
+                selection.removeAll()
+                isSelecting = false
+                faces = await store.faces.faces(inCluster: clusterID)
+            }
+            isSaving = false
+        }
+    }
+
+    /// Leaves when this group was the one absorbed — there is nothing left to
+    /// show — and stays when it survived.
+    private func merge(_ direction: MergeDirection) {
+        isSaving = true
+        Task {
+            let ok = await store.faces.merge(
+                into: direction.survivor.id, from: direction.absorbed.id
+            )
+            isSaving = false
+            guard ok else { return }
+            if direction.absorbed.id == clusterID {
+                dismiss()
+            } else {
+                name = cluster?.name ?? name
+                faces = await store.faces.faces(inCluster: clusterID)
+            }
         }
     }
 }

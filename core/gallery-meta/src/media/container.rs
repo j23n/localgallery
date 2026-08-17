@@ -6,16 +6,18 @@
 //! (fixture landmine 16, `assets/containers/`). Dispatching on the extension
 //! here would quietly re-introduce the disagreement in the wrong direction.
 //!
-//! # Coverage, and what is missing
+//! # Coverage
 //!
-//! JPEG (`APP1`), PNG (`iTXt`) and TIFF/DNG (tag 700) are handled. **HEIF and
-//! AVIF are not**: their XMP lives in an ISO-BMFF `meta` box behind `iinf`/
-//! `iloc`, no fixture exercises it, and a hand-rolled box walk that nothing
-//! checks is worse than a documented gap. What that costs in practice is
-//! narrow — EXIF dates and GPS in HEIC come through `kamadak-exif`, and the
-//! tags/regions this app cares about are written to `.xmp` sidecars — but an
-//! iPhone HEIC carrying embedded `digiKam:TagsList` would read as untagged.
-//! See the port notes before the Swift swap.
+//! JPEG (`APP1`), PNG (`iTXt`), TIFF/DNG (tag 700) and — since Phase 6 —
+//! HEIF/AVIF, whose packet is an *item* located through the ISO-BMFF
+//! `meta`/`iinf`/`iloc` boxes rather than a marker in a stream. That last one
+//! is [`super::isobmff`]; it is the only branch here that has to treat every
+//! number it reads as an attack, because an item offset can point anywhere.
+//!
+//! WebP (`RIFF`/`XMP `) remains unhandled: no fixture exercises it and no
+//! camera writes it.
+
+use super::isobmff;
 
 /// Extract the XMP packet, if the container has one and this module can find
 /// it. The bytes are the packet as stored — decoding is
@@ -25,6 +27,9 @@ pub fn extract_xmp(bytes: &[u8]) -> Option<Vec<u8>> {
         [0xFF, 0xD8, ..] => jpeg_xmp(bytes),
         [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, ..] => png_xmp(bytes),
         [b'I', b'I', 0x2A, 0x00, ..] | [b'M', b'M', 0x00, 0x2A, ..] => tiff_xmp(bytes),
+        // Sniffed on the `ftyp` brand, like every other arm — a `.heic` that is
+        // really a JPEG is read as a JPEG, and an MP4 is read as neither.
+        _ if isobmff::is_heif(bytes) => isobmff::extract_xmp(bytes),
         _ => None,
     }
 }
@@ -225,5 +230,19 @@ mod tests {
     #[test]
     fn unknown_containers_report_nothing_rather_than_guessing() {
         assert_eq!(extract_xmp(b"not an image at all"), None);
+    }
+
+    /// The HEIF branch, reached the way every other branch is: by content.
+    #[test]
+    fn a_heic_packet_is_found_and_an_mp4_is_left_alone() {
+        use super::super::isobmff::tests::{heif, xmp_item};
+
+        let packet = b"<x:xmpmeta><digiKam:TagsList/></x:xmpmeta>";
+        assert_eq!(
+            extract_xmp(&heif(b"heic", &[xmp_item(packet)], 0)).as_deref(),
+            Some(&packet[..])
+        );
+        // A `.heic`-shaped container with a video brand is not searched.
+        assert_eq!(extract_xmp(&heif(b"mp42", &[xmp_item(packet)], 0)), None);
     }
 }

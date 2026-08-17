@@ -29,10 +29,10 @@ merges the two archives (`libtool -static`) before assembling the xcframework;
 the two link requirements an archive can't express (`-lc++`,
 `-framework CoreML`) live in `project.yml`'s `OTHER_LDFLAGS`.
 
-Device builds (`-destination "generic/platform=iOS"`) do not work: they need a
-signing team *and* an `aarch64-apple-ios` slice in the XCFramework, which
-`build_core.sh` does not produce yet (simulator only — standing decision 3 in
-`_plans/00-rust-core-overview.md`).
+Device builds need a signing team in Xcode (or `DEVELOPMENT_TEAM` in
+`project.yml`). `build_core.sh` produces both `ios-arm64` and
+`ios-arm64-simulator` slices; after a core change, re-run it before building
+for a physical device.
 
 ## Structure
 

@@ -86,6 +86,31 @@ pub enum MlError {
         /// The id that was not found.
         id: i64,
     },
+    /// A merge that would not produce a cluster: the two ids are the same.
+    ///
+    /// Refused rather than treated as a no-op, because the caller is acting on
+    /// a stale list and the honest answer is that the list moved.
+    InvalidMerge {
+        /// What was wrong; shown to nobody, logged.
+        detail: String,
+    },
+    /// A split of nothing, or of everything.
+    ///
+    /// Both leave the partition unchanged while creating an empty or a
+    /// duplicate cluster, so neither is performed.
+    InvalidSplit {
+        /// What was wrong; shown to nobody, logged.
+        detail: String,
+    },
+    /// A face key the caller supplied is not `<content-hash-hex>:<index>`.
+    ///
+    /// Distinct from a key whose row is *gone*, which is skipped rather than
+    /// refused: the cache can move under a review screen the user left open,
+    /// but a malformed key is a programming error.
+    InvalidFaceKey {
+        /// The key as supplied.
+        key: String,
+    },
     /// The caller set the cancellation flag.
     Cancelled,
 }
@@ -132,6 +157,9 @@ impl fmt::Display for MlError {
             MlError::Vfs(e) => write!(f, "{e}"),
             MlError::Meta(e) => write!(f, "{e}"),
             MlError::ClusterNotFound { id } => write!(f, "no such cluster: {id}"),
+            MlError::InvalidMerge { detail } => write!(f, "invalid merge: {detail}"),
+            MlError::InvalidSplit { detail } => write!(f, "invalid split: {detail}"),
+            MlError::InvalidFaceKey { key } => write!(f, "invalid face key: {key:?}"),
             MlError::Cancelled => write!(f, "cancelled"),
         }
     }
@@ -158,7 +186,11 @@ impl MlError {
             MlError::Meta(MetaError::ConcurrentModification { .. }) => ErrorCode::SidecarConflict,
             MlError::Meta(_) => ErrorCode::SidecarWrite,
             MlError::Inference { .. } => ErrorCode::Inference,
-            MlError::Cache { .. } | MlError::ClusterNotFound { .. } => ErrorCode::Cache,
+            MlError::Cache { .. }
+            | MlError::ClusterNotFound { .. }
+            | MlError::InvalidMerge { .. }
+            | MlError::InvalidSplit { .. }
+            | MlError::InvalidFaceKey { .. } => ErrorCode::Cache,
             MlError::Cancelled => ErrorCode::Cancelled,
             MlError::PackFileMissing { .. }
             | MlError::PackHashMismatch { .. }

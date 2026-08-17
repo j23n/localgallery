@@ -91,8 +91,11 @@
 //! touches no mtimes at all — which is what keeps the app's sidecar sync from
 //! being woken by a no-op.
 
+use std::collections::BTreeSet;
+
 use gallery_meta::{write_faces, Area, FaceRegionWrite, FaceWriteRequest};
 
+use super::cluster;
 use super::engine::normalize_root_prefix;
 
 use crate::cache::{ClusterState, NamedFace};
@@ -120,6 +123,21 @@ pub struct FailedWrite {
     pub code: ErrorCode,
     /// Message for logs only.
     pub detail: String,
+}
+
+/// What a split did, on top of the sidecars it wrote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SplitOutcome {
+    /// The cluster the selected faces moved into.
+    pub new_cluster_id: i64,
+    /// Face keys that named nothing in the source cluster.
+    ///
+    /// Reported rather than refused: a review screen can be open across a run
+    /// that deleted a face, and losing the whole gesture over one stale
+    /// selection would be a worse answer than performing the rest of it.
+    pub ignored_keys: usize,
+    /// The sidecars the split rewrote.
+    pub plan: SidecarWritePlan,
 }
 
 /// What a naming operation did.
@@ -251,13 +269,19 @@ impl FaceEngine {
     /// The cluster goes back to [`ClusterState::Unlabeled`], which puts it back
     /// in play for the full re-cluster pass — the state it was in before
     /// anybody looked at it.
+    /// The pin goes with the name. "Back in play for the full re-cluster pass"
+    /// has to mean exactly that, and a cluster the user merged and then
+    /// un-named would otherwise be excluded from that pass forever.
     pub fn unname_cluster(
         &self,
         cluster_id: i64,
         tagged_at: Option<&str>,
         root_prefix: Option<&str>,
     ) -> MlResult<SidecarWritePlan> {
-        self.clear_cluster(cluster_id, ClusterState::Unlabeled, tagged_at, root_prefix)
+        let plan =
+            self.clear_cluster(cluster_id, ClusterState::Unlabeled, tagged_at, root_prefix)?;
+        self.cache().set_cluster_pinned(cluster_id, false)?;
+        Ok(plan)
     }
 
     /// Dismiss a cluster ("not a person") and retract anything it had written.
@@ -327,6 +351,192 @@ impl FaceEngine {
             tagged_at,
             &SyncScope::under(root_prefix).retracting(retracting),
         )
+    }
+
+    /// Fold one cluster into another: `into` survives, `from` disappears.
+    ///
+    /// Directional on purpose. Which of two clusters should survive is a
+    /// *presentation* decision — the named one, or the bigger one, and the user
+    /// has to be told whose name is being dropped — so the caller decides it
+    /// and the core carries no policy.
+    ///
+    /// Bookkeeping plus a sidecar rewrite: nothing is re-detected, re-embedded
+    /// or re-scored. The absorbed faces keep their geometry and their quality;
+    /// what changes is which group claims them, and therefore which name their
+    /// photos carry.
+    ///
+    /// Name resolution, in the order the cases actually arise:
+    ///
+    /// * neither named — the result is unnamed and **pinned**, which is the
+    ///   honest end state of "these two are the same person, I don't know who".
+    /// * one named — that name survives and now reaches the absorbed faces'
+    ///   photos too.
+    /// * both named, different names — `from`'s name is retracted, as a *hint*:
+    ///   [`FaceEngine::sync_sidecars`] re-derives each photo from live cache
+    ///   state, so a photo where another cluster still carries that name keeps
+    ///   it.
+    /// * both named, same name — two groups of one person, and there is nothing
+    ///   to take back.
+    ///
+    /// The result is pinned either way: the user asserted something about this
+    /// group, and [`FaceEngine::recluster`] must not quietly undo it.
+    pub fn merge_clusters(
+        &self,
+        into: i64,
+        from: i64,
+        tagged_at: Option<&str>,
+        root_prefix: Option<&str>,
+    ) -> MlResult<SidecarWritePlan> {
+        if into == from {
+            return Err(MlError::InvalidMerge {
+                detail: format!("cluster {into} cannot absorb itself"),
+            });
+        }
+        let target = self
+            .cache()
+            .cluster(into)?
+            .ok_or(MlError::ClusterNotFound { id: into })?;
+        let source = self
+            .cache()
+            .cluster(from)?
+            .ok_or(MlError::ClusterNotFound { id: from })?;
+
+        // Every read first, so a failure part way through leaves both clusters
+        // as they were rather than half-merged.
+        let mut hashes = self.cache().cluster_hashes(into)?;
+        hashes.extend(self.cache().cluster_hashes(from)?);
+        let mut embeddings = self.cache().cluster_member_embeddings(into)?;
+        embeddings.extend(self.cache().cluster_member_embeddings(from)?);
+        let size =
+            self.cache().cluster_members(into)?.len() + self.cache().cluster_members(from)?.len();
+
+        self.cache().move_cluster_members(from, into)?;
+        // A union with no usable embedding leaves the old centroid standing:
+        // an empty one would make the cluster match nothing at all, which is a
+        // worse answer than a slightly stale mean.
+        let centroid = cluster::centroid(embeddings.iter().map(Vec::as_slice))
+            .unwrap_or_else(|| target.centroid.clone());
+        if !centroid.is_empty() {
+            self.cache()
+                .set_cluster_centroid(into, &centroid, size as u32)?;
+        }
+        if target.person_name.is_none() {
+            if let Some(name) = &source.person_name {
+                self.cache()
+                    .set_cluster_state(into, ClusterState::Named, Some(name))?;
+            }
+        }
+        self.cache().set_cluster_pinned(into, true)?;
+        self.cache().delete_clusters(&[from])?;
+        self.cache().delete_merge_proposals_for(&[into, from])?;
+
+        let retracting = match (&target.person_name, &source.person_name) {
+            (Some(kept), Some(dropped)) if kept != dropped => Some(dropped.clone()),
+            _ => None,
+        };
+        self.sync_sidecars(
+            &hashes,
+            tagged_at,
+            &SyncScope::under(root_prefix).retracting(retracting),
+        )
+    }
+
+    /// Pull the named faces out of a cluster and into a new one.
+    ///
+    /// Keys not in this cluster are counted and ignored rather than refused —
+    /// a review screen can be open across a run that deleted a face, and losing
+    /// the whole gesture over one stale selection is the worse answer. An empty
+    /// selection and a selection covering the whole cluster are both
+    /// [`MlError::InvalidSplit`]: they change no partition while leaving an
+    /// empty or a duplicate cluster behind.
+    ///
+    /// **The split-off faces do not keep the name.** The gesture means "this is
+    /// not that person", and carrying the name across would make split a no-op
+    /// for the only reason anybody reaches for it. Both sides end up pinned:
+    /// the user asserted something about each of them.
+    ///
+    /// The sidecar consequence falls out of the ordinary re-derivation — a
+    /// photo where the split-off face was the only claim to that name loses it,
+    /// a photo where another face of that person remains keeps it — so neither
+    /// case is special-cased here.
+    pub fn split_cluster(
+        &self,
+        cluster_id: i64,
+        face_keys: &[([u8; 32], u32)],
+        tagged_at: Option<&str>,
+        root_prefix: Option<&str>,
+    ) -> MlResult<SplitOutcome> {
+        let cluster = self
+            .cache()
+            .cluster(cluster_id)?
+            .ok_or(MlError::ClusterNotFound { id: cluster_id })?;
+        let membership: BTreeSet<([u8; 32], u32)> = self
+            .cache()
+            .cluster_members(cluster_id)?
+            .into_iter()
+            .collect();
+
+        let mut wanted: Vec<([u8; 32], u32)> = face_keys.to_vec();
+        wanted.sort_unstable();
+        wanted.dedup();
+        let selected: BTreeSet<([u8; 32], u32)> = wanted
+            .iter()
+            .copied()
+            .filter(|key| membership.contains(key))
+            .collect();
+        let ignored_keys = wanted.len() - selected.len();
+
+        if selected.is_empty() {
+            return Err(MlError::InvalidSplit {
+                detail: format!("no selected face belongs to cluster {cluster_id}"),
+            });
+        }
+        if selected.len() == membership.len() {
+            return Err(MlError::InvalidSplit {
+                detail: format!("the selection is all of cluster {cluster_id}"),
+            });
+        }
+
+        let hashes = self.cache().cluster_hashes(cluster_id)?;
+        let (moved, kept): (Vec<_>, Vec<_>) = self
+            .cache()
+            .cluster_member_embeddings_by_key(cluster_id)?
+            .into_iter()
+            .partition(|(key, _)| selected.contains(key));
+        let new_centroid = cluster::centroid(moved.iter().map(|(_, v)| v.as_slice())).ok_or(
+            MlError::InvalidSplit {
+                detail: "the selected faces carry no usable embedding".to_string(),
+            },
+        )?;
+
+        let new_cluster_id = self.cache().create_cluster(&new_centroid)?;
+        for (hash, idx) in &selected {
+            self.cache()
+                .set_cluster_member(new_cluster_id, hash, *idx)?;
+        }
+        self.cache()
+            .set_cluster_centroid(new_cluster_id, &new_centroid, selected.len() as u32)?;
+        self.cache().set_cluster_pinned(new_cluster_id, true)?;
+
+        let remaining = membership.len() - selected.len();
+        if let Some(centroid) = cluster::centroid(kept.iter().map(|(_, v)| v.as_slice())) {
+            self.cache()
+                .set_cluster_centroid(cluster_id, &centroid, remaining as u32)?;
+        }
+        self.cache().set_cluster_pinned(cluster_id, true)?;
+        self.cache()
+            .delete_merge_proposals_for(&[cluster_id, new_cluster_id])?;
+
+        let plan = self.sync_sidecars(
+            &hashes,
+            tagged_at,
+            &SyncScope::under(root_prefix).retracting(cluster.person_name),
+        )?;
+        Ok(SplitOutcome {
+            new_cluster_id,
+            ignored_keys,
+            plan,
+        })
     }
 
     /// Re-derive and write the sidecars of every photo carrying one of these

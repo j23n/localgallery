@@ -32,7 +32,8 @@
 //!                          PRIMARY KEY (content_hash, face_idx));
 //! CREATE TABLE clusters   (cluster_id INTEGER PRIMARY KEY, centroid BLOB,
 //!                          dim INTEGER, size INTEGER, state INTEGER,
-//!                          person_name TEXT, updated_at INTEGER);
+//!                          person_name TEXT, updated_at INTEGER,
+//!                          pinned INTEGER NOT NULL DEFAULT 0);
 //! CREATE TABLE cluster_members (content_hash BLOB, face_idx INTEGER,
 //!                          cluster_id INTEGER,
 //!                          PRIMARY KEY (content_hash, face_idx));
@@ -76,7 +77,7 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use crate::error::{ErrorCode, MlResult};
 
 /// Schema version stored in `meta`. Bump when [`MIGRATIONS`] grows.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// `meta` key holding the applied schema version.
 pub const META_SCHEMA_VERSION: &str = "schema_version";
@@ -217,6 +218,21 @@ const MIGRATIONS: &[&str] = &[
         proposed_at INTEGER NOT NULL,
         PRIMARY KEY (a, b)
     );
+    "#,
+    // 3 → 4: a cluster the user has edited by hand.
+    //
+    // `recluster()` throws the unlabeled partition away and recomputes it, so a
+    // merge or a split of unlabeled clusters would be silently undone by the
+    // next full pass — worse than not offering the operation, because the work
+    // reverts without anybody being told. A pinned cluster and its faces are
+    // excluded from that pass ([`CacheDb::unlabeled_faces`]) exactly the way a
+    // named one already is.
+    //
+    // Pinned rather than named: "these two are the same person, I don't know
+    // who" is a legitimate end state, and forcing a name to make it stick would
+    // put junk in somebody's sidecar.
+    r#"
+    ALTER TABLE clusters ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
     "#,
 ];
 
@@ -436,6 +452,12 @@ pub struct FaceThumb {
     /// A photo carrying these bytes. One of possibly several — the detection is
     /// keyed by content hash, the files are not.
     pub path: String,
+    /// The bytes this face was found in. Half of the face's identity, and the
+    /// reason a crop can be pointed back at a row: a rectangle is not an
+    /// identity, since two detections in one photo can overlap.
+    pub content_hash: [u8; 32],
+    /// Which face of that photo, in detection order. The other half.
+    pub face_idx: u32,
     /// `[x0, y0, x1, y1]` in oriented-image pixels.
     pub bbox: [f32; 4],
     /// Composite quality; see [`crate::face::quality`].
@@ -459,6 +481,9 @@ pub struct ClusterRow {
     pub state: ClusterState,
     /// The person's name, when `state` is [`ClusterState::Named`].
     pub person_name: Option<String>,
+    /// The user shaped this cluster by hand (a merge, or either side of a
+    /// split), so the full re-cluster pass leaves it and its faces alone.
+    pub pinned: bool,
 }
 
 /// How many times a row is retried before it counts as permanently failed.
@@ -1304,11 +1329,15 @@ impl CacheDb {
         )
     }
 
-    /// Faces belonging to a cluster nobody has named or dismissed, plus faces
-    /// belonging to no cluster at all — the input to the full re-cluster pass.
+    /// Faces belonging to a cluster nobody has named, dismissed or hand-edited,
+    /// plus faces belonging to no cluster at all — the input to the full
+    /// re-cluster pass.
     ///
     /// Named and ignored clusters are excluded by construction: "never touches
-    /// named clusters except to propose merges" (Phase 2 plan).
+    /// named clusters except to propose merges" (Phase 2 plan). Pinned ones are
+    /// excluded for the same reason one step further on: the user merged or
+    /// split them deliberately, and a pass that re-partitioned their faces
+    /// would undo that without saying so.
     pub fn unlabeled_faces(&self) -> MlResult<Vec<StoredFace>> {
         self.query_faces(
             "SELECT {cols} FROM faces
@@ -1316,7 +1345,7 @@ impl CacheDb {
                                JOIN clusters c ON c.cluster_id = m.cluster_id
                                WHERE m.content_hash = faces.content_hash
                                  AND m.face_idx = faces.face_idx
-                                 AND c.state <> 0)
+                                 AND (c.state <> 0 OR c.pinned <> 0))
              ORDER BY content_hash, face_idx",
         )
     }
@@ -1335,21 +1364,10 @@ impl CacheDb {
     /// Every cluster, in id order.
     pub fn clusters(&self) -> MlResult<Vec<ClusterRow>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare(
-            "SELECT cluster_id, dim, centroid, size, state, person_name
-             FROM clusters ORDER BY cluster_id",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            let dim: i64 = r.get(1)?;
-            let bytes: Vec<u8> = r.get(2)?;
-            Ok(ClusterRow {
-                id: r.get(0)?,
-                centroid: decode_vec(dim, &bytes).unwrap_or_default(),
-                size: r.get::<_, i64>(3)?.max(0) as u32,
-                state: ClusterState::from_i64(r.get(4)?),
-                person_name: r.get(5)?,
-            })
-        })?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {CLUSTER_COLUMNS} FROM clusters ORDER BY cluster_id"
+        ))?;
+        let rows = stmt.query_map([], row_to_cluster)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
@@ -1403,6 +1421,33 @@ impl CacheDb {
         Ok(())
     }
 
+    /// Mark a cluster as hand-edited, or release it back to the re-cluster
+    /// pass.
+    ///
+    /// Set by a merge and by both sides of a split; cleared by
+    /// [`crate::face::FaceEngine::unname_cluster`], whose documented job is to
+    /// put a group back in play.
+    pub fn set_cluster_pinned(&self, id: i64, pinned: bool) -> MlResult<()> {
+        self.lock().execute(
+            "UPDATE clusters SET pinned = ?1, updated_at = ?2 WHERE cluster_id = ?3",
+            params![i64::from(pinned), now_unix(), id],
+        )?;
+        Ok(())
+    }
+
+    /// Re-point every member of `from` at `into`, and return how many moved.
+    ///
+    /// One statement rather than a read-then-upsert loop: the membership PK is
+    /// `(content_hash, face_idx)` and a face belongs to exactly one cluster, so
+    /// there is nothing to reconcile — the rows simply change which cluster
+    /// they name.
+    pub fn move_cluster_members(&self, from: i64, into: i64) -> MlResult<usize> {
+        Ok(self.lock().execute(
+            "UPDATE cluster_members SET cluster_id = ?1 WHERE cluster_id = ?2",
+            params![into, from],
+        )?)
+    }
+
     /// Point a face at a cluster, moving it if it already belonged to another.
     pub fn set_cluster_member(&self, id: i64, hash: &[u8; 32], face_idx: u32) -> MlResult<()> {
         self.lock().execute(
@@ -1450,7 +1495,7 @@ impl CacheDb {
         let mut stmt = conn.prepare(
             "SELECT (SELECT w.path FROM face_work w
                       WHERE w.content_hash = f.content_hash ORDER BY w.path LIMIT 1),
-                    f.bbox, f.quality, f.image_w, f.image_h
+                    f.bbox, f.quality, f.image_w, f.image_h, f.content_hash, f.face_idx
              FROM faces f
              JOIN cluster_members m
                ON m.content_hash = f.content_hash AND m.face_idx = f.face_idx
@@ -1464,11 +1509,18 @@ impl CacheDb {
         let rows = stmt.query_map(params![id, cap], |r| {
             let path: Option<String> = r.get(0)?;
             let bbox_bytes: Vec<u8> = r.get(1)?;
-            let (Some(path), Some(bbox)) = (path, decode_vec(4, &bbox_bytes)) else {
+            let hash_bytes: Vec<u8> = r.get(5)?;
+            let (Some(path), Some(bbox), Ok(content_hash)) = (
+                path,
+                decode_vec(4, &bbox_bytes),
+                <[u8; 32]>::try_from(hash_bytes.as_slice()),
+            ) else {
                 return Ok(None);
             };
             Ok(Some(FaceThumb {
                 path,
+                content_hash,
+                face_idx: r.get::<_, i64>(6)?.max(0) as u32,
                 bbox: [bbox[0], bbox[1], bbox[2], bbox[3]],
                 quality: r.get::<_, f64>(2)? as f32,
                 image_w: r.get::<_, i64>(3)?.max(0) as u32,
@@ -1489,9 +1541,23 @@ impl CacheDb {
     /// its mean, and recovering the mean from a unit-length centroid plus a
     /// count is not possible.
     pub fn cluster_member_embeddings(&self, id: i64) -> MlResult<Vec<Vec<f32>>> {
+        Ok(self
+            .cluster_member_embeddings_by_key(id)?
+            .into_iter()
+            .map(|(_, vec)| vec)
+            .collect())
+    }
+
+    /// [`CacheDb::cluster_member_embeddings`] with each vector's face key.
+    ///
+    /// A split needs to divide these by key, and the un-keyed form cannot be
+    /// zipped against [`CacheDb::cluster_members`] to recover them: a corrupt
+    /// blob is dropped rather than returned, so the two lists can differ in
+    /// length and every vector after the gap would belong to the wrong face.
+    pub fn cluster_member_embeddings_by_key(&self, id: i64) -> MlResult<Vec<(FaceKey, Vec<f32>)>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT f.dim, f.embedding FROM cluster_members m
+            "SELECT f.dim, f.embedding, m.content_hash, m.face_idx FROM cluster_members m
              JOIN faces f ON f.content_hash = m.content_hash AND f.face_idx = m.face_idx
              WHERE m.cluster_id = ?1
              ORDER BY m.content_hash, m.face_idx",
@@ -1499,7 +1565,17 @@ impl CacheDb {
         let rows = stmt.query_map(params![id], |r| {
             let dim: i64 = r.get(0)?;
             let bytes: Vec<u8> = r.get(1)?;
-            Ok(decode_vec(dim, &bytes))
+            let hash: Vec<u8> = r.get(2)?;
+            let idx = r.get::<_, i64>(3)?.max(0) as u32;
+            Ok(
+                match (
+                    decode_vec(dim, &bytes),
+                    <[u8; 32]>::try_from(hash.as_slice()),
+                ) {
+                    (Some(vec), Ok(hash)) => Some(((hash, idx), vec)),
+                    _ => None,
+                },
+            )
         })?;
         Ok(rows
             .collect::<Result<Vec<_>, _>>()?
@@ -1538,10 +1614,17 @@ impl CacheDb {
     }
 
     /// Outstanding merge proposals, strongest first.
+    ///
+    /// A proposal naming a cluster that no longer exists is dropped here as
+    /// well as by [`CacheDb::prune_merge_proposals`]: a merge between two
+    /// reads is the common case, and one of the two ids is gone the moment it
+    /// happens.
     pub fn merge_proposals(&self) -> MlResult<Vec<(i64, i64, f32)>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
             "SELECT a, b, similarity FROM cluster_merge_proposals
+             WHERE a IN (SELECT cluster_id FROM clusters)
+               AND b IN (SELECT cluster_id FROM clusters)
              ORDER BY similarity DESC, a, b",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -1558,6 +1641,40 @@ impl CacheDb {
         self.lock()
             .execute("DELETE FROM cluster_merge_proposals", [])?;
         Ok(())
+    }
+
+    /// Drop every proposal naming one of these clusters.
+    ///
+    /// What a merge or a split calls: a proposal against a cluster that is now
+    /// gone dangles, and one against a cluster whose members just changed is
+    /// stale — its similarity was computed against a centroid that no longer
+    /// exists. Chains (a↔b, b↔c) are why this takes both ends rather than the
+    /// pair that was acted on.
+    pub fn delete_merge_proposals_for(&self, ids: &[i64]) -> MlResult<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let placeholders = vec!["?"; ids.len()].join(", ");
+        let repeated: Vec<i64> = ids.iter().chain(ids.iter()).copied().collect();
+        Ok(self.lock().execute(
+            &format!(
+                "DELETE FROM cluster_merge_proposals
+                 WHERE a IN ({placeholders}) OR b IN ({placeholders})"
+            ),
+            params_from_iter(repeated.iter()),
+        )?)
+    }
+
+    /// Drop one proposal — the user said these two are not the same person.
+    ///
+    /// Normalized the way [`CacheDb::put_merge_proposal`] stores it, so the
+    /// caller does not have to know which way round the row was written.
+    pub fn delete_merge_proposal(&self, a: i64, b: i64) -> MlResult<usize> {
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        Ok(self.lock().execute(
+            "DELETE FROM cluster_merge_proposals WHERE a = ?1 AND b = ?2",
+            params![lo, hi],
+        )?)
     }
 
     /// Drop proposals that name a cluster which no longer exists.
@@ -1687,20 +1804,9 @@ impl CacheDb {
         let conn = self.lock();
         Ok(conn
             .query_row(
-                "SELECT cluster_id, dim, centroid, size, state, person_name
-                 FROM clusters WHERE cluster_id = ?1",
+                &format!("SELECT {CLUSTER_COLUMNS} FROM clusters WHERE cluster_id = ?1"),
                 params![id],
-                |r| {
-                    let dim: i64 = r.get(1)?;
-                    let bytes: Vec<u8> = r.get(2)?;
-                    Ok(ClusterRow {
-                        id: r.get(0)?,
-                        centroid: decode_vec(dim, &bytes).unwrap_or_default(),
-                        size: r.get::<_, i64>(3)?.max(0) as u32,
-                        state: ClusterState::from_i64(r.get(4)?),
-                        person_name: r.get(5)?,
-                    })
-                },
+                row_to_cluster,
             )
             .optional()?)
     }
@@ -1738,6 +1844,24 @@ impl CacheDb {
 
 const FACE_COLUMNS: &str = "content_hash, face_idx, bbox, landmarks, score, quality, dim, \
                             embedding, image_w, image_h";
+
+const CLUSTER_COLUMNS: &str = "cluster_id, dim, centroid, size, state, person_name, pinned";
+
+/// One face's identity: the bytes it was found in, and which detection it was.
+pub type FaceKey = ([u8; 32], u32);
+
+fn row_to_cluster(r: &rusqlite::Row<'_>) -> rusqlite::Result<ClusterRow> {
+    let dim: i64 = r.get(1)?;
+    let bytes: Vec<u8> = r.get(2)?;
+    Ok(ClusterRow {
+        id: r.get(0)?,
+        centroid: decode_vec(dim, &bytes).unwrap_or_default(),
+        size: r.get::<_, i64>(3)?.max(0) as u32,
+        state: ClusterState::from_i64(r.get(4)?),
+        person_name: r.get(5)?,
+        pinned: r.get::<_, i64>(6)? != 0,
+    })
+}
 
 fn row_to_face(r: &rusqlite::Row<'_>) -> rusqlite::Result<Option<StoredFace>> {
     row_to_face_at(r, 0)
@@ -1957,6 +2081,39 @@ mod tests {
             db.face_library_stats().unwrap(),
             FaceLibraryStats::default()
         );
+    }
+
+    /// The v4 step is additive: an installed cache keeps its clusters and its
+    /// namings, and every one of them reads as un-pinned — which is what a
+    /// cluster nobody has hand-edited is.
+    #[test]
+    fn a_v3_cache_gains_the_pinned_column_without_losing_its_clusters() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.sqlite");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            for sql in &MIGRATIONS[..3] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?1, '3')",
+                params![META_SCHEMA_VERSION],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO clusters (cluster_id, centroid, dim, size, state, person_name,
+                                       updated_at)
+                 VALUES (7, X'0000803F', 1, 3, 1, 'Alice', 0)",
+                [],
+            )
+            .unwrap();
+        }
+        let db = CacheDb::open(&path).unwrap();
+        let row = db.cluster(7).unwrap().unwrap();
+        assert_eq!(row.person_name.as_deref(), Some("Alice"));
+        assert_eq!(row.state, ClusterState::Named);
+        assert_eq!(row.size, 3);
+        assert!(!row.pinned);
     }
 
     #[test]
@@ -2523,8 +2680,89 @@ mod tests {
         db.put_merge_proposal(a, b, 0.9).unwrap();
         assert_eq!(db.merge_proposals().unwrap(), vec![(a, b, 0.9)]);
         db.delete_clusters(&[b]).unwrap();
+        // Gone at read time, before anything prunes: a merge between two reads
+        // is the ordinary case and it deletes one of the ids.
+        assert!(db.merge_proposals().unwrap().is_empty());
         assert_eq!(db.prune_merge_proposals().unwrap(), 1);
         assert!(db.merge_proposals().unwrap().is_empty());
+    }
+
+    /// A merge or a split invalidates every proposal touching *either* end, not
+    /// just the pair that was acted on — a chain (a↔b, b↔c) leaves the second
+    /// row scored against a centroid that no longer exists.
+    #[test]
+    fn deleting_proposals_for_a_cluster_takes_the_whole_chain() {
+        let db = db();
+        let a = db.create_cluster(&[1.0]).unwrap();
+        let b = db.create_cluster(&[1.0]).unwrap();
+        let c = db.create_cluster(&[1.0]).unwrap();
+        db.put_merge_proposal(a, b, 0.9).unwrap();
+        db.put_merge_proposal(b, c, 0.8).unwrap();
+        db.put_merge_proposal(a, c, 0.7).unwrap();
+
+        assert_eq!(db.delete_merge_proposals_for(&[b]).unwrap(), 2);
+        assert_eq!(db.merge_proposals().unwrap(), vec![(a, c, 0.7)]);
+        assert_eq!(db.delete_merge_proposals_for(&[]).unwrap(), 0);
+
+        // "Not the same person" drops one row, whichever way round it is named.
+        assert_eq!(db.delete_merge_proposal(c, a).unwrap(), 1);
+        assert!(db.merge_proposals().unwrap().is_empty());
+    }
+
+    /// The flag the whole merge/split design rests on: without it the next
+    /// `recluster()` re-partitions a group the user shaped by hand.
+    #[test]
+    fn a_cluster_can_be_pinned_and_released() {
+        let db = db();
+        let id = db.create_cluster(&[0.6, 0.8]).unwrap();
+        assert!(
+            !db.cluster(id).unwrap().unwrap().pinned,
+            "pinned by default"
+        );
+
+        db.set_cluster_pinned(id, true).unwrap();
+        assert!(db.cluster(id).unwrap().unwrap().pinned);
+        assert!(db.clusters().unwrap()[0].pinned);
+
+        db.set_cluster_pinned(id, false).unwrap();
+        assert!(!db.cluster(id).unwrap().unwrap().pinned);
+    }
+
+    /// The re-cluster pass's input. A pinned cluster's faces are held back the
+    /// same way a named cluster's are.
+    #[test]
+    fn pinned_clusters_keep_their_faces_out_of_the_recluster_input() {
+        let db = db();
+        db.put_faces(&h(1), "m", 10, 10, &[face(h(1), 0, vec![1.0, 0.0])])
+            .unwrap();
+        db.put_faces(&h(2), "m", 10, 10, &[face(h(2), 0, vec![0.0, 1.0])])
+            .unwrap();
+        let pinned = db.create_cluster(&[1.0, 0.0]).unwrap();
+        let loose = db.create_cluster(&[0.0, 1.0]).unwrap();
+        db.set_cluster_member(pinned, &h(1), 0).unwrap();
+        db.set_cluster_member(loose, &h(2), 0).unwrap();
+
+        assert_eq!(db.unlabeled_faces().unwrap().len(), 2);
+        db.set_cluster_pinned(pinned, true).unwrap();
+        let input = db.unlabeled_faces().unwrap();
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0].content_hash, h(2));
+    }
+
+    /// One statement, and the membership primary key is what makes it safe: a
+    /// face belongs to exactly one cluster, so there is nothing to reconcile.
+    #[test]
+    fn moving_members_re_points_every_row_of_one_cluster() {
+        let db = db();
+        let a = db.create_cluster(&[1.0]).unwrap();
+        let b = db.create_cluster(&[1.0]).unwrap();
+        db.set_cluster_member(a, &h(1), 0).unwrap();
+        db.set_cluster_member(a, &h(1), 1).unwrap();
+        db.set_cluster_member(b, &h(2), 0).unwrap();
+
+        assert_eq!(db.move_cluster_members(a, b).unwrap(), 2);
+        assert!(db.cluster_members(a).unwrap().is_empty());
+        assert_eq!(db.cluster_members(b).unwrap().len(), 3);
     }
 
     /// A face-model swap invalidates the embedding space, so everything derived

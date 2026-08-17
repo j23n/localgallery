@@ -53,6 +53,17 @@ targets:
       # UniFFI bindings for the Rust core. Generated, git-ignored, and
       # produced by `./scripts/build_core.sh` — run it before `xcodegen`.
       - path: build/core/Generated
+      # The on-device model pack (~157 MB), staged by
+      # `./scripts/prepare_pack.sh` — run it before `xcodegen` too. A folder
+      # reference, so it lands verbatim as `LocalGallery.app/pack/<version>/`
+      # and the app reads it in place: the core only ever reads and hashes a
+      # pack, so a read-only bundle is a valid location and there is nothing to
+      # copy into Application Support on first launch. The version-named
+      # directory inside is what `PackResolver` compares against an imported
+      # pack, which is why `pack` is the enumerated root rather than the pack.
+      - path: build/pack
+        type: folder
+        buildPhase: resources
     info:
       path: LocalGallery/Info.plist
       properties:

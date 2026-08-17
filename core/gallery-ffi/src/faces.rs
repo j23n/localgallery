@@ -43,7 +43,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use gallery_meta::MetaError;
-use gallery_ml::cache::FaceThumb;
+use gallery_ml::cache::{FaceKey, FaceThumb};
 use gallery_ml::engine::iso8601_utc_now;
 use gallery_ml::face::{
     FaceEngine, FaceProgress, FaceRunOptions, FaceRunSummary as CoreFaceRunSummary,
@@ -128,6 +128,25 @@ pub enum FaceError {
         /// The id that was not found.
         id: i64,
     },
+    /// The merge would not produce a group: the two ids are the same.
+    InvalidMerge {
+        /// What was wrong; for logs only.
+        detail: String,
+    },
+    /// The split selects nothing, or selects the whole cluster. Either leaves
+    /// the partition where it was while creating an empty or duplicate group.
+    InvalidSplit {
+        /// What was wrong; for logs only.
+        detail: String,
+    },
+    /// A face key is not one this boundary handed out.
+    ///
+    /// Distinct from a key whose face is *gone*, which a split counts and skips
+    /// — the cache can move under a review screen the user left open.
+    InvalidFaceKey {
+        /// The key as supplied.
+        key: String,
+    },
     /// The run was cancelled.
     Cancelled,
     /// A run is in flight and this call refuses to share it. See the module
@@ -152,6 +171,9 @@ impl std::fmt::Display for FaceError {
             FaceError::Sidecar { detail } => write!(f, "sidecar: {detail}"),
             FaceError::InvalidName { name, reason } => write!(f, "invalid name {name:?}: {reason}"),
             FaceError::ClusterNotFound { id } => write!(f, "no such cluster: {id}"),
+            FaceError::InvalidMerge { detail } => write!(f, "invalid merge: {detail}"),
+            FaceError::InvalidSplit { detail } => write!(f, "invalid split: {detail}"),
+            FaceError::InvalidFaceKey { key } => write!(f, "invalid face key: {key:?}"),
             FaceError::Cancelled => write!(f, "cancelled"),
             FaceError::AlreadyRunning => write!(f, "a face run is already in progress"),
         }
@@ -181,6 +203,9 @@ impl From<MlError> for FaceError {
             MlError::Vfs(v) => v.into(),
             MlError::Meta(m) => m.into(),
             MlError::ClusterNotFound { id } => FaceError::ClusterNotFound { id },
+            MlError::InvalidMerge { detail } => FaceError::InvalidMerge { detail },
+            MlError::InvalidSplit { detail } => FaceError::InvalidSplit { detail },
+            MlError::InvalidFaceKey { key } => FaceError::InvalidFaceKey { key },
             MlError::Cancelled => FaceError::Cancelled,
         }
     }
@@ -245,7 +270,11 @@ impl From<&FaceError> for FaceFailure {
             | FaceError::PackFileMissing { .. }
             | FaceError::PackHashMismatch { .. }
             | FaceError::PackInvalid { .. } => FaceFailure::Pack,
-            FaceError::Cache { .. } | FaceError::ClusterNotFound { .. } => FaceFailure::CacheDb,
+            FaceError::Cache { .. }
+            | FaceError::ClusterNotFound { .. }
+            | FaceError::InvalidMerge { .. }
+            | FaceError::InvalidSplit { .. }
+            | FaceError::InvalidFaceKey { .. } => FaceFailure::CacheDb,
             FaceError::Inference { .. } => FaceFailure::Inference,
             FaceError::Io { .. } => FaceFailure::Io,
             FaceError::Sidecar { .. } | FaceError::InvalidName { .. } => FaceFailure::Sidecar,
@@ -399,6 +428,12 @@ pub struct FaceRef {
     /// detections are keyed by content hash and a library can hold the same
     /// bytes twice.
     pub path: String,
+    /// This face's identity, opaque to the caller: hand it back to
+    /// [`FaceSession::split_cluster`] to say which faces are moving.
+    ///
+    /// A rectangle would not do — two detections in one photo can overlap, so a
+    /// selection made by geometry could move the wrong face.
+    pub face_key: String,
     /// Rectangle centre, 0…1 of the oriented image width.
     pub center_x: f64,
     /// Rectangle centre, 0…1 of the oriented image height.
@@ -461,6 +496,39 @@ impl From<SidecarWritePlan> for SidecarWriteReport {
             failed_paths: plan.failed.into_iter().map(|f| f.path).collect(),
         }
     }
+}
+
+/// Two clusters the core thinks are the same person.
+///
+/// Ids only. The app already holds `clusters()` and joins locally, and a
+/// library with a chain of similar groups would otherwise ship the same
+/// exemplars several times over.
+///
+/// Advisory in both directions: nothing merges on its own, and a proposal is
+/// only as fresh as the centroids it was computed from — a merge invalidates
+/// every proposal touching either end, and the next run recomputes them.
+#[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
+pub struct MergeProposal {
+    /// The lower of the two cluster ids.
+    pub a: i64,
+    /// The higher.
+    pub b: i64,
+    /// Cosine similarity of the two centroids, 0…1.
+    pub similarity: f32,
+}
+
+/// What one `split_cluster()` did.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SplitResult {
+    /// The cluster the selected faces moved into. Unlabeled and pinned.
+    pub new_cluster_id: i64,
+    /// Selected keys that named no face of the source cluster.
+    ///
+    /// Non-zero means the screen's selection was stale — a run deleted a face
+    /// under it — which is worth a log line and is not a failure.
+    pub ignored_keys: u32,
+    /// The sidecars the split rewrote.
+    pub report: SidecarWriteReport,
 }
 
 /// What one `recluster()` did.
@@ -598,11 +666,13 @@ fn exemplars(thumbs: Vec<FaceThumb>) -> Vec<FaceRef> {
 /// card. (The sidecar writer makes the same call in the other direction: it
 /// keeps the name and drops the region.)
 fn face_ref(thumb: &FaceThumb) -> FaceRef {
+    let face_key = encode_face_key(&thumb.content_hash, thumb.face_idx);
     let (w, h) = (f64::from(thumb.image_w), f64::from(thumb.image_h));
     let [x0, y0, x1, y1] = thumb.bbox.map(f64::from);
     if w <= 0.0 || h <= 0.0 || x1 <= x0 || y1 <= y0 {
         return FaceRef {
             path: thumb.path.clone(),
+            face_key,
             center_x: 0.5,
             center_y: 0.5,
             width: 1.0,
@@ -613,12 +683,46 @@ fn face_ref(thumb: &FaceThumb) -> FaceRef {
     let clamp = |v: f64| v.clamp(0.0, 1.0);
     FaceRef {
         path: thumb.path.clone(),
+        face_key,
         center_x: clamp((x0 + x1) / 2.0 / w),
         center_y: clamp((y0 + y1) / 2.0 / h),
         width: clamp((x1 - x0) / w),
         height: clamp((y1 - y0) / h),
         quality: thumb.quality,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Face keys
+// ---------------------------------------------------------------------------
+
+/// `<content-hash-hex>:<detection index>` — the `faces` primary key as one
+/// string, so the app can carry a face's identity around without learning what
+/// it is made of.
+fn encode_face_key(hash: &[u8; 32], face_idx: u32) -> String {
+    format!("{}:{face_idx}", gallery_ml::pack::hex(hash))
+}
+
+/// Inverse of [`encode_face_key`].
+///
+/// Malformed is an error; *unknown* is not this function's business — a key
+/// whose row has since been deleted parses fine and is skipped by the split
+/// itself, because a review screen open across a run is an ordinary thing to
+/// happen and not a reason to refuse the whole gesture.
+fn decode_face_key(key: &str) -> Result<FaceKey, FaceError> {
+    let invalid = || FaceError::InvalidFaceKey {
+        key: key.to_string(),
+    };
+    let (hash_hex, idx) = key.split_once(':').ok_or_else(invalid)?;
+    if hash_hex.len() != 64 {
+        return Err(invalid());
+    }
+    let mut hash = [0u8; 32];
+    for (byte, pair) in hash.iter_mut().zip(hash_hex.as_bytes().chunks_exact(2)) {
+        let text = std::str::from_utf8(pair).map_err(|_| invalid())?;
+        *byte = u8::from_str_radix(text, 16).map_err(|_| invalid())?;
+    }
+    Ok((hash, idx.parse::<u32>().map_err(|_| invalid())?))
 }
 
 // ---------------------------------------------------------------------------
@@ -900,11 +1004,97 @@ impl FaceSession {
             .into())
     }
 
+    /// Fold one cluster into another: `into` survives, `from` disappears.
+    ///
+    /// Which of the two should survive is a presentation decision — the named
+    /// one, or the bigger one, and the user has to be told whose name is being
+    /// dropped — so the caller states it and the core carries no policy.
+    ///
+    /// If exactly one side is named, that name now reaches the absorbed faces'
+    /// photos. If both are named differently, the absorbed name is retracted
+    /// from photos where nothing else still claims it. The result is pinned, so
+    /// the next `recluster()` leaves it alone.
+    ///
+    /// Refused while a run is in flight — see the module docs.
+    pub fn merge_clusters(
+        &self,
+        into: i64,
+        from: i64,
+        root_prefix: Option<String>,
+    ) -> Result<SidecarWriteReport, FaceError> {
+        let _guard = self.mutating()?;
+        Ok(self
+            .engine
+            .merge_clusters(into, from, Some(&iso8601_utc_now()), root_prefix.as_deref())?
+            .into())
+    }
+
+    /// Move the named faces out of a cluster and into a new one.
+    ///
+    /// `face_keys` are `FaceRef.faceKey` values from `clusterFaces`. A key that
+    /// no longer names a face of this cluster is counted in
+    /// `SplitResult.ignoredKeys` and skipped; a key this boundary never handed
+    /// out is [`FaceError::InvalidFaceKey`]. Selecting nothing, or selecting
+    /// the whole cluster, is [`FaceError::InvalidSplit`].
+    ///
+    /// The faces that leave do **not** keep the cluster's name: the gesture
+    /// means "this is not that person". Both groups end up pinned.
+    pub fn split_cluster(
+        &self,
+        cluster_id: i64,
+        face_keys: Vec<String>,
+        root_prefix: Option<String>,
+    ) -> Result<SplitResult, FaceError> {
+        let _guard = self.mutating()?;
+        let keys = face_keys
+            .iter()
+            .map(|k| decode_face_key(k))
+            .collect::<Result<Vec<_>, _>>()?;
+        let outcome = self.engine.split_cluster(
+            cluster_id,
+            &keys,
+            Some(&iso8601_utc_now()),
+            root_prefix.as_deref(),
+        )?;
+        Ok(SplitResult {
+            new_cluster_id: outcome.new_cluster_id,
+            ignored_keys: outcome.ignored_keys as u32,
+            report: outcome.plan.into(),
+        })
+    }
+
+    /// Pairs of clusters the core thinks are the same person, strongest first.
+    ///
+    /// A read, and open during a run for the same reason `clusters()` is: a
+    /// review screen that emptied for the length of a scan would be worse than
+    /// one showing a suggestion that is about to be recomputed. Proposals
+    /// naming a cluster that no longer exists are dropped here.
+    pub fn merge_proposals(&self) -> Result<Vec<MergeProposal>, FaceError> {
+        Ok(self
+            .engine
+            .merge_proposals()?
+            .into_iter()
+            .map(|(a, b, similarity)| MergeProposal { a, b, similarity })
+            .collect())
+    }
+
+    /// Forget one proposal — the user said these two are not the same person.
+    ///
+    /// Only until the next run recomputes proposals from the current centroids;
+    /// what it buys is that a suggestion dismissed now does not come back on
+    /// the same partition.
+    pub fn dismiss_merge_proposal(&self, a: i64, b: i64) -> Result<(), FaceError> {
+        let _guard = self.mutating()?;
+        self.engine.cache().delete_merge_proposal(a, b)?;
+        Ok(())
+    }
+
     /// Rebuild the partition of every unlabeled face from scratch.
     ///
-    /// Named and ignored clusters are untouched. Unlabeled cluster **ids do not
-    /// survive this call** — the pass produces a partition, not a diff — so the
-    /// app must re-read `clusters()` afterwards.
+    /// Named, ignored and hand-edited (merged or split) clusters are untouched.
+    /// Other unlabeled cluster **ids do not survive this call** — the pass
+    /// produces a partition, not a diff — so the app must re-read `clusters()`
+    /// afterwards.
     pub fn recluster(&self) -> Result<ReclusterSummary, FaceError> {
         let _guard = self.mutating()?;
         Ok(self.engine.recluster()?.into())
@@ -932,6 +1122,8 @@ mod tests {
     fn thumb(path: &str, quality: f32) -> FaceThumb {
         FaceThumb {
             path: path.to_string(),
+            content_hash: [7u8; 32],
+            face_idx: 1,
             bbox: [10.0, 20.0, 30.0, 60.0],
             quality,
             image_w: 100,
@@ -1047,6 +1239,40 @@ mod tests {
         let picked = exemplars(pool);
         assert_eq!(picked.len(), MAX_EXEMPLARS);
         assert_eq!(picked[0].path, "/0.jpg");
+    }
+
+    /// The key is the app's whole handle on a face, and a split acts on it —
+    /// so the two halves have to be inverses, including the index that is not
+    /// part of the hash.
+    #[test]
+    fn a_face_key_round_trips_through_the_boundary() {
+        let mut hash = [0u8; 32];
+        hash[0] = 0xde;
+        hash[31] = 0x0f;
+        let key = encode_face_key(&hash, 3);
+        assert!(key.starts_with("de"), "{key}");
+        assert_eq!(decode_face_key(&key).unwrap(), (hash, 3));
+        assert_eq!(
+            decode_face_key(&face_ref(&thumb("/a.jpg", 0.5)).face_key).unwrap(),
+            ([7u8; 32], 1)
+        );
+    }
+
+    #[test]
+    fn a_malformed_face_key_is_refused_rather_than_guessed_at() {
+        for bad in [
+            "",
+            "nope",
+            "de:3",
+            &format!("{}:x", "0".repeat(64)),
+            &format!("{}:1", "0".repeat(63)),
+            &format!("{}:1", "z".repeat(64)),
+        ] {
+            assert!(
+                matches!(decode_face_key(bad), Err(FaceError::InvalidFaceKey { .. })),
+                "{bad:?} was accepted"
+            );
+        }
     }
 
     #[test]

@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use common::{face_pack_dir, fixture};
 use gallery_meta::read_view;
-use gallery_ml::cache::ClusterState;
+use gallery_ml::cache::{ClusterRow, ClusterState};
 use gallery_ml::face::{
     FaceEngine, FaceProgress, FaceRunOptions, FaceRunSummary, NoFaceProgress, SyncScope,
 };
@@ -111,6 +111,49 @@ impl Fixture {
         let mut clusters = self.engine.clusters().unwrap();
         clusters.sort_by_key(|c| (std::cmp::Reverse(c.size), c.id));
         clusters.first().expect("a cluster").id
+    }
+
+    /// The `(content_hash, face_idx)` keys of one cluster that live in `photo`.
+    ///
+    /// The synthetic detector puts every face of these fixtures in one cluster,
+    /// so "the faces from that photo" is the only handle a test has on a subset
+    /// worth splitting off.
+    fn keys_in(&self, cluster_id: i64, photo: &str) -> Vec<([u8; 32], u32)> {
+        let hash = gallery_ml::hash::hash_bytes(&fixture(photo));
+        self.engine
+            .cache()
+            .cluster_members(cluster_id)
+            .unwrap()
+            .into_iter()
+            .filter(|(h, _)| *h == hash)
+            .collect()
+    }
+
+    fn members(&self, cluster_id: i64) -> Vec<([u8; 32], u32)> {
+        self.engine.cache().cluster_members(cluster_id).unwrap()
+    }
+
+    fn row(&self, cluster_id: i64) -> ClusterRow {
+        self.engine
+            .cache()
+            .cluster(cluster_id)
+            .unwrap()
+            .unwrap_or_else(|| panic!("cluster {cluster_id} is gone"))
+    }
+
+    /// Pull the `face_mid.png` face out of the one cluster the fixtures
+    /// produce, giving every merge test a second group to work with. Returns
+    /// `(source, new)`.
+    fn split_off_mid(&self) -> (i64, i64) {
+        let source = self.biggest_cluster();
+        let keys = self.keys_in(source, MID);
+        assert!(!keys.is_empty(), "the cluster does not reach {MID}");
+        let outcome = self
+            .engine
+            .split_cluster(source, &keys, Some(STAMP), None)
+            .unwrap();
+        assert_eq!(outcome.ignored_keys, 0);
+        (source, outcome.new_cluster_id)
     }
 
     /// Photo file names (not paths) the given cluster reaches.
@@ -452,6 +495,321 @@ fn a_foreign_sidecar_survives_the_whole_name_rename_unname_cycle() {
     assert!(!cleared.tags_list.contains(&"People/Grace".to_string()));
     assert!(cleared.regions.is_empty());
     assert_eq!(cleared.person_in_image, vec!["Zoe"]);
+}
+
+// ---------------------------------------------------------------------------
+// Merge
+// ---------------------------------------------------------------------------
+
+#[test]
+fn merging_moves_every_member_recomputes_the_centroid_and_deletes_the_source() {
+    let f = Fixture::new();
+    f.enqueue(PHOTOS);
+    f.run();
+    let whole = f.members(f.biggest_cluster());
+
+    let (into, from) = f.split_off_mid();
+    assert!(f.members(into).len() < whole.len(), "nothing was split off");
+
+    f.engine
+        .merge_clusters(into, from, Some(STAMP), None)
+        .unwrap();
+
+    // The surviving id is the one the caller named, and it holds everything.
+    assert_eq!(f.members(into), whole);
+    assert!(
+        f.engine.cache().cluster(from).unwrap().is_none(),
+        "the absorbed cluster survived"
+    );
+
+    let row = f.row(into);
+    assert_eq!(row.size as usize, whole.len());
+    assert!(row.pinned, "a hand-merged cluster must be pinned");
+
+    // The centroid is the mean of what the cluster now holds, not either half's.
+    let members = f.engine.cache().cluster_member_embeddings(into).unwrap();
+    let expected = gallery_ml::face::centroid(members.iter().map(Vec::as_slice)).unwrap();
+    assert_eq!(row.centroid.len(), expected.len());
+    for (got, want) in row.centroid.iter().zip(&expected) {
+        assert!((got - want).abs() < 1e-6, "{got} vs {want}");
+    }
+}
+
+/// `clusters` is AUTOINCREMENT and its `sqlite_sequence` row is deliberately
+/// left alone, so a merged-away id can never come back as a different group of
+/// strangers. Asserted explicitly because a future `WITHOUT ROWID` or a
+/// migration that rebuilt the table would break it silently.
+#[test]
+fn a_merged_away_cluster_id_is_never_handed_out_again() {
+    let f = Fixture::new();
+    f.enqueue(PHOTOS);
+    f.run();
+
+    let (into, from) = f.split_off_mid();
+    f.engine
+        .merge_clusters(into, from, Some(STAMP), None)
+        .unwrap();
+
+    let (_, again) = f.split_off_mid();
+    assert!(again > from, "id {from} was reused as {again}");
+}
+
+#[test]
+fn merging_an_unnamed_group_into_a_named_one_names_its_photos_too() {
+    let f = Fixture::new();
+    f.enqueue(PHOTOS);
+    f.run();
+    let (named, loose) = f.split_off_mid();
+
+    f.engine
+        .name_cluster(named, "Ada", Some(STAMP), None)
+        .unwrap();
+    assert!(
+        f.sidecar(MID).is_none(),
+        "the split-off photo was named before the merge"
+    );
+
+    let plan = f
+        .engine
+        .merge_clusters(named, loose, Some(STAMP), None)
+        .unwrap();
+    assert!(plan.touched_disk(), "{plan:?}");
+
+    let view = read_view(&f.sidecar(MID).unwrap()).unwrap();
+    assert_eq!(view.people_tags(), vec!["People/Ada"]);
+    assert!(!view.regions.is_empty(), "the absorbed face got no region");
+    assert_eq!(f.row(named).person_name.as_deref(), Some("Ada"));
+}
+
+/// The loser's name is retracted as a *hint*: `sync_sidecars` re-derives each
+/// photo from live cache state, so a photo another cluster still claims that
+/// name on keeps it.
+#[test]
+fn merging_two_names_retracts_the_loser_only_where_nobody_still_claims_it() {
+    let f = Fixture::new();
+    f.enqueue(PHOTOS);
+    f.run();
+
+    // Three groups: the bulk of face_bright, one face of face_bright on its
+    // own, and the face_mid face.
+    let bulk = f.biggest_cluster();
+    let mid = f
+        .engine
+        .split_cluster(bulk, &f.keys_in(bulk, MID), Some(STAMP), None)
+        .unwrap()
+        .new_cluster_id;
+    let one_bright = f.keys_in(bulk, BRIGHT)[..1].to_vec();
+    let extra = f
+        .engine
+        .split_cluster(bulk, &one_bright, Some(STAMP), None)
+        .unwrap()
+        .new_cluster_id;
+
+    f.engine
+        .name_cluster(bulk, "Ada", Some(STAMP), None)
+        .unwrap();
+    f.engine
+        .name_cluster(mid, "Grace", Some(STAMP), None)
+        .unwrap();
+    f.engine
+        .name_cluster(extra, "Grace", Some(STAMP), None)
+        .unwrap();
+
+    f.engine
+        .merge_clusters(bulk, mid, Some(STAMP), None)
+        .unwrap();
+
+    // face_mid's only claim to Grace has just become Ada, so Grace goes.
+    let mid_view = read_view(&f.sidecar(MID).unwrap()).unwrap();
+    assert_eq!(mid_view.people_tags(), vec!["People/Ada"]);
+
+    // face_bright still holds a Grace face in another cluster, so it keeps her.
+    let bright = read_view(&f.sidecar(BRIGHT).unwrap()).unwrap();
+    assert!(
+        bright.people_tags().contains(&"People/Grace"),
+        "{:?}",
+        bright.people_tags()
+    );
+    assert!(bright.people_tags().contains(&"People/Ada"));
+}
+
+#[test]
+fn a_merge_that_cannot_produce_a_cluster_is_refused() {
+    let f = Fixture::new();
+    f.enqueue(PHOTOS);
+    f.run();
+    let id = f.biggest_cluster();
+
+    assert!(matches!(
+        f.engine
+            .merge_clusters(id, id, Some(STAMP), None)
+            .unwrap_err(),
+        MlError::InvalidMerge { .. }
+    ));
+    for (into, from) in [(id, 9_999), (9_999, id)] {
+        assert!(matches!(
+            f.engine
+                .merge_clusters(into, from, Some(STAMP), None)
+                .unwrap_err(),
+            MlError::ClusterNotFound { .. }
+        ));
+    }
+    assert!(!f.row(id).pinned, "a refused merge pinned the cluster");
+}
+
+// ---------------------------------------------------------------------------
+// Split
+// ---------------------------------------------------------------------------
+
+#[test]
+fn splitting_a_named_cluster_retracts_the_name_from_the_faces_that_left() {
+    let f = Fixture::new();
+    f.enqueue(PHOTOS);
+    f.run();
+    let source = f.biggest_cluster();
+    f.engine
+        .name_cluster(source, "Ada", Some(STAMP), None)
+        .unwrap();
+    assert_eq!(
+        read_view(&f.sidecar(MID).unwrap()).unwrap().people_tags(),
+        vec!["People/Ada"]
+    );
+
+    let outcome = f
+        .engine
+        .split_cluster(source, &f.keys_in(source, MID), Some(STAMP), None)
+        .unwrap();
+
+    // The photo whose only Ada face left loses her, regions and all.
+    let mid = read_view(&f.sidecar(MID).unwrap()).unwrap();
+    assert!(mid.people_tags().is_empty(), "{:?}", mid.people_tags());
+    assert!(mid.regions.is_empty());
+    // The photo that still holds Ada faces is untouched.
+    let bright = read_view(&f.sidecar(BRIGHT).unwrap()).unwrap();
+    assert_eq!(bright.people_tags(), vec!["People/Ada"]);
+    assert!(!bright.regions.is_empty());
+
+    // The split-off group carries no name — that is the whole point of the
+    // gesture — and both sides are pinned.
+    let fresh = f.row(outcome.new_cluster_id);
+    assert_eq!(fresh.state, ClusterState::Unlabeled);
+    assert!(fresh.person_name.is_none());
+    assert!(fresh.pinned);
+    assert!(f.row(source).pinned);
+    assert_eq!(f.row(source).size as usize, f.members(source).len());
+}
+
+#[test]
+fn splitting_nothing_or_everything_is_refused_and_changes_nothing() {
+    let f = Fixture::new();
+    f.enqueue(PHOTOS);
+    f.run();
+    let source = f.biggest_cluster();
+    let all = f.members(source);
+
+    for keys in [Vec::new(), all.clone(), vec![([9u8; 32], 0)]] {
+        assert!(
+            matches!(
+                f.engine
+                    .split_cluster(source, &keys, Some(STAMP), None)
+                    .unwrap_err(),
+                MlError::InvalidSplit { .. }
+            ),
+            "{} keys",
+            keys.len()
+        );
+    }
+    assert!(matches!(
+        f.engine
+            .split_cluster(9_999, &all, Some(STAMP), None)
+            .unwrap_err(),
+        MlError::ClusterNotFound { .. }
+    ));
+
+    assert_eq!(f.members(source), all);
+    assert!(!f.row(source).pinned, "a refused split pinned the cluster");
+    assert_eq!(f.engine.clusters().unwrap().len(), 1);
+}
+
+/// A review screen can be open across a run that deleted a face. Losing the
+/// whole gesture over one stale selection would be the worse answer, so the
+/// unknown key is counted and skipped.
+#[test]
+fn a_stale_face_key_is_counted_rather_than_failing_the_split() {
+    let f = Fixture::new();
+    f.enqueue(PHOTOS);
+    f.run();
+    let source = f.biggest_cluster();
+    let mut keys = f.keys_in(source, MID);
+    let real = keys.len();
+    keys.push(([9u8; 32], 0));
+
+    let outcome = f
+        .engine
+        .split_cluster(source, &keys, Some(STAMP), None)
+        .unwrap();
+    assert_eq!(outcome.ignored_keys, 1);
+    assert_eq!(f.members(outcome.new_cluster_id).len(), real);
+}
+
+// ---------------------------------------------------------------------------
+// Pinning
+// ---------------------------------------------------------------------------
+
+/// Without this the next full pass silently undoes the user's merge or split,
+/// which is worse than not offering the operation at all.
+#[test]
+fn recluster_leaves_a_hand_edited_cluster_and_its_faces_alone() {
+    let f = Fixture::new();
+    f.enqueue(PHOTOS);
+    f.run();
+    let (into, from) = f.split_off_mid();
+    let sizes: Vec<(i64, u32)> = [into, from]
+        .iter()
+        .map(|id| (*id, f.row(*id).size))
+        .collect();
+
+    let summary = f.engine.recluster().unwrap();
+    assert_eq!(summary.clusters_before, 0, "a pinned cluster was rebuilt");
+    assert_eq!(
+        summary.faces, 0,
+        "a pinned cluster's faces were re-partitioned"
+    );
+    assert_eq!(
+        [into, from]
+            .iter()
+            .map(|id| (*id, f.row(*id).size))
+            .collect::<Vec<_>>(),
+        sizes
+    );
+}
+
+/// `unname_cluster` says it puts a group back in play for the full pass, and
+/// that has to keep meaning what it says after the group was hand-edited.
+#[test]
+fn un_naming_releases_the_pin() {
+    let f = Fixture::new();
+    f.enqueue(PHOTOS);
+    f.run();
+    let (into, from) = f.split_off_mid();
+    f.engine
+        .name_cluster(into, "Ada", Some(STAMP), None)
+        .unwrap();
+    assert!(f.row(into).pinned);
+
+    f.engine.unname_cluster(into, Some(STAMP), None).unwrap();
+    assert!(!f.row(into).pinned);
+
+    let summary = f.engine.recluster().unwrap();
+    assert_eq!(
+        summary.clusters_before, 1,
+        "the released cluster was skipped"
+    );
+    assert!(summary.faces > 0);
+    assert!(
+        f.engine.cache().cluster(from).unwrap().is_some(),
+        "the still-pinned half was rebuilt"
+    );
 }
 
 // ---------------------------------------------------------------------------

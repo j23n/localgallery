@@ -742,6 +742,7 @@ impl FaceEngine {
                         size: 1,
                         state: ClusterState::Unlabeled,
                         person_name: None,
+                        pinned: false,
                     });
                     outcome.created += 1;
                     outcome.assigned += 1;
@@ -755,18 +756,21 @@ impl FaceEngine {
 
     /// Rebuild the partition of every unlabeled face from scratch.
     ///
-    /// Named and ignored clusters are untouched — their members are not even in
-    /// the input. Unlabeled cluster **ids are not stable across this call**:
-    /// the pass produces a partition, not a diff, and there is no meaningful
-    /// identity to carry over for a group nobody has named. Named cluster ids
-    /// are stable forever, which is the only stability the UI actually needs.
+    /// Named, ignored and **pinned** clusters are untouched — their members are
+    /// not even in the input. Pinned means the user merged or split it by hand,
+    /// and a pass that re-partitioned those faces would silently undo work
+    /// somebody did deliberately. Other unlabeled cluster **ids are not stable
+    /// across this call**: the pass produces a partition, not a diff, and there
+    /// is no meaningful identity to carry over for a group nobody has named.
+    /// Named cluster ids are stable forever, which is the only stability the UI
+    /// actually needs.
     pub fn recluster(&self) -> MlResult<ReclusterSummary> {
         let faces = self.cache.unlabeled_faces()?;
         let before = self
             .cache
             .clusters()?
             .into_iter()
-            .filter(|c| c.state == ClusterState::Unlabeled)
+            .filter(|c| c.state == ClusterState::Unlabeled && !c.pinned)
             .map(|c| c.id)
             .collect::<Vec<_>>();
 

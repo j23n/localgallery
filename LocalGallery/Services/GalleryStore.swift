@@ -256,6 +256,14 @@ final class GalleryStore {
         self.faces.otherEngineIsRunning = { [weak self] in self?.tagging.isRunning ?? false }
         self.faces.eligiblePhotos = { [weak self] in self?.allPhotos ?? [] }
         self.faces.libraryRoot = { [weak self] in self?.bookmarks.activeURL }
+        // The core renames a *person*; the app keys five persisted things by
+        // their tag path. See `migratePersonState`.
+        self.faces.onPersonRenamed = { [weak self] old, new in
+            self?.migratePersonState(
+                from: HierarchicalTag.personPath(for: old),
+                to: HierarchicalTag.personPath(for: new)
+            )
+        }
         // An imported pack replaces the face models the open FaceSession holds.
         self.tagging.onPackWillChange = { [weak self] in
             await self?.faces.invalidateSession()
@@ -490,6 +498,26 @@ final class GalleryStore {
     func resetPersonLink(_ personPath: String) {
         personContactLinks.removeValue(forKey: personPath)
         Log.contacts.info("Reset link for '\(Log.r.person(personPath))' (auto-match restored)")
+        memories.forceRegenerate()
+    }
+
+    /// Move every persisted decision about a person onto their new tag path.
+    ///
+    /// Wired to `faces.onPersonRenamed`, so it runs between the core reporting
+    /// the sidecars written and the rescan that publishes the new `People/`
+    /// tag. `PeopleStore` owns four of the five keys; the fifth is here, because
+    /// `personContactLinks` is also keyed by path — a renamed person would
+    /// otherwise lose a manual contact link, or an explicit "no birthdays for
+    /// this person", and fall back to auto-matching under the new name.
+    private func migratePersonState(from old: String, to new: String) {
+        guard old != new else { return }
+        people.renamePerson(from: old, to: new)
+        if let link = personContactLinks.removeValue(forKey: old),
+           personContactLinks[new] == nil {
+            personContactLinks[new] = link
+        }
+        // Birthdays hang off the contact link and trip titles off the "me"
+        // person, so both halves of what just moved feed memory generation.
         memories.forceRegenerate()
     }
 

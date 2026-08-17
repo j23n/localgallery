@@ -344,6 +344,151 @@ final class FaceServiceTests: XCTestCase {
         XCTAssertTrue(service.isAvailable, "the pack was found but faces stayed hidden")
     }
 
+    // MARK: - Merge and split
+
+    /// Split then merge back, through the service: the faces come home, the
+    /// absorbed group is gone from the published list, and both halves went
+    /// through the ordinary refresh so the review screen is looking at the
+    /// result rather than at what it remembered.
+    func testSplittingThenMergingBackRestoresTheGroup() async throws {
+        let temp = makeTemp()
+        let photos = try stageLibrary(in: temp)
+        let service = makeService(temp, pack: try facePack())
+        service.eligiblePhotos = { photos }
+        service.libraryRoot = { temp.url }
+
+        await service.startScan()
+        try await waitForRun(service)
+        let cluster = try XCTUnwrap(
+            service.allClusters.filter { $0.state == .unlabeled }.max { $0.size < $1.size }
+        )
+        let faces = await service.faces(inCluster: cluster.id)
+        XCTAssertGreaterThan(faces.count, 1, "the fixtures produced nothing to split")
+        // Every face carries the core's key, which is what a split acts on.
+        XCTAssertEqual(Set(faces.map(\.key)).count, faces.count, "face keys are not unique")
+
+        let moving = [faces[0].key]
+        let didSplit = await service.split(cluster: cluster.id, faces: moving)
+        XCTAssertTrue(didSplit)
+
+        let source = try XCTUnwrap(service.allClusters.first { $0.id == cluster.id })
+        XCTAssertEqual(source.size, cluster.size - 1)
+        let fresh = try XCTUnwrap(
+            service.allClusters.first { $0.id != cluster.id && $0.size == 1 && $0.state == .unlabeled }
+        )
+
+        let didMerge = await service.merge(into: cluster.id, from: fresh.id)
+        XCTAssertTrue(didMerge)
+        XCTAssertNil(service.allClusters.first { $0.id == fresh.id }, "the absorbed group survived")
+        XCTAssertEqual(service.allClusters.first { $0.id == cluster.id }?.size, cluster.size)
+        XCTAssertNil(service.lastError)
+    }
+
+    /// Splitting everything, or nothing, leaves the partition where it was —
+    /// the core refuses both, and the service has to report that rather than
+    /// claim success.
+    func testASplitThatWouldChangeNothingIsReportedAsAFailure() async throws {
+        let temp = makeTemp()
+        let photos = try stageLibrary(in: temp)
+        let service = makeService(temp, pack: try facePack())
+        service.eligiblePhotos = { photos }
+
+        await service.startScan()
+        try await waitForRun(service)
+        let cluster = try XCTUnwrap(
+            service.allClusters.filter { $0.state == .unlabeled }.max { $0.size < $1.size }
+        )
+        let faces = await service.faces(inCluster: cluster.id)
+
+        let emptySplit = await service.split(cluster: cluster.id, faces: [])
+        XCTAssertFalse(emptySplit)
+        XCTAssertEqual(service.lastError, .staleSelection)
+        let wholeSplit = await service.split(cluster: cluster.id, faces: faces.map(\.key))
+        XCTAssertFalse(wholeSplit)
+        XCTAssertEqual(service.lastError, .staleSelection)
+        XCTAssertEqual(service.allClusters.first { $0.id == cluster.id }?.size, cluster.size)
+    }
+
+    /// Every write the review screen offers is refused mid-run, for the same
+    /// reason naming is: the core will not re-derive a sidecar from a cluster
+    /// table a run is mutating, and a button that silently does nothing is
+    /// worse than a disabled one.
+    func testEveryClusterEditIsRefusedWhileAScanIsRunning() async throws {
+        let temp = makeTemp()
+        let photos = try stageLibrary(in: temp)
+        let service = makeService(temp, pack: try facePack())
+        service.eligiblePhotos = { photos }
+
+        await service.startScan()
+        try await waitForRun(service)
+        let cluster = try XCTUnwrap(service.allClusters.first)
+        let before = service.allClusters
+
+        let run = Task { await service.startScan() }
+        var spins = 0
+        while !service.isRunning && spins < 100_000 {
+            spins += 1
+            await Task.yield()
+        }
+        XCTAssertTrue(service.isRunning, "startScan never reached its opening phase")
+
+        let merged = await service.merge(into: cluster.id, from: cluster.id + 1)
+        XCTAssertFalse(merged)
+        XCTAssertEqual(service.lastError, .alreadyRunning)
+        let didSplit = await service.split(cluster: cluster.id, faces: ["deadbeef:0"])
+        XCTAssertFalse(didSplit)
+        XCTAssertEqual(service.lastError, .alreadyRunning)
+        let renamed = await service.rename(person: "Ada", to: "Grace")
+        XCTAssertFalse(renamed)
+        XCTAssertEqual(service.lastError, .alreadyRunning)
+        await service.dismissProposal(FaceService.Proposal(a: 1, b: 2, similarity: 0.9))
+        XCTAssertEqual(service.lastError, .alreadyRunning)
+        XCTAssertEqual(service.allClusters, before, "a refused edit changed the published list")
+
+        service.cancel()
+        await run.value
+        try await waitForRun(service)
+    }
+
+    /// The rename hook exists so the app's per-person state moves *between* the
+    /// core's success and the rescan. Both halves matter: it must not fire on a
+    /// refusal, and it must fire before the refresh the rename schedules.
+    func testARenameNotifiesTheAppBeforeItRescans() async throws {
+        let temp = makeTemp()
+        let photos = try stageLibrary(in: temp)
+        let service = makeService(temp, pack: try facePack())
+        service.eligiblePhotos = { photos }
+        service.libraryRoot = { temp.url }
+
+        var events: [String] = []
+        service.onPersonRenamed = { old, new in events.append("renamed:\(old)->\(new)") }
+        service.onSidecarsWritten = { events.append("rescan") }
+
+        await service.startScan()
+        try await waitForRun(service)
+        events.removeAll()
+        let cluster = try XCTUnwrap(
+            service.allClusters.filter { $0.state == .unlabeled }.max { $0.size < $1.size }
+        )
+        let named = await service.name(cluster: cluster.id, as: "Ada")
+        XCTAssertTrue(named)
+        events.removeAll()
+
+        let renamed = await service.rename(person: "Ada", to: "Grace")
+        XCTAssertTrue(renamed)
+        XCTAssertEqual(events.first, "renamed:Ada->Grace", "\(events)")
+        XCTAssertTrue(events.contains("rescan"), "\(events)")
+        XCTAssertEqual(service.allClusters.first { $0.id == cluster.id }?.name, "Grace")
+
+        // A refused rename must not move the app's state: the sidecars still
+        // say the old name.
+        events.removeAll()
+        service.otherEngineIsRunning = { true }
+        let refused = await service.rename(person: "Grace", to: "Ada")
+        XCTAssertFalse(refused)
+        XCTAssertTrue(events.isEmpty, "\(events)")
+    }
+
     // MARK: - Cross-engine exclusion
 
     /// The core refuses a naming during a *face* run, but it cannot see the

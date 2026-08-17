@@ -357,10 +357,13 @@ final class FaceService {
                 "Face run: \(summary.processed) processed, \(summary.facesFound) faces, \(summary.clustersCreated) new clusters, \(summary.facesAutoTagged) auto-tagged, \(summary.sidecarsWritten) sidecars, \(summary.failed) failed, cancelled=\(summary.cancelled)"
             )
         }
-        await refreshClusters()
         // Always refresh on finish, even when nothing was written this batch —
-        // an earlier batch's rescan may have been coalesced away.
+        // an earlier batch's rescan may have been coalesced away. Scheduled
+        // before the first `await` in this method, so nothing can observe
+        // `isRunning == false` while the rescan this run owes still has no
+        // task to wait on.
         refresh.schedule()
+        await refreshClusters()
         await refresh.task?.value
     }
 

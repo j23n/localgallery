@@ -309,6 +309,7 @@ struct SettingsView: View {
 
     @State private var showModelPackPicker = false
     @State private var showResetTaggingAlert = false
+    @State private var showRemovePackAlert = false
 
     /// Tagging status, model-pack import, and the "Tag Library Now" run
     /// controls. The section is always present — with no pack installed it
@@ -324,6 +325,19 @@ struct SettingsView: View {
                 Label("Model Pack", systemImage: "shippingbox")
             }
 
+            // Where the active pack came from. Worth a row of its own because
+            // the two sources behave differently: the bundled pack cannot be
+            // removed, and an imported one is only in use while it is the
+            // newest.
+            if let pack = tagging.pack {
+                LabeledContent {
+                    Text(pack.source.label)
+                        .foregroundStyle(.secondary)
+                } label: {
+                    Label("Source", systemImage: pack.source == .bundled ? "shippingbox.fill" : "tray.and.arrow.down")
+                }
+            }
+
             Button {
                 showModelPackPicker = true
             } label: {
@@ -331,6 +345,17 @@ struct SettingsView: View {
             }
             .tint(.primary)
             .disabled(tagging.isRunning)
+
+            // Only for an imported pack: the bundled one ships with the app
+            // and there is nothing to delete.
+            if tagging.pack?.source == .imported {
+                Button(role: .destructive) {
+                    showRemovePackAlert = true
+                } label: {
+                    Label("Remove Imported Pack", systemImage: "trash")
+                }
+                .disabled(tagging.isRunning)
+            }
 
             if tagging.isRunning {
                 taggingProgressRow
@@ -384,11 +409,19 @@ struct SettingsView: View {
         } header: {
             Text("On-device Tagging")
         } footer: {
-            Text("Tags photos with the photo-tools Objects and Scenes taxonomy and writes the result into each photo's `.xmp` sidecar — the image files are never modified. Everything runs on this device. A model pack has to be imported first; tagging a photo twice writes nothing. A pack that also ships face models adds face scanning: groups of faces appear under People › Review New People, and naming one writes `People/<name>` keywords and face regions to the same sidecars.")
+            Text(taggingFooter)
         }
         .fileImporter(isPresented: $showModelPackPicker, allowedContentTypes: [.folder]) { result in
             guard case .success(let url) = result else { return }
             Task { await store.tagging.importModelPack(from: url) }
+        }
+        .alert("Remove imported pack?", isPresented: $showRemovePackAlert) {
+            Button("Cancel", role: .cancel) { }
+            Button("Remove", role: .destructive) {
+                Task { await store.tagging.removeImportedPack() }
+            }
+        } message: {
+            Text("Deletes the imported model pack and goes back to the one that ships with the app. Tags already written to `.xmp` sidecars are kept.")
         }
         .alert("Reset tagging data?", isPresented: $showResetTaggingAlert) {
             Button("Cancel", role: .cancel) { }
@@ -411,6 +444,24 @@ struct SettingsView: View {
             return "\(pack.version) · \(pack.labelCount) labels"
         }
         return tagging.hasCheckedForPack ? "None installed" : "Checking…"
+    }
+
+    /// What the section says about itself.
+    ///
+    /// The app ships a pack, so "no pack" is no longer a state the user is
+    /// expected to be in: either this build never staged one
+    /// (`scripts/prepare_pack.sh`) or the bundled one failed verification.
+    /// Only the first is fixed by importing, so only the first says so.
+    private var taggingFooter: String {
+        let tagging = store.tagging
+        let base = "Tags photos with the photo-tools Objects and Scenes taxonomy and writes the result into each photo's `.xmp` sidecar — the image files are never modified. Everything runs on this device, and tagging a photo twice writes nothing. A pack that also ships face models adds face scanning: groups of faces appear under People › Review New People, and naming one writes `People/<name>` keywords and face regions to the same sidecars."
+        guard tagging.hasCheckedForPack, tagging.pack == nil else {
+            return base + " Importing a newer pack replaces the one in use; whichever pack has the higher version wins."
+        }
+        if tagging.hasBundledPack {
+            return base + " The model pack that ships with this build could not be verified. Importing a pack replaces it."
+        }
+        return base + " This build ships no model pack, so tagging is off until you import one."
     }
 
     @ViewBuilder

@@ -6,6 +6,7 @@ struct PeopleListView: View {
     @Environment(GalleryStore.self) private var store
     @State private var searchText = ""
     @State private var linkingPerson: TagSuggestion?
+    @State private var renamingPerson: TagSuggestion?
 
     private var filteredPeople: [TagSuggestion] {
         let all = store.people.visiblePeople
@@ -43,7 +44,11 @@ struct PeopleListView: View {
                     }
                 }
                 .contextMenu {
-                    PersonContextMenu(person: person) { linkingPerson = $0 }
+                    PersonContextMenu(
+                        person: person,
+                        onLink: { linkingPerson = $0 },
+                        onRename: { renamingPerson = $0 }
+                    )
                 }
             }
         }
@@ -54,6 +59,9 @@ struct PeopleListView: View {
         .background(Design.bg)
         .sheet(item: $linkingPerson) { person in
             ContactLinkSheet(person: person)
+        }
+        .sheet(item: $renamingPerson) { person in
+            RenamePersonSheet(person: person)
         }
         .task {
             // Cheap (one bounded query per cluster) and the only place the

@@ -348,6 +348,176 @@ final class FaceSessionTests: XCTestCase {
         }
     }
 
+    // MARK: - Merge and split
+
+    /// Splitting a named cluster is the case that reaches somebody's files: the
+    /// faces that left stop being that person, and only on the photos where
+    /// nothing else still claims them.
+    func testSplittingANamedClusterRetractsTheNameFromTheFacesThatLeft() async throws {
+        try stageLibrary()
+        let session = try makeSession()
+        try await scan(session)
+        let cluster = try biggestCluster(session)
+
+        _ = try session.nameCluster(clusterId: cluster.id, name: "Ada", rootPrefix: nil)
+        let faces = try session.clusterFaces(clusterId: cluster.id)
+        // The whole reason a key exists: two detections in one photo share a
+        // path, so a split cannot be expressed in paths.
+        XCTAssertEqual(Set(faces.map(\.faceKey)).count, faces.count)
+
+        // Every face from one photo, so that photo loses its only claim to Ada.
+        let target = try XCTUnwrap(
+            Set(faces.map(\.path)).sorted().first { path in
+                faces.filter { $0.path == path }.count < faces.count
+            }
+        )
+        let leaving = faces.filter { $0.path == target }.map(\.faceKey)
+        let staying = Set(faces.filter { $0.path != target }.map(\.path))
+        XCTAssertFalse(leaving.isEmpty)
+        XCTAssertFalse(staying.isEmpty)
+
+        let result = try session.splitCluster(
+            clusterId: cluster.id, faceKeys: leaving, rootPrefix: nil
+        )
+        XCTAssertEqual(result.ignoredKeys, 0)
+        XCTAssertGreaterThan(result.report.written, 0, "\(result.report)")
+
+        let dropped = try parsed(URL(fileURLWithPath: target).lastPathComponent)
+        XCTAssertFalse(dropped.rawTags.contains("People/Ada"), "the split-off photo kept the name")
+        XCTAssertTrue(dropped.faceRegions.filter { $0.name == "Ada" }.isEmpty)
+        for path in staying {
+            let kept = try parsed(URL(fileURLWithPath: path).lastPathComponent)
+            XCTAssertTrue(kept.rawTags.contains("People/Ada"), "a photo that still has Ada lost her")
+        }
+
+        // The new group is unlabeled — "this is not that person" is the gesture.
+        let fresh = try XCTUnwrap(try session.clusters().first { $0.id == result.newClusterId })
+        XCTAssertEqual(fresh.state, .unlabeled)
+        XCTAssertNil(fresh.name)
+        XCTAssertEqual(Int(fresh.size), leaving.count)
+    }
+
+    /// Merging back is the inverse, and the name reaches the photos that were
+    /// pulled out of it.
+    func testMergingIntoANamedClusterNamesTheAbsorbedPhotos() async throws {
+        try stageLibrary()
+        let session = try makeSession()
+        try await scan(session)
+        let cluster = try biggestCluster(session)
+
+        let faces = try session.clusterFaces(clusterId: cluster.id)
+        let target = try XCTUnwrap(
+            Set(faces.map(\.path)).sorted().first { path in
+                faces.filter { $0.path == path }.count < faces.count
+            }
+        )
+        let leaving = faces.filter { $0.path == target }.map(\.faceKey)
+        let split = try session.splitCluster(clusterId: cluster.id, faceKeys: leaving, rootPrefix: nil)
+
+        // Name only the group that stayed, so the split-off photo has nothing.
+        _ = try session.nameCluster(clusterId: cluster.id, name: "Ada", rootPrefix: nil)
+        let name = URL(fileURLWithPath: target).lastPathComponent
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: sidecar(name).path),
+            "the split-off photo was named before the merge"
+        )
+
+        let report = try session.mergeClusters(
+            into: cluster.id, from: split.newClusterId, rootPrefix: nil
+        )
+        XCTAssertGreaterThan(report.written, 0, "\(report)")
+        XCTAssertEqual(report.failed, 0)
+
+        let joined = try parsed(name)
+        XCTAssertTrue(joined.rawTags.contains("People/Ada"), "\(joined.rawTags)")
+        XCTAssertFalse(joined.faceRegions.isEmpty, "the absorbed face got no region")
+        XCTAssertNil(
+            try session.clusters().first { $0.id == split.newClusterId },
+            "the absorbed group survived"
+        )
+        XCTAssertEqual(
+            try session.clusters().first { $0.id == cluster.id }?.size, cluster.size
+        )
+    }
+
+    /// A selection the boundary never handed out is a programming error and its
+    /// own case; a *stale* one — a face the cache no longer has — is counted and
+    /// skipped, because a review screen open across a run is ordinary.
+    func testAMalformedFaceKeyIsRefusedWhileAStaleOneIsCounted() async throws {
+        try stageLibrary()
+        let session = try makeSession()
+        try await scan(session)
+        let cluster = try biggestCluster(session)
+        let faces = try session.clusterFaces(clusterId: cluster.id)
+        XCTAssertGreaterThan(faces.count, 1)
+
+        XCTAssertThrowsError(
+            try session.splitCluster(clusterId: cluster.id, faceKeys: ["not-a-key"], rootPrefix: nil)
+        ) { error in
+            guard case FaceError.InvalidFaceKey = error else {
+                return XCTFail("expected InvalidFaceKey, got \(error)")
+            }
+        }
+
+        let stale = String(repeating: "ab", count: 32) + ":0"
+        let result = try session.splitCluster(
+            clusterId: cluster.id, faceKeys: [faces[0].faceKey, stale], rootPrefix: nil
+        )
+        XCTAssertEqual(result.ignoredKeys, 1)
+        XCTAssertEqual(try session.clusters().first { $0.id == result.newClusterId }?.size, 1)
+    }
+
+    /// Both no-op splits are refused rather than leaving an empty or duplicate
+    /// group behind, and a self-merge is refused for the same reason.
+    func testEditsThatWouldNotProduceAGroupAreTypedErrors() async throws {
+        try stageLibrary()
+        let session = try makeSession()
+        try await scan(session)
+        let cluster = try biggestCluster(session)
+        let all = try session.clusterFaces(clusterId: cluster.id).map(\.faceKey)
+
+        for keys in [[], all] {
+            XCTAssertThrowsError(
+                try session.splitCluster(clusterId: cluster.id, faceKeys: keys, rootPrefix: nil),
+                "\(keys.count) keys"
+            ) { error in
+                guard case FaceError.InvalidSplit = error else {
+                    return XCTFail("expected InvalidSplit, got \(error)")
+                }
+            }
+        }
+        XCTAssertThrowsError(
+            try session.mergeClusters(into: cluster.id, from: cluster.id, rootPrefix: nil)
+        ) { error in
+            guard case FaceError.InvalidMerge = error else {
+                return XCTFail("expected InvalidMerge, got \(error)")
+            }
+        }
+        XCTAssertEqual(try session.clusters().first { $0.id == cluster.id }?.size, cluster.size)
+    }
+
+    /// The pin is what makes a hand-made split durable: without it the next
+    /// full pass throws the partition away and rebuilds it, undoing the user's
+    /// work with nothing to notice.
+    func testAHandSplitGroupSurvivesAReCluster() async throws {
+        try stageLibrary()
+        let session = try makeSession()
+        try await scan(session)
+        let cluster = try biggestCluster(session)
+        let faces = try session.clusterFaces(clusterId: cluster.id)
+
+        let split = try session.splitCluster(
+            clusterId: cluster.id, faceKeys: [faces[0].faceKey], rootPrefix: nil
+        )
+        let before = try session.clusters().map { ($0.id, $0.size) }
+
+        let summary = try session.recluster()
+        XCTAssertEqual(summary.clustersBefore, 0, "a pinned group was rebuilt")
+        XCTAssertEqual(summary.faces, 0, "a pinned group's faces were re-partitioned")
+        XCTAssertEqual(try session.clusters().map { ($0.id, $0.size) }.map(\.0), before.map(\.0))
+        XCTAssertNotNil(try session.clusters().first { $0.id == split.newClusterId })
+    }
+
     /// Deterministic, with no sleeps and no polling: the gate listener parks a
     /// core worker thread *inside* `onProgress` and only lets the test proceed
     /// once it is provably there.
@@ -378,6 +548,11 @@ final class FaceSessionTests: XCTestCase {
             ("unnameCluster", { _ = try session.unnameCluster(clusterId: 1, rootPrefix: nil) }),
             ("ignoreCluster", { _ = try session.ignoreCluster(clusterId: 1, rootPrefix: nil) }),
             ("renamePerson", { _ = try session.renamePerson(old: "Ada", new: "Grace", rootPrefix: nil) }),
+            ("mergeClusters", { _ = try session.mergeClusters(into: 1, from: 2, rootPrefix: nil) }),
+            ("splitCluster", {
+                _ = try session.splitCluster(clusterId: 1, faceKeys: [], rootPrefix: nil)
+            }),
+            ("dismissMergeProposal", { try session.dismissMergeProposal(a: 1, b: 2) }),
             ("recluster", { _ = try session.recluster() }),
             ("resetQueue", { try session.resetQueue() }),
         ]
@@ -389,8 +564,9 @@ final class FaceSessionTests: XCTestCase {
             }
         }
         // Reads are still allowed — a review screen must not go blank for the
-        // length of a scan.
+        // length of a scan, and that includes the suggestions above the grid.
         XCTAssertNoThrow(try session.clusters())
+        XCTAssertNoThrow(try session.mergeProposals())
 
         gate.release.signal()
         XCTAssertEqual(gate.finished.wait(timeout: .now() + 60), .success)

@@ -21,6 +21,8 @@ struct CollectionsView: View {
 
     // Person → contact linking sheet
     @State private var linkingPerson: TagSuggestion?
+    // Person rename sheet — a context menu cannot present one itself.
+    @State private var renamingPerson: TagSuggestion?
 
     // First-time Contacts permission primer. Tracked in UserDefaults so the
     // prompt only appears once per install — declining doesn't re-prompt.
@@ -69,6 +71,9 @@ struct CollectionsView: View {
         .sheet(isPresented: $showSettings) { SettingsView() }
         .sheet(item: $linkingPerson) { person in
             ContactLinkSheet(person: person)
+        }
+        .sheet(item: $renamingPerson) { person in
+            RenamePersonSheet(person: person)
         }
         .sheet(isPresented: $showContactsPrimer) {
             ContactsPermissionPrimer(
@@ -362,7 +367,11 @@ struct CollectionsView: View {
                             }
                             .buttonStyle(.plain)
                             .contextMenu {
-                                PersonContextMenu(person: person) { linkingPerson = $0 }
+                                PersonContextMenu(
+                                    person: person,
+                                    onLink: { linkingPerson = $0 },
+                                    onRename: { renamingPerson = $0 }
+                                )
                             }
                         }
                         if pair.count == 1 {

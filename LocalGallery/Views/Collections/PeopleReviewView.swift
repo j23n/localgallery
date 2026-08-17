@@ -1,34 +1,72 @@
 import SwiftUI
 
 /// The face-review queue: unlabeled clusters the core has found, waiting for a
-/// name.
+/// name, plus the pairs it thinks are the same person.
 ///
 /// Reached from the People screen when `store.faces.reviewableClusters` is
 /// non-empty. Each card is one cluster; tapping it opens `ClusterReviewView`,
-/// which is where naming and dismissing actually happen — deliberately one
-/// action per screen rather than inline, because both write to every photo the
-/// cluster reaches.
+/// which is where naming, dismissing and splitting happen — deliberately one
+/// action per screen rather than inline, because they all write to every photo
+/// the cluster reaches.
 ///
-/// Merge and split are **not** here. The core computes merge proposals but
-/// applying one is not implemented (Phase 2 status), and offering half of it
-/// would be worse than offering none.
+/// Merge suggestions sit above the grid rather than inside it: they are about
+/// two groups at once, and the answer ("yes, one person" / "no, two people") is
+/// a judgement the crops themselves settle. Nothing merges on its own — the
+/// core proposes, the user decides.
 struct PeopleReviewView: View {
     @Environment(GalleryStore.self) private var store
 
     private let columns = [GridItem(.adaptive(minimum: 108), spacing: 12)]
 
+    /// Proposals resolved against the cluster list, in the same order the core
+    /// returned them (strongest first).
+    ///
+    /// A proposal naming a group this screen does not have is dropped: the two
+    /// reads come from one crossing, so that means the cluster is ignored or
+    /// otherwise not on offer, and a row with one strip of faces answers
+    /// nothing.
+    private var suggestions: [(proposal: FaceService.Proposal, direction: MergeDirection)] {
+        let byID = Dictionary(uniqueKeysWithValues: store.faces.allClusters.map { ($0.id, $0) })
+        return store.faces.mergeProposals.compactMap { proposal in
+            guard let a = byID[proposal.a], let b = byID[proposal.b],
+                  let direction = MergeDirection(a, b) else { return nil }
+            return (proposal, direction)
+        }
+    }
+
     var body: some View {
         ScrollView {
             let clusters = store.faces.reviewableClusters
-            if clusters.isEmpty {
+            let suggestions = suggestions
+            if clusters.isEmpty && suggestions.isEmpty {
                 emptyState
             } else {
-                LazyVGrid(columns: columns, spacing: 12) {
-                    ForEach(clusters) { cluster in
-                        NavigationLink(value: CollectionsRoute.clusterReview(cluster.id)) {
-                            ClusterCard(cluster: cluster)
+                VStack(alignment: .leading, spacing: 16) {
+                    if !suggestions.isEmpty {
+                        sectionHeader("Suggested Merges")
+                        VStack(spacing: 0) {
+                            ForEach(suggestions, id: \.proposal.id) { entry in
+                                MergeSuggestionRow(
+                                    proposal: entry.proposal,
+                                    direction: entry.direction,
+                                    onMerge: { merge(entry.direction) },
+                                    onDismiss: { dismiss(entry.proposal) }
+                                )
+                                Divider()
+                            }
                         }
-                        .buttonStyle(.plain)
+                    }
+
+                    if !clusters.isEmpty {
+                        if !suggestions.isEmpty { sectionHeader("New Groups") }
+                        LazyVGrid(columns: columns, spacing: 12) {
+                            ForEach(clusters) { cluster in
+                                NavigationLink(value: CollectionsRoute.clusterReview(cluster.id)) {
+                                    ClusterCard(cluster: cluster)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
                     }
                 }
                 .padding(12)
@@ -44,6 +82,23 @@ struct PeopleReviewView: View {
             // have rebuilt the partition, since this screen was last on top.
             await store.faces.refreshClusters()
         }
+    }
+
+    private func sectionHeader(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(Design.ink2)
+            .textCase(.uppercase)
+    }
+
+    private func merge(_ direction: MergeDirection) {
+        Task {
+            await store.faces.merge(into: direction.survivor.id, from: direction.absorbed.id)
+        }
+    }
+
+    private func dismiss(_ proposal: FaceService.Proposal) {
+        Task { await store.faces.dismissProposal(proposal) }
     }
 
     private var emptyState: some View {

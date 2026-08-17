@@ -76,6 +76,7 @@ pub mod engine;
 pub mod error;
 pub mod face;
 pub mod hash;
+pub mod heif;
 pub mod pack;
 pub mod preprocess;
 pub mod tagger;
@@ -91,6 +92,7 @@ pub use face::{
     Detection, FaceEngine, FaceProgress, FaceRunOptions, FaceRunSummary, FailedWrite,
     NoFaceProgress, ReclusterSummary, SidecarWritePlan, ALIGN_VERSION,
 };
+pub use heif::HeifDecoder;
 pub use pack::{ClusteringConfig, FaceSpec, Manifest, ModelPack, RootConfig};
 pub use preprocess::{
     CrateDecoder, ImageDecoder, ImageKind, PreprocessConfig, ResizeFilter, Tensor, DECODER_VERSION,

@@ -221,9 +221,18 @@ facepack is not needed — these are cache-level operations):
 - `FaceSession.merge_clusters(into:from:)`, `.split_cluster(clusterId:faceKeys:)`
   → `SplitResult { new_cluster_id: i64, ignored_keys: u32, report: SidecarWriteReport }`,
   `.merge_proposals()`.
-- All three go through the same `AlreadyRunning` gate as `name_cluster`; the
-  gate is the reason none of them needs to think about the auto-tag pass
+- `.dismiss_merge_proposal(a:b:)`, so "Not the same" is durable against the
+  next read.
+- The **writers** go through the same `AlreadyRunning` gate as `name_cluster`;
+  the gate is the reason none of them needs to think about the auto-tag pass
   mutating the cluster table underneath it.
+
+  **Correction, made while implementing:** `merge_proposals()` is *not* gated.
+  It is a read, and the rule that keeps `clusters()` open during a run — a
+  review screen must not go blank for the length of a scan — is the same rule
+  here. Gating it would make the "Suggested merges" section vanish mid-run
+  while the cluster grid beside it kept rendering, which is the failure mode
+  the exemption exists to prevent. Reads stay open; writes refuse.
 - `FaceSessionTests` (simulator, real FFI, committed facepack): merge two
   clusters and assert the sidecars on disk; split and assert the retraction;
   both refused mid-run.

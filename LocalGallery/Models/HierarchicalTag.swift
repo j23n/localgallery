@@ -26,6 +26,15 @@ struct HierarchicalTag: Hashable, Codable, Sendable {
         self.namespace = namespace
         self.displayName = displayName
     }
+
+    /// The tag path the core writes for a person's name.
+    ///
+    /// The core takes bare names and the app keys everything about a person by
+    /// path, so this is the join between them; spelling it out at each call
+    /// site is how the two drift.
+    static func personPath(for name: String) -> String {
+        "People/\(name)"
+    }
 }
 
 // MARK: - Tag Namespace Icons

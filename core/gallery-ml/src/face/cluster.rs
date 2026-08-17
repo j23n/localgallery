@@ -327,6 +327,7 @@ mod tests {
             } else {
                 None
             },
+            pinned: false,
         }
     }
 

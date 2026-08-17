@@ -339,6 +339,10 @@ final class TaggingSessionTests: XCTestCase {
 
     /// Pack directories are named for their version, and versions have
     /// multi-digit components. A plain string sort ranks `1.9` above `1.10`.
+    ///
+    /// The rule itself now spans two roots (bundled and imported) and lives in
+    /// `PackResolverTests`; this checks that the imported root alone still
+    /// answers the way it always did.
     func testPackSelectionOrdersVersionsNumerically() throws {
         let packs = temp.appending("ModelPacks", isDirectory: true)
         for name in ["mobileclip-1.9", "mobileclip-1.10", "mobileclip-1.2"] {
@@ -350,10 +354,11 @@ final class TaggingSessionTests: XCTestCase {
         let decoy = packs.appendingPathComponent("mobileclip-9.9", isDirectory: true)
         try FileManager.default.createDirectory(at: decoy, withIntermediateDirectories: true)
 
-        XCTAssertEqual(
-            TaggingService.newestPackDirectory(in: packs)?.lastPathComponent,
-            "mobileclip-1.10"
+        let resolved = PackResolver.resolve(
+            bundled: [], imported: PackResolver.candidates(in: packs)
         )
+        XCTAssertEqual(resolved?.directory.lastPathComponent, "mobileclip-1.10")
+        XCTAssertEqual(resolved?.source, .imported)
     }
 }
 

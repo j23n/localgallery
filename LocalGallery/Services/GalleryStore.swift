@@ -214,6 +214,7 @@ final class GalleryStore {
         self.tagging = TaggingService(
             cacheDatabaseURL: paths.mlCacheDatabaseURL,
             modelPacksDirectory: paths.modelPacksDirectoryURL,
+            bundledPackDirectory: paths.bundledModelPackURL,
             refresh: sidecarRefresh
         )
         self.faces = FaceService(

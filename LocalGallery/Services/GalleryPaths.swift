@@ -25,6 +25,14 @@ struct GalleryPaths: Sendable {
     /// Support because a pack is user-installed content the app cannot
     /// re-derive, and losing it mid-run would fail every photo.
     let modelPacksDirectoryURL: URL
+    /// `LocalGallery.app/pack/` — the pack `scripts/prepare_pack.sh` staged and
+    /// `project.yml` bundles, read **in place**. The core only reads and hashes
+    /// a pack, so the read-only bundle is a valid location; copying 157 MB into
+    /// Application Support on first launch would buy nothing.
+    ///
+    /// `nil` when the build carries no pack, which `prepare_pack.sh` exists to
+    /// prevent — a build error, not a state the app is designed around.
+    let bundledModelPackURL: URL?
     let bookmarkKey: String
 
     static var production: GalleryPaths {
@@ -38,6 +46,7 @@ struct GalleryPaths: Sendable {
             thumbnailDir: caches.appendingPathComponent("thumbnails", isDirectory: true),
             mlCacheDatabaseURL: support.appendingPathComponent("gallery-cache.sqlite"),
             modelPacksDirectoryURL: support.appendingPathComponent("ModelPacks", isDirectory: true),
+            bundledModelPackURL: Bundle.main.url(forResource: "pack", withExtension: nil),
             bookmarkKey: "rootFolderBookmark"
         )
     }

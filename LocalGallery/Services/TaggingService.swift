@@ -68,6 +68,10 @@ final class TaggingService {
         /// controls, not to report a problem.
         var hasFaces: Bool
         var directory: URL
+        /// Which of the two locations this pack was resolved from. Settings
+        /// shows it, and it is what makes "Remove" removable — only an
+        /// imported pack can be deleted.
+        var source: PackResolver.Source
     }
 
     /// Cheap identity of an installed pack: where it is, plus its manifest's
@@ -99,6 +103,14 @@ final class TaggingService {
     /// False until `refreshAvailability()` has looked at the disk once, so
     /// Settings can render "Checking…" instead of flashing "No model pack".
     private(set) var hasCheckedForPack = false
+    /// Whether this build ships a pack at all.
+    ///
+    /// It should: `scripts/prepare_pack.sh` stages one and the build fails
+    /// loudly without it. So "no pack" means either a build that skipped that
+    /// step or a bundled pack that failed verification — neither of which the
+    /// user can fix by importing, which is why Settings words the two states
+    /// differently.
+    private(set) var hasBundledPack = false
 
     /// Tagging can run.
     var isAvailable: Bool { pack != nil }
@@ -107,6 +119,8 @@ final class TaggingService {
 
     @ObservationIgnored private let cacheDatabaseURL: URL
     @ObservationIgnored private let modelPacksDirectory: URL
+    /// The pack inside the app bundle, if this build has one.
+    @ObservationIgnored private let bundledPackDirectory: URL?
     /// Supplies the photos a run should consider. Set by `GalleryStore` so the
     /// service never holds a reference back to the Store.
     @ObservationIgnored var eligiblePhotos: (@MainActor () -> [PhotoFile])?
@@ -153,9 +167,15 @@ final class TaggingService {
     @ObservationIgnored private var cancelRequested = false
     @ObservationIgnored private var verifiedPack: PackFingerprint?
 
-    init(cacheDatabaseURL: URL, modelPacksDirectory: URL, refresh: SidecarRefreshCoalescer) {
+    init(
+        cacheDatabaseURL: URL,
+        modelPacksDirectory: URL,
+        bundledPackDirectory: URL?,
+        refresh: SidecarRefreshCoalescer
+    ) {
         self.cacheDatabaseURL = cacheDatabaseURL
         self.modelPacksDirectory = modelPacksDirectory
+        self.bundledPackDirectory = bundledPackDirectory
         self.refresh = refresh
     }
 
@@ -168,19 +188,25 @@ final class TaggingService {
     /// rather than re-hashed. Pass `force` to re-verify regardless.
     func refreshAvailability(force: Bool = false) async {
         defer { hasCheckedForPack = true }
-        guard let dir = Self.newestPackDirectory(in: modelPacksDirectory) else {
+        let bundled = PackResolver.candidates(in: bundledPackDirectory)
+        hasBundledPack = !bundled.isEmpty
+        guard let resolved = PackResolver.resolve(
+            bundled: bundled,
+            imported: PackResolver.candidates(in: modelPacksDirectory)
+        ) else {
             pack = nil
             verifiedPack = nil
             return
         }
+        let dir = resolved.directory
         let fingerprint = Self.fingerprint(of: dir)
         if !force, pack != nil, let verifiedPack, let fingerprint, verifiedPack == fingerprint {
             return
         }
         do {
-            pack = try await Self.inspect(dir)
+            pack = try await Self.inspect(resolved)
             verifiedPack = fingerprint
-            Log.ml.info("Model pack \(self.pack?.version ?? "?") ready (\(self.pack?.labelCount ?? 0) labels)")
+            Log.ml.info("Model pack \(self.pack?.version ?? "?") ready (\(self.pack?.labelCount ?? 0) labels, \(resolved.source.label.lowercased()))")
         } catch {
             pack = nil
             verifiedPack = nil
@@ -224,45 +250,50 @@ final class TaggingService {
 
         verifiedPack = nil
         do {
-            pack = try await Self.inspect(destination)
-            verifiedPack = Self.fingerprint(of: destination)
+            _ = try await Self.inspect(
+                PackResolver.Resolution(directory: destination, source: .imported)
+            )
             lastError = nil
-            hasCheckedForPack = true
-            Log.ml.info("Imported model pack \(self.pack?.version ?? "?")")
         } catch {
             try? FileManager.default.removeItem(at: destination)
-            pack = nil
-            hasCheckedForPack = true
             lastError = TaggingServiceError(error)
             Log.ml.error("Imported model pack rejected: \(Log.r.error(error))")
+            // Whatever was installed before is still installed, so re-resolve
+            // rather than leaving the app pack-less over a bad import.
+            await refreshAvailability(force: true)
+            return
         }
+        // *Which* pack is active is the resolver's call, not the import's: a
+        // pack older than the bundled one is installed but does not win.
+        await refreshAvailability(force: true)
+        Log.ml.info("Imported model pack; active pack is \(self.pack?.version ?? "none")")
     }
 
-    /// Newest (by version-aware name, descending) subdirectory that looks like
-    /// a pack.
+    /// Delete the imported pack and fall back to whatever else resolves —
+    /// normally the one in the app bundle.
     ///
-    /// Name order rather than mtime: pack directories are named for their
-    /// version, and a copy's mtime says when it was installed, not which
-    /// version it is. `.numeric` because plain lexicographic ordering ranks
-    /// `…-1.9` above `…-1.10`.
-    nonisolated static func newestPackDirectory(in root: URL) -> URL? {
-        let entries = (try? FileManager.default.contentsOfDirectory(
-            at: root,
-            includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles]
-        )) ?? []
-        return entries
-            .filter { url in
-                (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
-                    && FileManager.default.fileExists(
-                        atPath: url.appendingPathComponent("manifest.json").path
-                    )
-            }
-            .sorted { a, b in
-                a.lastPathComponent.compare(b.lastPathComponent, options: [.numeric])
-                    == .orderedDescending
-            }
-            .first
+    /// The undo for an import, so it removes the *active* imported pack rather
+    /// than every pack ever installed. Refused during a run: the session holds
+    /// the directory's files open.
+    func removeImportedPack() async {
+        guard !isRunning else { return }
+        guard let installed = pack, installed.source == .imported else { return }
+        // Same reasoning as `importModelPack`: the sessions hold this pack's
+        // weights, and faces holds its own copy of them.
+        await releaseSession()
+        await onPackWillChange?()
+        do {
+            try FileManager.default.removeItem(at: installed.directory)
+        } catch {
+            lastError = .io(error.localizedDescription)
+            Log.ml.error("Removing the imported model pack failed: \(Log.r.error(error))")
+            return
+        }
+        pack = nil
+        verifiedPack = nil
+        lastError = nil
+        await refreshAvailability(force: true)
+        Log.ml.info("Removed the imported model pack; active pack is \(self.pack?.version ?? "none")")
     }
 
     /// Size + mtime of `dir/manifest.json`, or `nil` when it cannot be read
@@ -280,9 +311,14 @@ final class TaggingService {
     }
 
     /// SHA-256-verify a pack directory off the main actor.
-    private nonisolated static func inspect(_ dir: URL) async throws -> PackStatus {
+    private nonisolated static func inspect(
+        _ resolved: PackResolver.Resolution
+    ) async throws -> PackStatus {
         // `Task.detached`: verification reads (and hashes) the whole ONNX file
-        // — tens of MB for a real pack.
+        // — 143 MB for the bundled pack. Once per install, since the
+        // fingerprint below is keyed on the manifest's size and mtime.
+        let dir = resolved.directory
+        let source = resolved.source
         let result = await Task.detached(priority: .userInitiated) { () -> Result<PackStatus, TaggingServiceError> in
             do {
                 let info = try inspectModelPack(modelPackDir: dir.path)
@@ -290,7 +326,8 @@ final class TaggingService {
                     version: info.version,
                     labelCount: Int(info.labelCount),
                     hasFaces: info.hasFaces,
-                    directory: dir
+                    directory: dir,
+                    source: source
                 ))
             } catch {
                 return .failure(TaggingServiceError(error))

@@ -449,9 +449,19 @@ final class SlideshowMusicPlayer {
             do { try engine.start() } catch { return }
         }
         player.stop()
-        player.scheduleBuffer(buffer, at: nil, options: [.loops], completionHandler: nil)
+        // Sync on purpose. The async `scheduleBuffer` waits until the
+        // buffer is consumed, and a looping pad is never consumed — awaiting
+        // it would hang `play` before `player.play()` ran.
+        scheduleLooping(buffer)
         player.play()
         isRunning = true
+    }
+
+    /// `AVAudioPlayerNode.scheduleBuffer` has an async overload that this
+    /// `async` method would otherwise be nudged onto. Isolated here so the
+    /// call site stays fire-and-forget.
+    private func scheduleLooping(_ buffer: AVAudioPCMBuffer) {
+        player.scheduleBuffer(buffer, at: nil, options: [.loops])
     }
 
     func stop() {

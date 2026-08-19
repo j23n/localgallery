@@ -32,6 +32,12 @@ final class ThumbnailService {
     /// retries before the provider gets asked again.
     private static let sentinelTTL: TimeInterval = 24 * 60 * 60
 
+    /// Called when a local (non-QuickLook) load needed the source file and
+    /// it was gone. Not fired for placeholder misses or cancellation.
+    /// The caller coalesces these; firing once per failed cell load is
+    /// enough. The service is `@MainActor`, so the callback runs there.
+    var onSourceMissing: (@MainActor (URL) -> Void)?
+
     /// No default — the directory comes from `GalleryPaths` (via the Store)
     /// so a missed injection can't silently write to production paths in
     /// tests.
@@ -94,7 +100,10 @@ final class ThumbnailService {
                 size: size,
                 diskPath: diskPath, sentinelPath: sentinelPath
             )
-            guard let image else { return nil }
+            guard let image else {
+                notifyIfSourceMissing(url, useQuickLook: useQuickLook)
+                return nil
+            }
             let cost = image.cgImage.map { $0.bytesPerRow * $0.height } ?? 0
             thumbnailCache.setObject(image, forKey: url as NSURL, cost: cost)
             return image
@@ -102,8 +111,22 @@ final class ThumbnailService {
             Log.thumb.debug("Cancelled: \(Log.r.filename(url.lastPathComponent))")
             return nil
         } catch {
+            notifyIfSourceMissing(url, useQuickLook: useQuickLook)
             return nil
         }
+    }
+
+    /// Local cells that fail because the photo file is gone — not a
+    /// QuickLook miss, not a cancelled in-flight load.
+    private func notifyIfSourceMissing(_ url: URL, useQuickLook: Bool) {
+        guard !useQuickLook, !FileManager.default.fileExists(atPath: url.path) else { return }
+        onSourceMissing?(url)
+    }
+
+    /// Drops the in-memory entry for `url` without touching the on-disk JPEG.
+    /// Tests use this to force a disk-cache hit after the source file is gone.
+    func evictInMemoryThumbnail(for url: URL) {
+        thumbnailCache.removeObject(forKey: url as NSURL)
     }
 
     /// Generates or loads a thumbnail — `nonisolated` for cooperative pool
@@ -121,28 +144,30 @@ final class ThumbnailService {
         // *lazy* image whose JPEG decode is deferred to the render pipeline,
         // where it runs unbounded and exhausts the IOSurface pool during
         // fast scrolling (the CMPhotoJFIFUtilities -17102 cascade).
+        //
+        // If the source file has disappeared, still serve the on-disk JPEG
+        // as a last-known image rather than falling through to ImageIO on
+        // a missing path (that returns nil and the cell shimmers forever).
         if FileManager.default.fileExists(atPath: diskPath.path) {
-            let sourceModDate = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-            let cacheModDate = (try? diskPath.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
             // For placeholder files we trust the disk cache regardless of
             // mod-date — reading the source's mtime might be a metadata-only
             // call but the source itself has no bytes to compare against.
             // Cache wins as long as it exists.
             if useQuickLook {
-                if let source = CGImageSourceCreateWithURL(diskPath as CFURL, nil),
-                   let cgImage = CGImageSourceCreateImageAtIndex(
-                       source, 0,
-                       [kCGImageSourceShouldCacheImmediately: true] as CFDictionary
-                   ) {
-                    return UIImage(cgImage: cgImage)
+                if let image = loadDiskCachedJPEG(at: diskPath) {
+                    return image
                 }
-            } else if let src = sourceModDate, let cache = cacheModDate, cache >= src,
-               let source = CGImageSourceCreateWithURL(diskPath as CFURL, nil),
-               let cgImage = CGImageSourceCreateImageAtIndex(
-                   source, 0,
-                   [kCGImageSourceShouldCacheImmediately: true] as CFDictionary
-               ) {
-                return UIImage(cgImage: cgImage)
+            } else if sourceFileIsMissing(url) {
+                if let image = loadDiskCachedJPEG(at: diskPath) {
+                    return image
+                }
+            } else {
+                let sourceModDate = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+                let cacheModDate = (try? diskPath.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+                if let src = sourceModDate, let cache = cacheModDate, cache >= src,
+                   let image = loadDiskCachedJPEG(at: diskPath) {
+                    return image
+                }
             }
         }
 
@@ -171,6 +196,45 @@ final class ThumbnailService {
             await decodeLimiter.release()
             throw error
         }
+    }
+
+    /// Decode a cached JPEG with `ShouldCacheImmediately` so the UIImage
+    /// carries decoded pixels (see the disk-cache branch in `loadThumbnail`).
+    private nonisolated static func loadDiskCachedJPEG(at diskPath: URL) -> UIImage? {
+        guard let source = CGImageSourceCreateWithURL(diskPath as CFURL, nil),
+              let cgImage = CGImageSourceCreateImageAtIndex(
+                  source, 0,
+                  [kCGImageSourceShouldCacheImmediately: true] as CFDictionary
+              ) else {
+            return nil
+        }
+        return UIImage(cgImage: cgImage)
+    }
+
+    /// True when the original photo is gone (or the filesystem reports it
+    /// as not found). A last-known on-disk JPEG is then the best we can show.
+    private nonisolated static func sourceFileIsMissing(_ url: URL) -> Bool {
+        if !FileManager.default.fileExists(atPath: url.path) {
+            return true
+        }
+        do {
+            _ = try url.resourceValues(forKeys: [
+                .contentModificationDateKey,
+                .isReadableKey,
+            ])
+            return false
+        } catch {
+            return isNotFoundError(error)
+        }
+    }
+
+    private nonisolated static func isNotFoundError(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        if nsError.domain == NSCocoaErrorDomain {
+            return nsError.code == CocoaError.fileNoSuchFile.rawValue
+                || nsError.code == CocoaError.fileReadNoSuchFile.rawValue
+        }
+        return false
     }
 
     /// Generate a thumbnail for a non-downloaded file-provider placeholder via

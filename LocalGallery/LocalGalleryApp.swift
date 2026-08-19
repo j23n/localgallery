@@ -314,7 +314,7 @@ struct ContentView: View {
                         case .browser(let folder):
                             FolderBrowserView(folder: folder, isRoot: false)
                         case .grid(let folder):
-                            FolderGridView(title: folder.name, photos: folder.photos)
+                            FolderGridView(title: folder.name, folderID: folder.id)
                         }
                     }
             }
@@ -340,6 +340,15 @@ struct ContentView: View {
             .tag(AppRouter.Tab.photos)
         }
         .minimizableTabBar()
+        .onChange(of: store.libraryAvailability) { _, availability in
+            // Pushed folder/person/memory screens still hold live queries
+            // against `allPhotos`. Unlistable-root keeps that array, so
+            // leaving them on the stack would show the library we just hid.
+            if availability == .unavailable {
+                router.foldersPath = []
+                router.collectionsPath = []
+            }
+        }
         .task {
             await store.restoreFolder()
         }

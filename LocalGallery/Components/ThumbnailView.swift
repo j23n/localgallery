@@ -26,10 +26,10 @@ struct ThumbnailView: View {
                     .frame(width: size, height: size)
                     .clipped()
                     .transition(.opacity)
-            } else if thumbnailMissing && isRemote {
-                // Provider didn't vend a thumbnail. Show a plain placeholder
-                // tile with a photo glyph so the grid doesn't stall on a
-                // forever-spinning shimmer.
+            } else if thumbnailMissing {
+                // Load finished with nothing to show — provider didn't vend
+                // a thumb, or the local source file is gone. Same glyph tile
+                // either way so the cell doesn't shimmer forever.
                 Rectangle()
                     .fill(Color(.systemGray6))
                     .frame(width: size, height: size)

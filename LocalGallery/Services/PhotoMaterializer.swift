@@ -29,9 +29,10 @@ final class PhotoMaterializer {
 
     /// Whether the current network path is "expensive" (cellular, personal
     /// hotspot). Prefetch — and only prefetch — is gated on it; explicit
-    /// taps always go through regardless. `nonisolated(unsafe)` so the
-    /// implicitly-nonisolated deinit can cancel the monitor.
-    private nonisolated(unsafe) let pathMonitor = NWPathMonitor()
+    /// taps always go through regardless. `NWPathMonitor` is Sendable, so
+    /// the implicitly-nonisolated deinit can cancel it without
+    /// `nonisolated(unsafe)`.
+    private let pathMonitor = NWPathMonitor()
     private var isOnExpensivePath = false
 
     init() {

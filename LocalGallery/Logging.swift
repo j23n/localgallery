@@ -81,4 +81,8 @@ enum Log {
     // On-device tagging (TaggingService + the Rust core's progress
     // callbacks). Per-batch, not per-photo — the core batches for us.
     static let ml       = tee("ml")
+    // Library-folder watcher (vnode + NSFilePresenter). Start/stop at
+    // info; individual events at debug so a Syncthing burst does not
+    // drown LogsView.
+    static let fs       = tee("fs")
 }

@@ -41,14 +41,22 @@ struct CollectionsView: View {
 
     var body: some View {
         Group {
-            if store.allPhotos.isEmpty {
-                if store.isScanning {
-                    ProgressView("Scanning…")
-                } else {
-                    emptyState
-                }
+            // Cold-launch spinner only while there is nothing to show.
+            // `.unavailable` wins even when `allPhotos` still holds a cache:
+            // the Events rail would otherwise keep listing ghost folders.
+            if store.isScanning && store.allPhotos.isEmpty && store.libraryAvailability != .unavailable {
+                ProgressView("Scanning…")
             } else {
-                collectionsBody
+                switch store.libraryAvailability {
+                case .noneSelected:
+                    emptyState
+                case .unavailable:
+                    unavailableState
+                case .empty:
+                    emptyLibraryState
+                case .ready:
+                    collectionsBody
+                }
             }
         }
         .background(Design.bg)
@@ -389,7 +397,7 @@ struct CollectionsView: View {
         VStack(spacing: 0) {
             ForEach(Array(store.eventFolders.enumerated()), id: \.element.id) { idx, folder in
                 NavigationLink {
-                    FolderGridView(title: folder.name, photos: folder.photos)
+                    FolderGridView(title: folder.name, folderID: folder.id)
                 } label: {
                     eventRow(folder)
                 }
@@ -464,6 +472,16 @@ struct CollectionsView: View {
 
     private var emptyState: some View {
         LibraryEmptyState(icon: "rectangle.stack", title: "No Collections")
+    }
+
+    private var emptyLibraryState: some View {
+        LibraryEmptyState.selectedFolderEmpty(icon: "rectangle.stack", title: "No Collections")
+    }
+
+    private var unavailableState: some View {
+        LibraryEmptyState.unavailable(icon: "rectangle.stack") {
+            Task { await store.rescan(kind: .light, silent: false) }
+        }
     }
 }
 

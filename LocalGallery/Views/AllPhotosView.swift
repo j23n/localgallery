@@ -8,34 +8,22 @@ struct AllPhotosView: View {
 
     var body: some View {
         Group {
-            if store.allPhotos.isEmpty {
-                if store.isScanning {
-                    chrome { ProgressView("Scanning…") }
-                } else {
-                    chrome { emptyState }
-                }
-            } else if !store.hasSortedPhotos {
-                // The library is loaded but the core has not published its sort
-                // yet — a few hundred milliseconds on a cold launch with a warm
-                // cache. `PhotoGridScreen` would render `sortedPhotos == []` as
-                // "No photos match.", which is a *filter* message and reads as
-                // if the user's library had gone missing. A spinner is the
-                // honest state; showing the photos unsorted would be worse,
-                // because the grid would then visibly reshuffle under the
-                // user's thumb the moment the sort lands.
-                chrome { ProgressView() }
+            // Cold-launch spinner only while there is nothing to show.
+            // `.unavailable` wins even when `allPhotos` still holds a cache:
+            // rendering the grid would look like the library was still there.
+            if store.isScanning && store.allPhotos.isEmpty && store.libraryAvailability != .unavailable {
+                chrome { ProgressView("Scanning…") }
             } else {
-                PhotoGridScreen(
-                    title: "Photos",
-                    photos: store.sortedPhotos,
-                    isRoot: true,
-                    showSearch: true,
-                    showVisibleDateRange: true,
-                    initialTags: seedTags
-                )
-                // Force fresh PhotoGridScreen state when a deep-link seeds new
-                // tags so its internal @State activeTags actually adopts them.
-                .id("photogrid-" + seedTags.map(\.id).joined(separator: "|"))
+                switch store.libraryAvailability {
+                case .noneSelected:
+                    chrome { emptyState }
+                case .unavailable:
+                    chrome { unavailableState }
+                case .empty:
+                    chrome { emptyLibraryState }
+                case .ready:
+                    readyBody
+                }
             }
         }
         .background(Design.bg)
@@ -52,8 +40,45 @@ struct AllPhotosView: View {
         router.pendingPhotosTagFilter = []
     }
 
+    @ViewBuilder
+    private var readyBody: some View {
+        if !store.hasSortedPhotos {
+            // The library is loaded but the core has not published its sort
+            // yet — a few hundred milliseconds on a cold launch with a warm
+            // cache. `PhotoGridScreen` would render `sortedPhotos == []` as
+            // "No photos match.", which is a *filter* message and reads as
+            // if the user's library had gone missing. A spinner is the
+            // honest state; showing the photos unsorted would be worse,
+            // because the grid would then visibly reshuffle under the
+            // user's thumb the moment the sort lands.
+            chrome { ProgressView() }
+        } else {
+            PhotoGridScreen(
+                title: "Photos",
+                photos: store.sortedPhotos,
+                isRoot: true,
+                showSearch: true,
+                showVisibleDateRange: true,
+                initialTags: seedTags
+            )
+            // Force fresh PhotoGridScreen state when a deep-link seeds new
+            // tags so its internal @State activeTags actually adopts them.
+            .id("photogrid-" + seedTags.map(\.id).joined(separator: "|"))
+        }
+    }
+
     private var emptyState: some View {
         LibraryEmptyState(icon: "photo.stack", title: "No Photos")
+    }
+
+    private var emptyLibraryState: some View {
+        LibraryEmptyState.selectedFolderEmpty(icon: "photo.stack", title: "No Photos")
+    }
+
+    private var unavailableState: some View {
+        LibraryEmptyState.unavailable(icon: "photo.stack") {
+            Task { await store.rescan(kind: .light, silent: false) }
+        }
     }
 
     /// Title and gear for the states `PhotoGridScreen` does not render. The

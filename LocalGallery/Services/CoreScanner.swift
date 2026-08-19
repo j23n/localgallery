@@ -32,10 +32,12 @@ final class CoreScanner: Sendable {
         /// URLs whose `fileSize` or `fileModificationDate` changed since the
         /// cache. Disjoint from `addedURLs`.
         let modifiedURLs: [URL]
-        /// Standardized paths of directories whose listing threw. Photos under
-        /// them are absent from `flatPhotos`/`removedURLs` — the Store carries
-        /// the cached entries forward so a transient I/O error doesn't wipe a
-        /// subtree's tags and enrichment.
+        /// Standardized paths of directories whose listing threw a *transient*
+        /// error (`PermissionDenied`, other I/O). Photos under them are absent
+        /// from `flatPhotos`/`removedURLs` — the Store carries the cached
+        /// entries forward so a provider hiccup doesn't wipe a subtree's tags
+        /// and enrichment. `NotFound` is not listed here: those photos appear
+        /// in `removedURLs`, and a missing root arrives as `rootFolder == nil`.
         let failedDirectoryPaths: [String]
         /// The pass produced no outcome at all: the core threw instead of
         /// answering — a cancelled walk, or an unreadable snapshot.
@@ -154,12 +156,14 @@ final class CoreScanner: Sendable {
                     progress: onProgress.map(ProgressBridge.init)
                 )
             } catch {
-                // An unreadable *root* is data, not an error: it comes back as
-                // a `failedDirectoryPaths` entry with an empty tree, which the
-                // Store already handles. Reaching here means the core produced
-                // no answer at all — a cancelled walk today — and an empty
-                // answer is indistinguishable from "the library is now empty".
-                // `.incomplete` is how the Store tells them apart.
+                // A missing root is data, not an error: empty `folders`, no
+                // failed-directory entry, `rootFolder == nil`. An unlistable
+                // root (permission/provider) still arrives as
+                // `failedDirectoryPaths` with an empty tree. Reaching here
+                // means the core produced no answer at all — a cancelled walk
+                // today — and an empty answer is indistinguishable from "the
+                // library is now empty". `.incomplete` is how the Store tells
+                // them apart.
                 Log.scan.error("core scan failed: \(Log.r.error(error))")
                 return .incomplete
             }

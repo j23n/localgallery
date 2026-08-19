@@ -24,12 +24,18 @@
 //!
 //! # The carry-forward
 //!
-//! A directory whose listing throws is recorded in `failed_directory_paths`,
-//! its photos are absent from `flat_photos`, and — critically — they are
-//! **excluded from `removed_paths`**. The Store keeps its cached copies, so a
-//! transient provider error cannot wipe a subtree's tags and enrichment. The
-//! directory still becomes a photo-less node: it is stat-able even when it is
-//! not listable.
+//! A directory whose listing throws a *transient* error (`PermissionDenied`,
+//! other I/O) is recorded in `failed_directory_paths`, its photos are absent
+//! from `flat_photos`, and — critically — they are **excluded from
+//! `removed_paths`**. The Store keeps its cached copies, so a transient
+//! provider error cannot wipe a subtree's tags and enrichment. The directory
+//! still becomes a photo-less node: it is stat-able even when it is not
+//! listable.
+//!
+//! `NotFound` is deletion, not a transient error. The directory is not
+//! recorded as failed, no scan node is emitted for it, and cached photos
+//! under it fall into `removed_paths`. A missing root produces
+//! `root_folder: None` and an empty photo list.
 
 use std::collections::{HashMap, HashSet};
 
@@ -37,7 +43,7 @@ use gallery_model::date::AppleDate;
 use gallery_model::file_url::{join, stem};
 use gallery_model::photo::{PhotoFile, PhotoFolder, PhotoLocality, StableId};
 use gallery_model::snapshot::{ContentVersion, DownloadStatus, SidecarCandidate};
-use gallery_vfs::{Entry, EntryKind, FileTime, ProviderAttrs, Vfs};
+use gallery_vfs::{Entry, EntryKind, FileTime, ProviderAttrs, Vfs, VfsError};
 
 use crate::classify::{
     classify, image_stem_key, is_hidden, sidecar_key, sidecar_owner_key, video_stem, MediaKind,
@@ -98,7 +104,9 @@ pub struct ScanStats {
 /// Everything one pass produces.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScanOutcome {
-    /// The tree, or `None` when the root itself could not be visited.
+    /// The tree, or `None` when the root does not exist (`NotFound`). An
+    /// unlistable root (`PermissionDenied` / other I/O) still produces an
+    /// empty node and a `failed_directory_paths` entry.
     pub root_folder: Option<PhotoFolder>,
     /// Every photo, in traversal order.
     pub flat_photos: Vec<PhotoFile>,
@@ -113,9 +121,11 @@ pub struct ScanOutcome {
     pub removed_paths: Vec<String>,
     /// Paths whose size or mtime changed. Disjoint from `added_paths`.
     pub modified_paths: Vec<String>,
-    /// **Decomposed** paths of directories whose listing failed. NFD because
-    /// Swift emits them through `standardizedFileURL.path` and the Store's
-    /// prefix check compares against that same form.
+    /// **Decomposed** paths of directories whose listing failed with a
+    /// transient error (`PermissionDenied`, other I/O). NFD because Swift
+    /// emits them through `standardizedFileURL.path` and the Store's prefix
+    /// check compares against that same form. `NotFound` is omitted — that
+    /// directory is gone, not unreadable.
     pub failed_directory_paths: Vec<String>,
     /// Timings and cache-hit counters for the scan-totals log line.
     pub stats: ScanStats,
@@ -164,7 +174,11 @@ pub fn scan_with_hooks(
         if cancelled.is_some_and(|c| c()) {
             return None;
         }
-        let mut subdirs = walk.visit_directory(vfs, &dir, parent);
+        let Some(mut subdirs) = walk.visit_directory(vfs, &dir, parent) else {
+            // `NotFound`: no node, no failed-directory record. Cached photos
+            // under it fall into `removed_paths` in `finish()`.
+            continue;
+        };
         if let Some(callback) = on_progress {
             walk.report(callback, false);
         }
@@ -262,12 +276,15 @@ impl<'a> Walk<'a> {
 
     /// Visit one directory, append its node, and return its subdirectories as
     /// `(name, path)` pairs for the caller to order and push.
+    ///
+    /// `None` means the directory is gone (`NotFound`): no node is appended
+    /// and the caller must not look up a node index.
     fn visit_directory(
         &mut self,
         vfs: &dyn Vfs,
         dir: &str,
         parent_index: Option<usize>,
-    ) -> Vec<(String, String)> {
+    ) -> Option<Vec<(String, String)>> {
         let mut photos: Vec<PhotoFile> = Vec::new();
         let mut subdirs: Vec<(String, String)> = Vec::new();
 
@@ -281,8 +298,17 @@ impl<'a> Walk<'a> {
                 let (files, sidecars) = self.classify_pass(vfs, dir, entries, &mut subdirs);
                 photos = self.build_photos(vfs, dir, files, &sidecars);
             }
+            Err(VfsError::NotFound { .. }) => {
+                // The directory is gone, not briefly unreadable. Recording it
+                // as a failed directory would carry its cached photos forward
+                // forever, and emitting a node would make a missing root look
+                // like an empty folder. Unseen photos under it are not under
+                // a failed prefix, so `finish()` already puts them in
+                // `removed_paths`.
+                return None;
+            }
             Err(_) => {
-                // No log surface here: the core does not own logging. The
+                // Transient listing failure (permission, provider, I/O). The
                 // Store learns about it through `failed_directory_paths`,
                 // which is also what keeps the subtree's photos alive.
                 self.failed_directory_paths.push(decomposed(dir));
@@ -307,7 +333,7 @@ impl<'a> Walk<'a> {
         }
         self.progress_tick += photos.len();
         self.flat_photos.extend(photos);
-        subdirs
+        Some(subdirs)
     }
 
     /// First pass: sort the listing into media files, sidecars and
@@ -1033,8 +1059,91 @@ mod tests {
         vfs.insert("/other/a.jpg", vec![0u8; 1]);
         let out = scan(&vfs, "/lib", &ScanInput::default());
         assert!(out.flat_photos.is_empty());
-        assert_eq!(out.failed_directory_paths, vec!["/lib"]);
-        // The root still becomes a node — it is the tree's anchor.
+        assert!(
+            out.failed_directory_paths.is_empty(),
+            "NotFound is deletion, not a transient listing failure"
+        );
+        assert!(
+            out.root_folder.is_none(),
+            "a missing root must not look like an empty folder"
+        );
+    }
+
+    #[test]
+    fn a_cached_photo_under_a_missing_root_is_removed() {
+        let vfs = library();
+        let cold = scan(&vfs, "/lib", &ScanInput::default());
+        let empty = MemVfs::new();
+        let out = scan(&empty, "/lib", &cache(&cold));
+        assert!(out.root_folder.is_none());
+        assert!(out.flat_photos.is_empty());
+        assert!(out.failed_directory_paths.is_empty());
+        assert!(
+            out.removed_paths.contains(&"/lib/a.jpg".to_string()),
+            "cached photos under a gone root must look like deletions, not a carry-forward: {:?}",
+            out.removed_paths
+        );
+        assert_eq!(out.removed_paths.len(), cold.flat_photos.len());
+    }
+
+    /// chmod on [`MemVfs`] is a no-op, so this wraps it and answers
+    /// [`VfsError::PermissionDenied`] for one subdirectory — the same
+    /// shape the platform VFS produces for an unreadable folder.
+    #[test]
+    fn a_permission_denied_listing_still_records_a_failed_directory() {
+        struct DeniedVfs {
+            inner: MemVfs,
+            denied: String,
+        }
+        impl Vfs for DeniedVfs {
+            fn open(
+                &self,
+                path: &str,
+            ) -> gallery_vfs::VfsResult<Box<dyn gallery_vfs::ReadSeek + Send>> {
+                self.inner.open(path)
+            }
+            fn stat(&self, path: &str) -> gallery_vfs::VfsResult<gallery_vfs::Stat> {
+                self.inner.stat(path)
+            }
+            fn list(&self, dir: &str) -> gallery_vfs::VfsResult<Vec<Entry>> {
+                if dir == self.denied {
+                    return Err(VfsError::PermissionDenied {
+                        path: dir.to_string(),
+                    });
+                }
+                self.inner.list(dir)
+            }
+            fn stat_entry(&self, path: &str) -> gallery_vfs::VfsResult<Entry> {
+                self.inner.stat_entry(path)
+            }
+            fn write_atomic(&self, path: &str, bytes: &[u8]) -> gallery_vfs::VfsResult<()> {
+                self.inner.write_atomic(path, bytes)
+            }
+            fn exists(&self, path: &str) -> bool {
+                self.inner.exists(path)
+            }
+        }
+
+        let cold = scan(&library(), "/lib", &ScanInput::default());
+        let vfs = DeniedVfs {
+            inner: library(),
+            denied: "/lib/Nested".into(),
+        };
+        let out = scan(&vfs, "/lib", &cache(&cold));
+        assert_eq!(out.failed_directory_paths, vec!["/lib/Nested"]);
+        assert!(
+            !out.removed_paths
+                .iter()
+                .any(|p| p.starts_with("/lib/Nested/")),
+            "a transient I/O error must not look like a deletion: {:?}",
+            out.removed_paths
+        );
+        assert!(
+            !out.flat_photos
+                .iter()
+                .any(|p| p.path() == "/lib/Nested/n.jpg"),
+            "the unlistable directory contributes no photos this pass"
+        );
         assert!(out.root_folder.is_some());
     }
 

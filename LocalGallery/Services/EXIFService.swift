@@ -19,9 +19,9 @@ enum EXIFService {
     /// Japanese) parses to wrong years. No `timeZone` override: EXIF capture
     /// dates carry no zone, so the device zone is the least-wrong
     /// interpretation, and the core's bridge resolves its wall clock the same
-    /// way. `nonisolated(unsafe)` because `DateFormatter` is documented
-    /// thread-safe (iOS 7+) and the instance is never mutated after init.
-    nonisolated(unsafe) static let exifDateFormatter: DateFormatter = {
+    /// way. Never mutated after init; `DateFormatter` is Sendable (and
+    /// documented thread-safe since iOS 7).
+    static let exifDateFormatter: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.calendar = Calendar(identifier: .gregorian)

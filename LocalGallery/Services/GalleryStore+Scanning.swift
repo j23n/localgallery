@@ -170,8 +170,11 @@ extension GalleryStore {
         lastSyncedAt = clock.now()
         // A full pass that never completed has not refreshed anything, so it
         // must not restart the 48-hour clock — doing that would let one
-        // cancelled scan suppress the backstop for two days.
-        if resolved == .full && !result.didNotComplete {
+        // cancelled scan suppress the backstop for two days. A missing or
+        // unlistable root is the same: we did not actually walk the tree.
+        let rootListed = result.rootFolder != nil
+            && !result.failedDirectoryPaths.contains(url.standardizedFileURL.path)
+        if resolved == .full && !result.didNotComplete && rootListed {
             lastFullScanAt = lastSyncedAt
             defaults.set(lastFullScanAt, forKey: "lastFullScanAt")
         }
@@ -182,9 +185,12 @@ extension GalleryStore {
         //
         // A pass that produced no outcome is skipped too: its empty manifest
         // would tell `sidecarSync` every `.xmp` in the library had vanished.
-        // The progress banner is still cleared, because the scan is over
-        // either way.
-        if !result.didNotComplete {
+        // The same is true of a missing or unlistable *root* — the walk did
+        // not actually list the tree, so treating its empty manifest as a
+        // sync plan would GC every cached sidecar (and, for unlistable, do
+        // that while the photos are still on screen). The progress banner
+        // is still cleared, because the scan is over either way.
+        if !result.didNotComplete && rootListed {
             // Hand the manifest to the sidecar sync service; it diffs against
             // the cache and either fetches silently or surfaces a prompt.
             let allIDs = Set(allPhotos.map(\.id))
@@ -203,7 +209,20 @@ extension GalleryStore {
         self.scanProgress = nil
 
         // Refresh the widget snapshot after the scan/enrichment pass settles.
-        exportWidgetSnapshot()
+        // Unlistable root keeps photos in memory but hides them in-app —
+        // exporting those ghosts would keep the widget showing a library the
+        // app just called unavailable. A *missing* root has already emptied
+        // `allPhotos`, and that empty snapshot should reach the widget.
+        if !(libraryAvailability == .unavailable && !allPhotos.isEmpty) {
+            exportWidgetSnapshot()
+        }
+
+        // A completed pass is the source of truth for which directories
+        // exist. Missing/unavailable still watches the scan URL so a remount
+        // can fire; a cancelled/thrown pass leaves the previous watches alone.
+        if !result.didNotComplete {
+            libraryMonitor.sync(root: url, tree: rootFolder)
+        }
     }
 
     /// One scan pass: walk `url`, enrich new/changed files, and publish the
@@ -218,8 +237,13 @@ extension GalleryStore {
     /// on its own: cancellation is only observable at a suspension point inside
     /// this function, and racing `performScan`'s two-phase sequencing from
     /// outside would test the scheduler, not the behaviour.
+    ///
+    /// `silent` no longer gates publishing: a completed empty walk is a real
+    /// empty library (`didNotComplete` and `failedDirectoryPaths` already
+    /// protect transient failures). The flag still exists because callers
+    /// pass it and `performScan` uses it for spinner state around this pass.
     @discardableResult
-    func runScanPass(at url: URL, light: Bool, silent: Bool) async -> CoreScanner.Result {
+    func runScanPass(at url: URL, light: Bool, silent _: Bool) async -> CoreScanner.Result {
         let startedAt = clock.now()
         self.scanProgress = ScanProgress(phase: .scanning, processed: 0, total: nil, startedAt: startedAt)
 
@@ -280,7 +304,8 @@ extension GalleryStore {
         // `saveCache()`, the manifest would never reach disk, and every launch
         // would go on re-probing every sidecar — `_plans/06` Finding 2 fixed
         // in memory only.
-        let manifestChanged = self.lastSidecarManifest != result.sidecarManifest
+        let previousManifest = self.lastSidecarManifest
+        let manifestChanged = previousManifest != result.sidecarManifest
         self.lastSidecarManifest = result.sidecarManifest
         let remoteCount = result.flatPhotos.filter {
             if case .remote = $0.locality { return true } else { return false }
@@ -342,18 +367,44 @@ extension GalleryStore {
         let newURLs = Set(finalPhotos.map(\.url))
         let contentChanged = existingURLs != newURLs || result.needsEnrichment
 
+        // Same form the carry-forward prefix check uses: the core emits
+        // `failedDirectoryPaths` through `decomposed()`, which is NFD, matching
+        // `standardizedFileURL.path`.
+        let scanRootPath = url.standardizedFileURL.path
+        let rootUnlistable = result.failedDirectoryPaths.contains(scanRootPath)
+
         let scanKindLabel = light ? "light" : "full"
-        if contentChanged && (!finalPhotos.isEmpty || !silent) {
+        if result.rootFolder == nil {
+            // NotFound on the root: the folder is gone. Publishing empty is
+            // the truth; persisting it is not — `saveCache()` already no-ops
+            // when `rootFolder` is nil, and `persistCache: false` makes that
+            // explicit so a remount can still revive the on-disk snapshot.
+            // Roll the sidecar manifest back too: the empty list is "could
+            // not look", not "this library has no sidecars", and a remount
+            // in this session should still skip the provider probe.
+            Log.scan.info("\(scanKindLabel) scan complete: library root is gone")
+            self.lastSidecarManifest = previousManifest
+            apply(.scanResult(photos: [], root: nil, persistCache: false))
+            libraryAvailability = .unavailable
+        } else if rootUnlistable {
+            // PermissionDenied / I/O on the root itself. Carry-forward above
+            // already kept the cached photos; applying the empty walk would
+            // wipe them. The empty sidecar manifest is a listing failure too,
+            // not "this library has no sidecars", so roll it back.
+            Log.scan.warning("\(scanKindLabel) scan complete: library root is unreadable; keeping \(self.allPhotos.count) cached photos")
+            self.lastSidecarManifest = previousManifest
+            libraryAvailability = .unavailable
+        } else if contentChanged || finalPhotos.isEmpty {
+            // A completed empty walk is a real empty library — `didNotComplete`
+            // and `failedDirectoryPaths` already protect transient failures,
+            // so a silent pass that found nothing must still publish. Persist
+            // the empty snapshot so the next launch does not resurrect ghosts.
             Log.scan.info("\(scanKindLabel) scan complete: \(finalPhotos.count) photos (+\(result.addedURLs.count) -\(result.removedURLs.count) ~\(result.modifiedURLs.count), needsEnrichment=\(result.needsEnrichment))")
             apply(.scanResult(photos: finalPhotos, root: finalRoot, persistCache: true))
-        } else if finalPhotos.isEmpty && !silent {
-            // Explicit user-driven scan that found nothing — surface the empty
-            // state but don't overwrite the on-disk cache; a transient folder
-            // access failure shouldn't blow away a good cache.
-            Log.scan.info("\(scanKindLabel) scan complete: 0 photos")
-            apply(.scanResult(photos: [], root: finalRoot, persistCache: false))
+            libraryAvailability = finalPhotos.isEmpty ? .empty : .ready
         } else {
             Log.scan.info("\(scanKindLabel) scan complete, no changes (\(finalPhotos.count) photos)")
+            libraryAvailability = .ready
             if manifestChanged {
                 // No `apply` on this path — nothing about the photos moved —
                 // so the cache write has to be asked for directly.

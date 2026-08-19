@@ -2,22 +2,26 @@ import Foundation
 import XCTest
 @testable import LocalGallery
 
-/// What the Store does with a scan pass that produced no answer.
+/// What the Store does with a scan pass that produced no answer — or an
+/// answer that looks empty.
 ///
-/// The scanner has exactly two ways to come back empty and they mean opposite
-/// things:
+/// A cancelled pass, a missing root, an unlistable root, and a completed
+/// walk of an empty folder all have similar shapes and opposite meanings:
 ///
-/// * **"I walked the library and it is empty."** Publish it — the user really
-///   did delete everything.
-/// * **"I never finished."** Cancelled, or the core threw. Publishing that
+/// * **"I never finished."** Cancelled, or the core threw. Leave photos,
+///   tree, manifest and `libraryAvailability` alone. Publishing that
 ///   assigns `[]` to `allPhotos`, `nil` to `rootFolder` and `[]` to
-///   `lastSidecarManifest`, then `saveCache()` writes all three to disk. One
-///   cancelled scan and the library is gone until a full pass rebuilds it from
-///   the filesystem — without the tags, GPS, faces and enrichment that only
-///   existed in the cache.
+///   `lastSidecarManifest`, then `saveCache()` writes all three to disk.
+/// * **"The root is gone."** `rootFolder == nil`. Publish empty, do not
+///   persist — a remount should still find the on-disk snapshot.
+/// * **"The root could not be listed."** `failedDirectoryPaths` contains
+///   the root. Keep cached photos and set `.unavailable`.
+/// * **"I walked the library and it is empty."** Publish it, even silently,
+///   persist the empty snapshot, and set `.empty`.
 ///
-/// The two have identical shapes, which is why `CoreScanner.Result` carries a
-/// flag instead of leaving the Store to guess.
+/// The shapes overlap, which is why `CoreScanner.Result` carries
+/// `didNotComplete` / `failedDirectoryPaths` / a nullable `rootFolder`
+/// instead of leaving the Store to guess.
 @MainActor
 final class ScanBailoutTests: XCTestCase {
 
@@ -56,6 +60,28 @@ final class ScanBailoutTests: XCTestCase {
         )
     }
 
+    private var libraryCacheURL: URL { temp.appending("library_cache.json") }
+
+    /// Poll `condition` until it holds, or give up at `timeout`.
+    ///
+    /// `JSONDiskCache.save` is fire-and-forget on a detached task, so waiting
+    /// for the file itself is the condition — a fixed sleep is wrong on both
+    /// a loaded CI machine and an idle one.
+    private func waitUntil(
+        _ what: String,
+        timeout: Duration = .seconds(10),
+        _ condition: @MainActor () -> Bool,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            if condition() { return }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertTrue(condition(), "timed out waiting for \(what)", file: file, line: line)
+    }
+
     /// A library on disk, plus a warm cache holding a photo that is *not* in
     /// it. The phantom is what makes the assertion sharp: if the pass ran to
     /// completion the cache would be replaced by the real file, so a surviving
@@ -84,7 +110,7 @@ final class ScanBailoutTests: XCTestCase {
     }
 
     /// The regression. A cancelled pass leaves every piece of published state
-    /// exactly as it found it — photos, tree and manifest.
+    /// exactly as it found it — photos, tree, manifest and availability.
     func testACancelledPassLeavesTheCachedLibraryAlone() async throws {
         let root = try makeLibrary()
         let store = makeStore()
@@ -93,6 +119,7 @@ final class ScanBailoutTests: XCTestCase {
         let before = store.allPhotos
         let manifestBefore = store.lastSidecarManifest
         let rootBefore = store.rootFolder
+        let availabilityBefore = store.libraryAvailability
 
         let pass = Task { @MainActor () -> CoreScanner.Result in
             // Wait for the cancel before starting, so the test pins the
@@ -111,6 +138,8 @@ final class ScanBailoutTests: XCTestCase {
         XCTAssertEqual(store.rootFolder, rootBefore, "the folder tree was replaced by nothing")
         XCTAssertEqual(store.lastSidecarManifest, manifestBefore,
                        "an empty manifest tells the sidecar sync every .xmp vanished")
+        XCTAssertEqual(store.libraryAvailability, availabilityBefore,
+                       "availability must not move when the pass produced no outcome")
     }
 
     /// …and a pass that *does* complete still publishes, so the guard is a
@@ -126,6 +155,7 @@ final class ScanBailoutTests: XCTestCase {
         XCTAssertEqual(store.allPhotos.map(\.url.lastPathComponent), ["real.jpg"],
                        "the phantom should be gone: it is genuinely not on disk")
         XCTAssertEqual(result.removedURLs.map(\.lastPathComponent), ["only-in-the-cache.jpg"])
+        XCTAssertEqual(store.libraryAvailability, .ready)
     }
 
     /// An unreadable *directory* is the opposite case: it is data, it comes
@@ -161,5 +191,62 @@ final class ScanBailoutTests: XCTestCase {
                       "the cached photo under the unreadable directory was dropped")
         XCTAssertTrue(store.allPhotos.contains { $0.url.lastPathComponent == "real.jpg" },
                       "…and the rest of the library was still scanned")
+        XCTAssertEqual(store.libraryAvailability, .ready,
+                       "the rest of the library scanned, so this is not an unavailable root")
+    }
+
+    /// A missing library folder is deletion, not a transient listing failure.
+    /// The phantom must leave memory; the on-disk snapshot must stay so a
+    /// remount can revive it.
+    func testAMissingRootClearsMemoryButLeavesTheOnDiskCache() async throws {
+        let root = try makeLibrary()
+        let store = makeStore()
+        warmCache(store, under: root)
+        store.apply(.scanResult(
+            photos: store.allPhotos,
+            root: store.rootFolder,
+            persistCache: true
+        ))
+        await waitUntil("the library cache to reach disk") {
+            FileManager.default.fileExists(atPath: self.libraryCacheURL.path)
+        }
+
+        try FileManager.default.removeItem(at: root)
+
+        let result = await store.runScanPass(at: root, light: false, silent: true)
+
+        XCTAssertFalse(result.didNotComplete)
+        XCTAssertNil(result.rootFolder, "NotFound on the root is an empty folders list")
+        XCTAssertTrue(store.allPhotos.isEmpty, "the phantom must not survive a gone root")
+        XCTAssertNil(store.rootFolder)
+        XCTAssertEqual(store.libraryAvailability, .unavailable)
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: libraryCacheURL.path),
+            "persistCache: false must leave the on-disk snapshot in place"
+        )
+        let loaded = JSONDiskCache<LibrarySnapshot>(
+            url: libraryCacheURL,
+            version: LibrarySnapshot.version,
+            label: "probe"
+        ).load()
+        XCTAssertEqual(loaded?.allPhotos.map(\.url.lastPathComponent), ["only-in-the-cache.jpg"],
+                       "the on-disk cache must still hold the pre-deletion snapshot")
+    }
+
+    /// A completed walk of a listable empty folder is a real empty library.
+    /// Silent used to skip publishing it, which left phantom cache entries
+    /// in memory until the next non-silent scan.
+    func testASilentPassOverAnEmptyFolderPublishesTheEmptyLibrary() async throws {
+        let root = temp.appending("Library", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let store = makeStore()
+        warmCache(store, under: root)
+
+        let result = await store.runScanPass(at: root, light: false, silent: true)
+
+        XCTAssertFalse(result.didNotComplete)
+        XCTAssertNotNil(store.rootFolder, "a listable empty folder still has a tree")
+        XCTAssertTrue(store.allPhotos.isEmpty, "the phantom is gone: the folder listed and was empty")
+        XCTAssertEqual(store.libraryAvailability, .empty)
     }
 }

@@ -41,6 +41,18 @@ struct ScanProgress: Sendable, Equatable {
     }
 }
 
+/// Whether the selected library folder currently has photos the Store can show.
+enum LibraryAvailability: Equatable, Sendable {
+    /// No folder bookmark.
+    case noneSelected
+    /// Bookmark exists but the root could not be listed (gone, or permission/provider).
+    case unavailable
+    /// Root listed successfully and contains no photos.
+    case empty
+    /// Photos are in memory.
+    case ready
+}
+
 @Observable
 @MainActor
 final class GalleryStore {
@@ -54,6 +66,9 @@ final class GalleryStore {
 
     var rootFolder: PhotoFolder?
     var allPhotos: [PhotoFile] = []
+    /// Seeded from the on-disk cache in `loadCache()`; scan passes update it
+    /// after a completed walk. Cancelled / thrown passes leave it alone.
+    var libraryAvailability: LibraryAvailability = .noneSelected
     var isScanning: Bool = false
     /// Live progress of an in-flight scan. `nil` when idle. Set from the
     /// `FolderScanner` and `EnrichmentService` callbacks; observed by the
@@ -156,6 +171,11 @@ final class GalleryStore {
     /// the two runs are independently resumable. Named results reach the app
     /// through the same sidecar pipeline, so `people` needs no new read path.
     let faces: FaceService
+    /// Watches the library folder while the app is foregrounded. Directory
+    /// vnode events and NSFilePresenter callbacks coalesce into a light
+    /// silent rescan — Syncthing / Files deletions otherwise never update
+    /// Collections until the next foreground/pull.
+    @ObservationIgnored let libraryMonitor: LibraryRootMonitor
 
     // MARK: Injected seams (test-overridable; production uses `.production` /
     // `.standard` defaults so existing call sites are unchanged).
@@ -170,6 +190,7 @@ final class GalleryStore {
     /// `nonisolated(unsafe)` lets the implicit-nonisolated deinit access them;
     /// `Any?` isn't `Sendable`, hence the `(unsafe)`.
     @ObservationIgnored private nonisolated(unsafe) var foregroundObserver: Any?
+    @ObservationIgnored private nonisolated(unsafe) var backgroundObserver: Any?
     @ObservationIgnored private nonisolated(unsafe) var significantTimeChangeObserver: Any?
     @ObservationIgnored private nonisolated(unsafe) var contactStoreObserver: Any?
 
@@ -184,6 +205,7 @@ final class GalleryStore {
         self.contactsService = contactsService
         self.bookmarks = BookmarkManager(defaults: defaults, bookmarkKey: paths.bookmarkKey)
         self.thumbnailService = ThumbnailService(thumbnailDir: paths.thumbnailDir)
+        self.libraryMonitor = LibraryRootMonitor()
         self.libraryCache = JSONDiskCache(
             url: paths.libraryCacheURL,
             version: LibrarySnapshot.version,
@@ -241,6 +263,17 @@ final class GalleryStore {
         // property, so assigning both would silently be one assignment.
         sidecarRefresh.onRefresh = { [weak self] in
             await self?.rescan(kind: .light, silent: true)
+        }
+        // File deletions cannot wait out the 30 s tagging window — Collections
+        // would stay stale while the user is looking at it. The watcher has
+        // its own 1.5 s coalescer for that reason; `scanFolder` already
+        // dedupes if a tagging refresh is in flight.
+        let monitor = self.libraryMonitor
+        monitor.coalescer.onRefresh = { [weak self] in
+            await self?.rescan(kind: .light, silent: true)
+        }
+        thumbnailService.onSourceMissing = { [weak monitor] _ in
+            monitor?.noteSourceMissing()
         }
         // Faces read the pack `TaggingService` already found and verified,
         // rather than discovering (and re-hashing) the same directory twice.
@@ -349,6 +382,19 @@ final class GalleryStore {
             }
         }
 
+        // Drop vnode fds and the file presenter while backgrounded — they
+        // are a kernel resource, and the foreground scan above re-syncs
+        // watches after it completes.
+        backgroundObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.libraryMonitor.stop()
+            }
+        }
+
         // Catches the day-rollover case where the app stays foregrounded past
         // midnight. iOS posts `significantTimeChangeNotification` for both
         // midnight and timezone shifts; either case wants a memory rebuild.
@@ -401,6 +447,9 @@ final class GalleryStore {
         if let observer = foregroundObserver {
             NotificationCenter.default.removeObserver(observer)
         }
+        if let observer = backgroundObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
         if let observer = significantTimeChangeObserver {
             NotificationCenter.default.removeObserver(observer)
         }
@@ -408,6 +457,7 @@ final class GalleryStore {
             NotificationCenter.default.removeObserver(observer)
         }
         // BookmarkManager's deinit releases the security scope.
+        // LibraryRootMonitor's deinit balances the file presenter and vnode fds.
     }
 
     // MARK: - Bookmark / Security-Scoped Access (forwarded to BookmarkManager)
@@ -567,6 +617,9 @@ final class GalleryStore {
         )
         // No persist — we just read this off disk, no need to write it back.
         apply(.scanResult(photos: cached.allPhotos, root: cached.rootFolder, persistCache: false))
+        // A persisted snapshot always has a root (`saveCache` no-ops without
+        // one), so empty photos here is a real empty library, not "gone".
+        libraryAvailability = cached.allPhotos.isEmpty ? .empty : .ready
         return true
     }
 
@@ -579,8 +632,9 @@ final class GalleryStore {
     ///
     /// Per-case behaviour:
     ///   - `.scanResult` rebuilds indexes; persists the library cache when
-    ///     `persistCache` is true. (The empty/non-silent branch sets false
-    ///     so a transient access failure doesn't wipe a good cache.)
+    ///     `persistCache` is true. A missing root sets false so the on-disk
+    ///     snapshot is not replaced by an empty library (`saveCache()` also
+    ///     no-ops when `rootFolder` is nil). A completed empty walk persists.
     ///   - `.sidecarsMerged` rebuilds indexes and persists.
     ///   - `.photoLocalityChanged`, `.allDownloadsCleared`, and
     ///     `.sidecarCacheCleared` only update in-memory locality / sidecar

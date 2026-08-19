@@ -92,11 +92,8 @@ final class AppRouter {
     }
 
     private static func findFolder(in folder: PhotoFolder, id: String) -> PhotoFolder? {
-        if folder.id.uuidString == id { return folder }
-        for sub in folder.subfolders {
-            if let found = findFolder(in: sub, id: id) { return found }
-        }
-        return nil
+        guard let uuid = UUID(uuidString: id) else { return nil }
+        return folder.folder(withID: uuid)
     }
 }
 

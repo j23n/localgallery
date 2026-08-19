@@ -9,25 +9,28 @@ struct FolderBrowserView: View {
     @State private var showSettings = false
 
     private var displayFolder: PhotoFolder? {
-        folder ?? store.rootFolder
+        if let folder {
+            // Pushed screens hold a snapshot from navigation time; re-resolve
+            // against the live tree so a rescan that dropped files updates
+            // counts and photos instead of leaving a stale child on screen.
+            return store.rootFolder?.folder(withID: folder.id)
+        }
+        return store.rootFolder
     }
 
     var body: some View {
         @Bindable var store = store
         Group {
-            if store.isScanning {
-                ProgressView("Scanning folder…")
-            } else if let folder = displayFolder {
-                folderContent(folder)
+            if folder != nil {
+                childBody
             } else {
-                emptyState
+                rootBody
             }
         }
-        // Stable placeholder while the bookmark resolves on cold launch —
-        // without it the large title flashes from "" to the folder name on
-        // first render. Pushed children always have a folder by construction
-        // so the fallback only applies at the root.
-        .navigationTitle(displayFolder?.name ?? (isRoot ? "Folders" : ""))
+        // Live name first; the NavigationLink snapshot covers a child whose
+        // node was deleted mid-drill-in; "Folders" only at the root before
+        // the bookmark resolves, so the large title does not flash "".
+        .navigationTitle(displayFolder?.name ?? folder?.name ?? (isRoot ? "Folders" : ""))
         .navigationBarTitleDisplayMode(isRoot ? .large : .inline)
         .toolbar {
             // Always include the banner — it returns EmptyView when no
@@ -59,9 +62,56 @@ struct FolderBrowserView: View {
         .sheet(isPresented: $showSettings) { SettingsView() }
     }
 
+    /// Root tab only. Unavailable takes the whole screen — the cached tree
+    /// may still be in memory after an unlistable root, and showing it would
+    /// look like the library was still there. The cold-launch spinner is
+    /// `isScanning && displayFolder == nil` so a Reload Library pass does
+    /// not hide a tree we already have.
+    @ViewBuilder
+    private var rootBody: some View {
+        if store.libraryAvailability == .unavailable {
+            unavailableState
+        } else if store.isScanning && displayFolder == nil {
+            ProgressView("Scanning folder…")
+        } else if let folder = displayFolder {
+            folderContent(folder)
+        } else if store.libraryAvailability == .empty {
+            emptyLibraryState
+        } else {
+            emptyState
+        }
+    }
+
+    @ViewBuilder
+    private var childBody: some View {
+        // Unlistable root keeps `rootFolder` in memory so lookup would still
+        // hit and show a ghost tree. The root tab already hid that; a pushed
+        // child has to as well.
+        if store.libraryAvailability == .unavailable {
+            unavailableState
+        } else if let folder = displayFolder {
+            folderContent(folder)
+        } else {
+            ContentUnavailableView(
+                "This folder is no longer available",
+                systemImage: "folder"
+            )
+        }
+    }
+
     private var emptyState: some View {
         LibraryEmptyState(icon: "folder", title: "No Folder Selected",
                           message: "Set a folder in Settings to get started.")
+    }
+
+    private var emptyLibraryState: some View {
+        LibraryEmptyState.selectedFolderEmpty(icon: "folder", title: "No Photos")
+    }
+
+    private var unavailableState: some View {
+        LibraryEmptyState.unavailable(icon: "folder") {
+            Task { await store.rescan(kind: .light, silent: false) }
+        }
     }
 
     @ViewBuilder
@@ -73,7 +123,7 @@ struct FolderBrowserView: View {
                     NavigationLink {
                         FolderGridView(
                             title: folder.name,
-                            photos: folder.photos
+                            folderID: folder.id
                         )
                     } label: {
                         Label("\(folder.photos.count) photos in this folder", systemImage: "photo.on.rectangle")
@@ -88,7 +138,7 @@ struct FolderBrowserView: View {
                             if subfolder.subfolders.isEmpty && !subfolder.photos.isEmpty {
                                 FolderGridView(
                                     title: subfolder.name,
-                                    photos: subfolder.photos
+                                    folderID: subfolder.id
                                 )
                             } else {
                                 FolderBrowserView(folder: subfolder, isRoot: false)

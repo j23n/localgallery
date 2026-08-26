@@ -816,12 +816,22 @@ final class GalleryStore {
             if let root = rootFolder {
                 rootFolder = root.removingPhotos(ids)
             }
+            libraryEpoch += 1
             rebuildSortAndIndex()
             if allPhotos.isEmpty {
                 libraryAvailability = rootFolder == nil ? .noneSelected : .empty
             } else {
                 libraryAvailability = .ready
             }
+        case let .photosRelocated(from, to, destID):
+            allPhotos.removeAll { from.contains($0.id) }
+            allPhotos.append(contentsOf: to)
+            if let root = rootFolder {
+                rootFolder = root.removingPhotos(from).addingPhotos(to, toFolderID: destID)
+            }
+            libraryEpoch += 1
+            rebuildSortAndIndex()
+            libraryAvailability = allPhotos.isEmpty ? .empty : .ready
         case let .photoLocalityChanged(id, locality):
             guard let idx = allPhotos.firstIndex(where: { $0.id == id }) else { return }
             // Placeholder → downloaded: the first enrichment ran against a

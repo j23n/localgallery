@@ -11,8 +11,9 @@ import os
 /// off-actor open/release, root-scoped runs, the shared
 /// `SidecarRefreshCoalescer` — and different in exactly one: the core's face
 /// surface has calls that write to disk *without* being a run. Naming a
-/// cluster, un-naming it, ignoring it, merging two, splitting one and renaming
-/// a person all rewrite sidecars, and all of them are refused by the core while
+/// cluster, un-naming it, ignoring it, rejecting it, merging two, splitting one
+/// and renaming a person all rewrite sidecars, and all of them are refused by
+/// the core while
 /// a run is in flight. So `isRunning` gates the review UI's buttons, not just
 /// its progress row.
 ///
@@ -26,9 +27,9 @@ import os
 /// new person through the ordinary People machinery, with a face-region cover
 /// crop, with no reader changes anywhere.
 ///
-/// A run triggers that refresh from `onSidecarsWritten` (the auto-tag pass);
-/// a naming action triggers it directly, because its whole point is that the
-/// person appears now.
+    /// A run triggers that refresh from `onSidecarsWritten` (per-photo stamps
+    /// and the auto-tag pass), coalesced to 30 s; a naming action triggers
+    /// it directly, because its whole point is that the person appears now.
 @Observable
 @MainActor
 final class FaceService {
@@ -36,24 +37,23 @@ final class FaceService {
     /// Matches tagging's — the two are the same kind of interruption.
     static let refreshInterval: TimeInterval = 30
 
-    /// How many faces an unlabeled cluster needs before it is worth asking the
-    /// user about.
+    /// How many faces an unlabeled cluster needs before review shows it.
     ///
-    /// Three. One- and two-face clusters are overwhelmingly the tail of any
-    /// clustering pass — a passer-by, a photo on a wall, a bad crop — and
-    /// putting them in the review queue turns a 20-card screen into a
-    /// 400-card one nobody finishes. Three faces is the smallest group that
-    /// says "this person recurs". Nothing is lost by waiting: a cluster grows
-    /// as more photos are scanned and appears the moment it crosses the bar,
-    /// and a cluster that never does is still reachable through
-    /// `allClusters`.
-    static let reviewMinimumFaces = 3
+    /// One. A Publish pass that becomes source of truth has to see every
+    /// leftover face — a singleton is still a yes/no. The tail is noisy
+    /// (a passer-by, a poster) and that is what Ignore is for.
+    static let reviewMinimumFaces = 1
 
     /// Live progress of a run. `nil` when idle.
     struct Progress: Equatable, Sendable {
         var done: Int
         var total: Int
+        var startedAt: Date
         var fraction: Double { total > 0 ? Double(done) / Double(total) : 0 }
+        /// "X / Y" or "X / Y · ~M:SS" once throughput is known.
+        var countText: String {
+            ProgressETA.countText(processed: done, total: total, startedAt: startedAt)
+        }
     }
 
     /// What a finished run did. An app-facing restatement of the FFI's
@@ -94,7 +94,7 @@ final class FaceService {
     ///
     /// Ids only, joined against `allClusters` where it is rendered — the core
     /// deliberately does not re-send the exemplars the app already holds.
-    struct Proposal: Equatable, Sendable, Identifiable {
+    struct Proposal: Equatable, Hashable, Sendable, Identifiable {
         var a: Int64
         var b: Int64
         var similarity: Double
@@ -119,7 +119,8 @@ final class FaceService {
     private(set) var lastSummary: Summary?
     private(set) var lastError: FaceServiceError?
     /// Every cluster the core knows about, refreshed by `refreshClusters()`
-    /// after each run and after each naming action.
+    /// after each run (including a no-op one), after each naming action, and
+    /// at launch so Collections does not depend on Settings having run.
     private(set) var allClusters: [Cluster] = []
     /// Outstanding merge suggestions, strongest first. Read alongside
     /// `allClusters` because the review screen renders them together and a
@@ -138,10 +139,10 @@ final class FaceService {
         (a.size, b.id) > (b.size, a.id)
     }
 
-    /// Unlabeled clusters big enough to be worth reviewing, biggest first.
+    /// Unlabeled clusters waiting for a name or Ignore, biggest first.
     ///
-    /// The entry point on the People screen appears exactly when this is
-    /// non-empty.
+    /// The People section on Collections (and the People list) appears when
+    /// this is non-empty, even if nobody has been named yet.
     var reviewableClusters: [Cluster] {
         allClusters
             .filter { $0.state == .unlabeled && $0.size >= Self.reviewMinimumFaces }
@@ -183,8 +184,11 @@ final class FaceService {
     /// the whole review entry point failed to appear. Every faces surface funnels
     /// through `refreshClusters()`/`startScan()`, so those ask here first.
     @ObservationIgnored var ensurePackChecked: (@MainActor () async -> Void)?
-    /// Whether the *other* core engine (tagging) has a run in flight. See
-    /// `isCoreBusy`.
+    /// Whether tagging or the unified analysis run is in flight. Naming has to
+    /// wait: the engines share one cache file and one sidecar per photo. See
+    /// `isCoreBusy`. Analysis is included so a Places write cannot collide with
+    /// a name. `startScan` itself does not consult this — analysis calls it
+    /// while the flag is already true.
     @ObservationIgnored var otherEngineIsRunning: (@MainActor () -> Bool)?
     /// Supplies the photos a run should consider. Set by `GalleryStore`.
     @ObservationIgnored var eligiblePhotos: (@MainActor () -> [PhotoFile])?
@@ -203,6 +207,9 @@ final class FaceService {
         get { refresh.onRefresh }
         set { refresh.onRefresh = newValue }
     }
+    /// Paths this run just finished (detections, empty scans, cache hits).
+    /// `LibraryAnalysis` records them into the live Scan Activity journal.
+    @ObservationIgnored var onPhotosRecorded: (@MainActor ([String]) -> Void)?
 
     @ObservationIgnored private var session: FaceSession?
     /// Which pack `session` was opened against, so a pack change reopens it.
@@ -256,6 +263,11 @@ final class FaceService {
         let photos = (eligiblePhotos?() ?? []).filter(Self.isEligible)
         guard !photos.isEmpty else {
             lastSummary = Summary()
+            // Clusters already in the cache still need to reach the UI.
+            // Settings "Scan Photos" with nothing new used to return here
+            // and leave Review New People empty until a later run that
+            // actually started.
+            await refreshClusters()
             return
         }
         let paths = photos.map(\.url.standardizedFileURL.path)
@@ -263,7 +275,7 @@ final class FaceService {
 
         isRunning = true
         cancelRequested = false
-        progress = Progress(done: 0, total: paths.count)
+        progress = Progress(done: 0, total: 0, startedAt: Date())
         lastError = nil
 
         let session: FaceSession
@@ -281,10 +293,11 @@ final class FaceService {
             let inserted = try await Self.enqueue(paths, into: session)
             Log.ml.info("Enqueued \(paths.count) photos for faces (\(inserted) new)")
         } catch {
-            isRunning = false
             progress = nil
             lastError = FaceServiceError(error)
             Log.ml.error("Face enqueue failed: \(Log.r.error(error))")
+            await releaseSession()
+            isRunning = false
             return
         }
 
@@ -295,22 +308,28 @@ final class FaceService {
         // by not starting.
         if cancelRequested {
             cancelRequested = false
-            isRunning = false
             progress = nil
             lastSummary = Summary(cancelled: true)
             Log.ml.info("Face scan cancelled before the run started")
+            await releaseSession()
+            isRunning = false
             return
         }
 
         let bridge = FaceProgressBridge(
             progress: { [weak self] done, total in
                 Task { @MainActor [weak self] in
-                    self?.progress = Progress(done: done, total: total)
+                    self?.publishProgress(done: done, total: total)
                 }
             },
-            sidecarsWritten: { [weak self] count in
+            photosScanned: { [weak self] paths in
                 Task { @MainActor [weak self] in
-                    self?.noteSidecarsWritten(count)
+                    self?.notePhotosScanned(paths)
+                }
+            },
+            sidecarsWritten: { [weak self] paths in
+                Task { @MainActor [weak self] in
+                    self?.noteSidecarsWritten(paths)
                 }
             },
             finished: { [weak self] summary in
@@ -323,10 +342,80 @@ final class FaceService {
         do {
             try session.start(progress: bridge, rootPrefix: rootPrefix)
         } catch {
-            isRunning = false
             progress = nil
             lastError = FaceServiceError(error)
             Log.ml.error("Face run failed to start: \(Log.r.error(error))")
+            await releaseSession()
+            isRunning = false
+        }
+    }
+
+    /// Force-scan one photo without touching the rest of the queue.
+    func startOne(_ photo: PhotoFile) async {
+        guard !isRunning else { return }
+        guard Self.isEligible(photo) else { return }
+        await ensurePackChecked?()
+        guard let pack = installedPack?(), pack.hasFaces else {
+            lastError = .noFaceModels
+            return
+        }
+        let path = photo.url.standardizedFileURL.path
+        let rootPrefix = libraryRoot?()?.standardizedFileURL.path
+
+        isRunning = true
+        cancelRequested = false
+        progress = Progress(done: 0, total: 1, startedAt: Date())
+        lastError = nil
+
+        let session: FaceSession
+        do {
+            session = try await openSession(packDirectory: pack.directory)
+        } catch {
+            isRunning = false
+            progress = nil
+            lastError = FaceServiceError(error)
+            Log.ml.error("Face session failed to open: \(Log.r.error(error))")
+            return
+        }
+        if cancelRequested {
+            cancelRequested = false
+            progress = nil
+            lastSummary = Summary(cancelled: true)
+            await releaseSession()
+            isRunning = false
+            return
+        }
+
+        let bridge = FaceProgressBridge(
+            progress: { [weak self] done, total in
+                Task { @MainActor [weak self] in
+                    self?.publishProgress(done: done, total: total)
+                }
+            },
+            photosScanned: { [weak self] paths in
+                Task { @MainActor [weak self] in
+                    self?.notePhotosScanned(paths)
+                }
+            },
+            sidecarsWritten: { [weak self] paths in
+                Task { @MainActor [weak self] in
+                    self?.noteSidecarsWritten(paths)
+                }
+            },
+            finished: { [weak self] summary in
+                Task { @MainActor [weak self] in
+                    await self?.finish(summary)
+                }
+            }
+        )
+        do {
+            try session.startOne(progress: bridge, path: path, rootPrefix: rootPrefix)
+        } catch {
+            progress = nil
+            lastError = FaceServiceError(error)
+            Log.ml.error("Face one-photo run failed to start: \(Log.r.error(error))")
+            await releaseSession()
+            isRunning = false
         }
     }
 
@@ -337,15 +426,58 @@ final class FaceService {
         session?.cancel()
     }
 
-    /// One `onSidecarsWritten` batch from the core's auto-tag pass. Internal so
-    /// tests can drive the coalescing without staging a whole run.
+    /// Drop every face-queue row so the next run re-detects the library.
+    ///
+    /// Detections and clusters stay; `reset_queue` sets `force_next` so the
+    /// `face_scans` skip is ignored. Same recovery shape as tagging.
+    func resetQueue() async {
+        guard !isRunning else { return }
+        await ensurePackChecked?()
+        guard let pack = installedPack?(), pack.hasFaces else {
+            lastError = .noFaceModels
+            return
+        }
+        do {
+            let session = try await openSession(packDirectory: pack.directory)
+            try session.resetQueue()
+            lastSummary = nil
+            lastError = nil
+            Log.ml.info("Face queue reset")
+            await releaseSession()
+        } catch {
+            lastError = FaceServiceError(error)
+            Log.ml.error("Face queue reset failed: \(Log.r.error(error))")
+        }
+    }
+
+    /// One `onSidecarsWritten` batch. Internal so tests can drive the
+    /// coalescing without staging a whole run.
     func noteSidecarsWritten(_ count: Int) {
         Log.ml.debug("\(count) face sidecars written")
         refresh.note()
     }
 
+    /// Disk changed: 30 s rescan cooldown, and the journal picks up the
+    /// new sidecar bytes (replacing the earlier "we scanned this" row).
+    func noteSidecarsWritten(_ paths: [String]) {
+        noteSidecarsWritten(paths.count)
+        onPhotosRecorded?(paths)
+    }
+
+    /// A scan batch: journal only. A stamp or named write may follow and
+    /// replace the row; a no-op cache hit stays as "we looked at this file".
+    func notePhotosScanned(_ paths: [String]) {
+        onPhotosRecorded?(paths)
+    }
+
+    /// Keep `startedAt` across ticks so the ETA is elapsed-since-start, not
+    /// elapsed-since-last-callback.
+    private func publishProgress(done: Int, total: Int) {
+        let startedAt = progress?.startedAt ?? Date()
+        progress = Progress(done: done, total: total, startedAt: startedAt)
+    }
+
     private func finish(_ summary: Summary) async {
-        isRunning = false
         cancelRequested = false
         progress = nil
         lastSummary = summary
@@ -365,6 +497,11 @@ final class FaceService {
         refresh.schedule()
         await refreshClusters()
         await refresh.task?.value
+        // Drop the detector + embedder sessions before Places starts, and
+        // before LibraryAnalysis's extra `refreshClusters` reopens a short
+        // one. `isRunning` stays true until then so the next phase waits.
+        await releaseSession()
+        isRunning = false
     }
 
     // MARK: - Review
@@ -384,12 +521,60 @@ final class FaceService {
         }
         do {
             let session = try await openSession(packDirectory: pack.directory)
+            // REMOVE AFTER: named-keyword-resync. Delete this call and the helper.
+            await resyncNamedKeywordsOnce(session)
+            // REMOVE AFTER: face-decision-resync. Delete this call and the helper.
+            await resyncFaceDecisionsOnce(session)
             let review = try await Self.readReview(from: session)
             allClusters = review.clusters
             mergeProposals = review.proposals
         } catch {
             lastError = FaceServiceError(error)
             Log.ml.error("Reading face clusters failed: \(Log.r.error(error))")
+        }
+    }
+
+    /// REMOVE AFTER: named-keyword-resync. Delete with `named_keyword_resync.rs`.
+    ///
+    /// Quiet on purpose: a background repair must not steal `lastError` from
+    /// a naming the user just tried. A run in flight skips — the run itself
+    /// does the same pass.
+    private func resyncNamedKeywordsOnce(_ session: FaceSession) async {
+        guard !isCoreBusy else { return }
+        let root = libraryRoot?()?.standardizedFileURL.path
+        do {
+            let report = try await Task.detached(priority: .utility) {
+                try session.resyncNamedKeywordsOnce(rootPrefix: root)
+            }.value
+            if report.written == 0 && report.failed == 0 { return }
+            Log.ml.info(
+                "named-keyword-resync: \(report.written) written, \(report.unchanged) unchanged, \(report.skipped) skipped, \(report.failed) failed"
+            )
+            if report.written > 0 {
+                refresh.schedule()
+            }
+        } catch {
+            Log.ml.error("named-keyword-resync failed: \(Log.r.error(error))")
+        }
+    }
+
+    /// REMOVE AFTER: face-decision-resync. Delete with `face_decision_resync.rs`.
+    private func resyncFaceDecisionsOnce(_ session: FaceSession) async {
+        guard !isCoreBusy else { return }
+        let root = libraryRoot?()?.standardizedFileURL.path
+        do {
+            let report = try await Task.detached(priority: .utility) {
+                try session.resyncFaceDecisionsOnce(rootPrefix: root)
+            }.value
+            if report.written == 0 && report.failed == 0 { return }
+            Log.ml.info(
+                "face-decision-resync: \(report.written) written, \(report.unchanged) unchanged, \(report.skipped) skipped, \(report.failed) failed"
+            )
+            if report.written > 0 {
+                refresh.schedule()
+            }
+        } catch {
+            Log.ml.error("face-decision-resync failed: \(Log.r.error(error))")
         }
     }
 
@@ -425,11 +610,20 @@ final class FaceService {
         }
     }
 
-    /// Dismiss a cluster as "not a person".
+    /// Ignore a cluster (passer-by / poster). They are faces, just not
+    /// someone this library is naming.
     @discardableResult
     func ignore(cluster id: Int64) async -> Bool {
         await mutate("ignoring cluster \(id)") { session, root in
             try session.ignoreCluster(clusterId: id, rootPrefix: root)
+        }
+    }
+
+    /// Reject a cluster as "not a person" / "not a face".
+    @discardableResult
+    func reject(cluster id: Int64) async -> Bool {
+        await mutate("rejecting cluster \(id)") { session, root in
+            try session.rejectCluster(clusterId: id, rootPrefix: root)
         }
     }
 
@@ -455,8 +649,22 @@ final class FaceService {
     /// The core only carries it out.
     @discardableResult
     func merge(into: Int64, from: Int64) async -> Bool {
-        await mutate("merging cluster \(from) into \(into)") { session, root in
-            try session.mergeClusters(into: into, from: from, rootPrefix: root)
+        await merge(into: into, absorbing: [from])
+    }
+
+    /// Fold `absorbing` into `into` in one pass: one cache update, one
+    /// sidecar rewrite, one cluster refresh, one library rescan.
+    ///
+    /// Pairwise looping used to re-derive the growing union and wait for a
+    /// light rescan after every absorbed group — minutes for a 12-group
+    /// suggestion. An empty list is a no-op success so a confirmation that
+    /// somehow named nobody does not look like a failure.
+    @discardableResult
+    func merge(into survivor: Int64, absorbing: [Int64]) async -> Bool {
+        guard !absorbing.isEmpty else { return true }
+        let listed = absorbing.map(String.init).joined(separator: ", ")
+        return await mutate("merging cluster(s) \(listed) into \(survivor)") { session, root in
+            try session.mergeClustersMany(into: survivor, from: absorbing, rootPrefix: root)
         }
     }
 
@@ -473,6 +681,53 @@ final class FaceService {
                 Log.ml.info("Split of cluster \(id) skipped \(result.ignoredKeys) faces the core no longer has")
             }
             return result.report
+        }
+    }
+
+    /// Mark detections as not faces: they leave their group and are rejected,
+    /// so the next clustering pass does not offer them again.
+    ///
+    /// A whole-cluster rejection is `reject(cluster:)` (the core refuses to
+    /// split a group into nothing). Otherwise the faces are split out and
+    /// that new group is rejected in one go.
+    @discardableResult
+    func reject(cluster id: Int64, faces keys: [String]) async -> Bool {
+        await dismiss(cluster: id, faces: keys, as: .rejected)
+    }
+
+    /// Ignore selected faces (passer-by / poster): split them out and ignore
+    /// the new group so they are not offered again.
+    @discardableResult
+    func ignore(cluster id: Int64, faces keys: [String]) async -> Bool {
+        await dismiss(cluster: id, faces: keys, as: .ignored)
+    }
+
+    private enum Dismissal {
+        case ignored
+        case rejected
+    }
+
+    private func dismiss(cluster id: Int64, faces keys: [String], as kind: Dismissal) async -> Bool {
+        guard !keys.isEmpty else { return false }
+        let verb = kind == .rejected ? "rejecting" : "ignoring"
+        return await mutate("\(verb) \(keys.count) faces from cluster \(id)") { session, root in
+            let existing = try session.clusterFaces(clusterId: id)
+            let known = Set(existing.map(\.faceKey))
+            let wanted = keys.filter { known.contains($0) }
+            let target: Int64
+            if wanted.isEmpty || wanted.count >= existing.count {
+                target = id
+            } else {
+                target = try session.splitCluster(
+                    clusterId: id, faceKeys: wanted, rootPrefix: root
+                ).newClusterId
+            }
+            switch kind {
+            case .ignored:
+                return try session.ignoreCluster(clusterId: target, rootPrefix: root)
+            case .rejected:
+                return try session.rejectCluster(clusterId: target, rootPrefix: root)
+            }
         }
     }
 
@@ -596,11 +851,14 @@ final class FaceService {
             // explanation.
             lastError = report.failed > 0 ? .sidecarWritesFailed(Int(report.failed)) : nil
             await refreshClusters()
-            // Unconditional: the point of a naming action is that the person
-            // shows up now, and `written == 0` still happens on a re-name to
-            // the same value, where a refresh is harmless.
-            refresh.schedule()
-            await refresh.task?.value
+            // A light library walk is only owed when bytes on disk changed.
+            // Unnamed-into-unnamed writes nothing, and a re-name to the same
+            // value is already showing the person — waiting for a rescan
+            // after those is what made a 12-group merge take minutes.
+            if report.written > 0 {
+                refresh.schedule()
+                await refresh.task?.value
+            }
             return report.failed == 0
         } catch {
             lastError = FaceServiceError(error)
@@ -630,6 +888,12 @@ final class FaceService {
         allClusters = []
     }
 
+    /// Drop idle ONNX sessions. No-op during a run.
+    func unloadSession() async {
+        guard !isRunning else { return }
+        await releaseSession()
+    }
+
     /// The open session for `packDirectory`, opening one if there is none.
     ///
     /// The open is memoized as a `Task` so concurrent callers await the *same*
@@ -653,9 +917,10 @@ final class FaceService {
             try await Task.detached(priority: .userInitiated) {
                 () -> Result<FaceSession, FaceServiceError> in
                 do {
-                    return .success(try FaceSession(
+                    return .success(try FaceSession.withHeicDecoder(
                         cacheDbPath: cacheURL.path,
-                        modelPackDir: packDirectory.path
+                        modelPackDir: packDirectory.path,
+                        decoder: ImageIOHeicDecoder.shared
                     ))
                 } catch {
                     return .failure(FaceServiceError(error))
@@ -686,9 +951,6 @@ final class FaceService {
         }.value
         self.session = nil
         self.sessionPackDirectory = nil
-        isRunning = false
-        cancelRequested = false
-        progress = nil
     }
 
     private nonisolated static func enqueue(
@@ -730,7 +992,7 @@ final class FaceService {
 extension FaceService.Face {
     init(_ ref: FaceRef) {
         self.init(
-            url: URL(fileURLWithPath: ref.path),
+            url: CoreScanner.fileURL(ref.path),
             // The core hands back MWG geometry precisely so this is a
             // relabelling and not a conversion. `name` is nil: a face in an
             // unlabeled cluster has no person, and the crop does not need one.
@@ -769,19 +1031,22 @@ extension FaceService.Cluster {
 
 /// Forwards the core's worker-thread callbacks to the main actor.
 ///
-/// `Sendable` without `@unchecked`: the only stored state is three immutable
+/// `Sendable` without `@unchecked`: the only stored state is four immutable
 /// `@Sendable` closures, so there is nothing to race.
 private final class FaceProgressBridge: FaceProgressListener, Sendable {
     private let progressHandler: @Sendable (Int, Int) -> Void
-    private let sidecarsHandler: @Sendable (Int) -> Void
+    private let scannedHandler: @Sendable ([String]) -> Void
+    private let sidecarsHandler: @Sendable ([String]) -> Void
     private let finishedHandler: @Sendable (FaceService.Summary) -> Void
 
     init(
         progress: @escaping @Sendable (Int, Int) -> Void,
-        sidecarsWritten: @escaping @Sendable (Int) -> Void,
+        photosScanned: @escaping @Sendable ([String]) -> Void,
+        sidecarsWritten: @escaping @Sendable ([String]) -> Void,
         finished: @escaping @Sendable (FaceService.Summary) -> Void
     ) {
         self.progressHandler = progress
+        self.scannedHandler = photosScanned
         self.sidecarsHandler = sidecarsWritten
         self.finishedHandler = finished
     }
@@ -790,15 +1055,12 @@ private final class FaceProgressBridge: FaceProgressListener, Sendable {
         progressHandler(Int(done), Int(total))
     }
 
-    /// Detections landed in the cache. Nothing on disk changed, so there is
-    /// nothing for the app to re-read — this is why the two path callbacks are
-    /// separate.
-    func onPhotosWithFaces(paths: [String]) {}
+    func onPhotosWithFaces(paths: [String]) {
+        scannedHandler(paths)
+    }
 
     func onSidecarsWritten(paths: [String]) {
-        // Only the count crosses: the app re-reads the sidecars through the
-        // scanner anyway, so the paths would be dead weight on the main actor.
-        sidecarsHandler(paths.count)
+        sidecarsHandler(paths)
     }
 
     func onFinished(summary: FaceRunSummary) {

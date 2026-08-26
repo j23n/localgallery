@@ -39,6 +39,8 @@ pub struct SwiftXmpParse {
     pub country_code: Option<String>,
     /// MWG regions, with the name shift described above already applied.
     pub face_regions: Vec<SwiftFaceRegion>,
+    /// `photo-tools:TaggerVersion` or `phototools:TaggerVersion`, when present.
+    pub tagger_version: Option<String>,
 }
 
 /// One region as the app sees it.
@@ -102,6 +104,7 @@ pub fn parse_xmp_text(xml: &str) -> SwiftXmpParse {
         raw_tags: parse_tags_list(xml),
         country_code: parse_country_code(xml),
         face_regions: parse_mwg_regions(xml),
+        tagger_version: parse_tagged_scalar(xml, "TaggerVersion"),
     }
 }
 
@@ -149,15 +152,31 @@ fn parse_tags_list(xml: &str) -> Vec<String> {
 /// The two spellings of the country property, probed in order. The first that
 /// yields a non-empty value wins; the value is uppercased.
 fn parse_country_code(xml: &str) -> Option<String> {
-    for prefix in ["photo-tools:CountryCode", "phototools:CountryCode"] {
-        let open = format!("<{prefix}>");
-        let close = format!("</{prefix}>");
+    parse_tagged_scalar(xml, "CountryCode").map(|v| v.to_uppercase())
+}
+
+/// Element or attribute form, `photo-tools:` then `phototools:`.
+fn parse_tagged_scalar(xml: &str, local: &str) -> Option<String> {
+    for prefix in ["photo-tools", "phototools"] {
+        let qname = format!("{prefix}:{local}");
+        let open = format!("<{qname}>");
+        let close = format!("</{qname}>");
         if let Some(i) = xml.find(&open) {
             let from = i + open.len();
             if let Some(j) = xml[from..].find(&close) {
                 let value = xml[from..from + j].trim();
                 if !value.is_empty() {
-                    return Some(value.to_uppercase());
+                    return Some(value.to_string());
+                }
+            }
+        }
+        let attr = format!("{qname}=\"");
+        if let Some(i) = xml.find(&attr) {
+            let from = i + attr.len();
+            if let Some(j) = xml[from..].find('"') {
+                let value = xml[from..from + j].trim();
+                if !value.is_empty() {
+                    return Some(value.to_string());
                 }
             }
         }

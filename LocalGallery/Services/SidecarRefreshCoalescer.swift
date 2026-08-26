@@ -5,8 +5,9 @@ import Foundation
 ///
 /// Both core-owned writers need this and they need it identically, so it lives
 /// here rather than twice: `TaggingService` (a 20k-photo tagging run reports
-/// every 32 photos) and `FaceService` (the auto-tag pass at the end of a face
-/// run, plus every naming action the user takes).
+/// every 32 photos) and `FaceService` (per-photo stamps during a scan, the
+/// auto-tag pass, plus every naming action the user takes). Places writes
+/// go through the same coalescer via `LibraryAnalysis.onPlaceWritten`.
 ///
 /// Two rules, and the second is the one that is easy to get wrong:
 ///

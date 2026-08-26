@@ -11,7 +11,7 @@ private final class VisibleTargetBox {
 
 /// Unified photo grid used for All Photos, folder/event drill-ins, tag drill-ins,
 /// and memory "grid mode". Supports search, tag filtering, year scrubber,
-/// Select mode with share, and long-press menus — matching the Quiet design.
+/// Select mode with share/delete, and long-press menus — matching the Quiet design.
 struct PhotoGridScreen: View {
     let title: String
     /// Static subtitle shown when no in-screen filter is active and
@@ -73,6 +73,10 @@ struct PhotoGridScreen: View {
 
     // Share request (drives the unified size-selection share flow)
     @State private var shareRequest: PhotoShareRequest?
+    /// Photos the delete alert is about. Captured when the user taps Delete
+    /// so a selection change cannot rewrite the confirmation mid-flight.
+    @State private var pendingDelete: [PhotoFile] = []
+    @State private var showDeleteConfirm = false
 
     // Settings sheet (root only)
     @State private var showSettings = false
@@ -282,11 +286,6 @@ struct PhotoGridScreen: View {
                         // physics are unchanged (no scrollTargetBehavior).
                         .scrollTargetLayout()
                     }
-
-                    // Select-mode bottom bar inside scroll content so it pushes the grid.
-                    if selectMode {
-                        Color.clear.frame(height: 72)
-                    }
                 }
                 .scrollDismissesKeyboard(.interactively)
                 .onScrollGeometryChange(for: Bool.self) { geo in
@@ -313,9 +312,6 @@ struct PhotoGridScreen: View {
                             withAnimation { proxy.scrollTo(sectionID, anchor: .top) }
                         }
                     }
-                }
-                .overlay(alignment: .bottom) {
-                    if selectMode { selectBottomBar }
                 }
                 .onChange(of: scrollToTopTrigger) {
                     withAnimation { proxy.scrollTo("__top__", anchor: .top) }
@@ -344,6 +340,14 @@ struct PhotoGridScreen: View {
         .navigationTitle(displayTitle)
         .navigationBarTitleDisplayMode(isRoot ? .large : .inline)
         .toolbar { toolbarContent }
+        // Photos-style select: the tab bar (Folders / Collections / Photos)
+        // yields the slot entirely, and the share / count / select-all bar
+        // sits in its place via safeAreaInset — not a translucent overlay
+        // stacked on top of the tabs.
+        .toolbar(selectMode ? .hidden : .automatic, for: .tabBar)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if selectMode { selectBottomBar }
+        }
         .task(id: filterKey) {
             // Seed only once per deep-link mount. Using a flag rather than
             // `activeTags.isEmpty` prevents re-seeding when the user removes
@@ -375,6 +379,17 @@ struct PhotoGridScreen: View {
         }
         .sheet(isPresented: $showSettings) { SettingsView() }
         .photoShareSheet(request: $shareRequest)
+        .alert(PhotoDeletePrompt.title(for: pendingDelete), isPresented: $showDeleteConfirm) {
+            Button("Cancel", role: .cancel) { pendingDelete = [] }
+            Button("Delete", role: .destructive) {
+                Task {
+                    await confirmDelete(pendingDelete)
+                    pendingDelete = []
+                }
+            }
+        } message: {
+            Text(PhotoDeletePrompt.message(for: pendingDelete))
+        }
         .navigationDestination(isPresented: $goToSlideshow) {
             if let m = playableMemory {
                 MemorySlideshowView(memory: m)
@@ -561,8 +576,10 @@ struct PhotoGridScreen: View {
                     Label("Share", systemImage: "square.and.arrow.up")
                 }
                 Button {
-                    selectMode = true
-                    selected.insert(photo.id)
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        selectMode = true
+                        selected.insert(photo.id)
+                    }
                 } label: {
                     Label("Select", systemImage: "checkmark.circle")
                 }
@@ -583,6 +600,16 @@ struct PhotoGridScreen: View {
         viewerPhoto = photo
     }
 
+    private func confirmDelete(_ photos: [PhotoFile]) async {
+        let result = await store.deletePhotos(photos)
+        selected.subtract(result.deletedIDs)
+        if selected.isEmpty {
+            withAnimation(.easeInOut(duration: 0.25)) {
+                selectMode = false
+            }
+        }
+    }
+
     // MARK: - Toolbar
 
     @ToolbarContentBuilder
@@ -590,20 +617,22 @@ struct PhotoGridScreen: View {
         ToolbarItem(placement: .topBarLeading) {
             if selectMode {
                 Button("Cancel") {
-                    selectMode = false
-                    selected.removeAll()
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        selectMode = false
+                        selected.removeAll()
+                    }
                 }
                 .foregroundStyle(Design.accentColor)
             }
         }
 
-        // Principal slot: scan progress takes priority over the date-range
-        // title button when a scan is running, so the user sees live
-        // "X / Y · ~M:SS" instead of a stale date range. The branch lives
-        // inside `PrincipalToolbarContent` so the `store.scanProgress` read
-        // stays scoped to that view — otherwise every progress tick would
-        // re-evaluate this entire screen body and re-diff every visible
-        // grid cell, starving thumbnail `.task` closures on the main actor.
+        // Principal slot: scan / tagging progress takes priority over the
+        // date-range title button while either is running, so the user sees
+        // live "X / Y · ~M:SS" instead of a stale date range. The branch
+        // lives inside `PrincipalToolbarContent` so those reads stay scoped
+        // to that view — otherwise every progress tick would re-evaluate
+        // this entire screen body and re-diff every visible grid cell,
+        // starving thumbnail `.task` closures on the main actor.
         ToolbarItem(placement: .principal) {
             PrincipalToolbarContent(
                 title: title,
@@ -618,12 +647,18 @@ struct PhotoGridScreen: View {
 
         ToolbarItemGroup(placement: .topBarTrailing) {
             if selectMode {
-                Button("Done") {
-                    selectMode = false
-                    selected.removeAll()
+                Button {
+                    if selected.count == filtered.count {
+                        selected.removeAll()
+                    } else {
+                        selected = Set(filtered.map(\.id))
+                    }
+                } label: {
+                    Text(selected.count == filtered.count && !filtered.isEmpty ? "Deselect All" : "Select All")
                 }
                 .fontWeight(.semibold)
                 .foregroundStyle(Design.accentColor)
+                .disabled(filtered.isEmpty)
             } else {
                 if playableMemory != nil {
                     Button {
@@ -677,25 +712,29 @@ struct PhotoGridScreen: View {
             Spacer()
 
             Button {
-                if selected.count == filtered.count {
-                    selected.removeAll()
-                } else {
-                    selected = Set(filtered.map(\.id))
-                }
+                pendingDelete = selectedPhotos
+                showDeleteConfirm = true
             } label: {
-                Text(selected.count == filtered.count && !filtered.isEmpty ? "Deselect All" : "Select All")
+                Text("Delete")
                     .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(Design.accentColor)
+                    .foregroundStyle(selected.isEmpty ? Design.ink3 : Design.destructive)
             }
+            .disabled(selected.isEmpty)
         }
         .padding(.horizontal, 16)
-        .padding(.top, 10)
-        .padding(.bottom, 28)
-        .background(.ultraThinMaterial)
-        .overlay(alignment: .top) {
+        .frame(maxWidth: .infinity, minHeight: 49)
+        .background {
+            // Same recipe as the tab bar (`configureAppearance`): nearly
+            // opaque canvas, separator on top, extending into the home-
+            // indicator inset so it reads as the bar that replaced the tabs.
             Rectangle()
-                .fill(Design.separator)
-                .frame(height: 0.5)
+                .fill(Design.bg.opacity(0.96))
+                .ignoresSafeArea(edges: .bottom)
+                .overlay(alignment: .top) {
+                    Rectangle()
+                        .fill(Design.separator)
+                        .frame(height: 0.5)
+                }
         }
     }
 
@@ -767,12 +806,17 @@ struct PhotoGridScreen: View {
 
 // MARK: - Principal toolbar content
 
-/// Wraps the principal toolbar slot so the `store.scanProgress` read stays
-/// scoped to this view's body. If `PhotoGridScreen.body` read scanProgress
+/// Wraps the principal toolbar slot so the scan / analysis progress reads
+/// stay scoped to this view's body. If `PhotoGridScreen.body` read them
 /// directly (which it used to, via the `if store.scanProgress != nil`
-/// branch), every progress tick during a scan would re-evaluate the whole
-/// screen body — re-diffing every visible cell on the main actor and
-/// starving the thumbnail `.task` closures that are queued on it.
+/// branch), every progress tick would re-evaluate the whole screen body —
+/// re-diffing every visible cell on the main actor and starving the
+/// thumbnail `.task` closures that are queued on it.
+///
+/// Library scan *and* photo analysis (tagging / faces / places) both win
+/// over the date-range title. The Photos tab used to gate on `scanProgress`
+/// alone, so a tagging run left this slot showing the date range while
+/// Folders and Collections already showed the banner.
 private struct PrincipalToolbarContent: View {
     @Environment(GalleryStore.self) private var store
     let title: String
@@ -783,8 +827,12 @@ private struct PrincipalToolbarContent: View {
     let largeTitleCollapsed: Bool
     let onTitleTap: () -> Void
 
+    private var isProgressVisible: Bool {
+        store.scanProgress != nil || store.analysis.progress != nil
+    }
+
     var body: some View {
-        if store.scanProgress != nil {
+        if isProgressVisible {
             ScanProgressBanner()
         } else if showVisibleDateRange && !selectMode {
             Button(action: onTitleTap) {

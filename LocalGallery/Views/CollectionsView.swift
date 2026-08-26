@@ -12,6 +12,22 @@ enum CollectionsRoute: Hashable {
     case peopleReview
     /// One cluster's faces, with Name / Not a person.
     case clusterReview(Int64)
+    /// A suggested merge: every face in the paired groups, with Select to
+    /// pick which clusters actually merge.
+    case mergeProposal([Int64])
+}
+
+/// Whether Collections shows a People section.
+///
+/// Named people are the usual reason. Unlabeled face groups are the other:
+/// they live on the People list, so hiding the section until someone is named
+/// made that list — and its review row — unreachable on a fresh library. A
+/// scan in flight is the third, so the header exists as a destination while
+/// faces are still being found.
+enum PeopleSectionVisibility {
+    static func shouldShow(namedPeople: Int, reviewableClusters: Int, scanning: Bool) -> Bool {
+        namedPeople > 0 || reviewableClusters > 0 || scanning
+    }
 }
 
 struct CollectionsView: View {
@@ -62,13 +78,21 @@ struct CollectionsView: View {
         .background(Design.bg)
         .navigationTitle("Collections")
         .navigationBarTitleDisplayMode(.large)
+        .task(id: store.tagging.pack?.version) {
+            // Not on `collectionsBody`: that view only exists while the
+            // library is `.ready`, so a launch scan hid People until the
+            // user opened Settings. `id` re-runs once the pack lands if
+            // the first attempt was cancelled mid-verify.
+            await store.faces.refreshClusters()
+        }
         .toolbar {
-            // Always include the banner — it returns EmptyView when no
-            // scan is running. The `if store.scanProgress != nil` used to
+            // Always include the banner — it returns EmptyView when nothing
+            // is running. The `if store.scanProgress != nil` used to
             // live here, but reading scanProgress in the parent body made
             // every progress tick re-evaluate the whole CollectionsView
             // body and re-diff its content. Now the read is scoped to
-            // ScanProgressBanner.body and the parent stays untouched.
+            // ScanProgressBanner.body (library scan *and* photo analysis)
+            // and the parent stays untouched.
             ToolbarItem(placement: .principal) {
                 ScanProgressBanner()
             }
@@ -147,6 +171,8 @@ struct CollectionsView: View {
                 PeopleReviewView()
             case .clusterReview(let id):
                 ClusterReviewView(clusterID: id)
+            case .mergeProposal(let ids):
+                MergeProposalView(clusterIDs: ids)
             }
         }
     }
@@ -269,9 +295,15 @@ struct CollectionsView: View {
                 }
 
                 let people = store.people.visiblePeopleForRail
-                if !people.isEmpty {
+                let reviewableCount = store.faces.reviewableClusters.count
+                let scanningPeople = store.analysis.isRunning || store.faces.isRunning
+                if PeopleSectionVisibility.shouldShow(
+                    namedPeople: people.count,
+                    reviewableClusters: reviewableCount,
+                    scanning: scanningPeople
+                ) {
                     peopleSectionHeader
-                    peopleRail(people)
+                    peopleRail(people, scanning: scanningPeople)
                 }
 
                 if !store.eventFolders.isEmpty {
@@ -357,14 +389,19 @@ struct CollectionsView: View {
         }
     }
 
-    private func peopleRail(_ people: [TagSuggestion]) -> some View {
-        // Two-row horizontal scroll, column-major like the design.
+    private func peopleRail(_ people: [TagSuggestion], scanning: Bool) -> some View {
+        // Two-row horizontal scroll, column-major like the design. Review
+        // lives on the People list, not here — a leading card in this stack
+        // is one row tall and hides every second person.
         let pairs = stride(from: 0, to: people.count, by: 2).map { i -> [TagSuggestion] in
             if i + 1 < people.count { return [people[i], people[i + 1]] }
             return [people[i]]
         }
         return ScrollView(.horizontal, showsIndicators: false) {
             LazyHStack(alignment: .top, spacing: 10) {
+                if scanning && people.isEmpty {
+                    PeopleScanningCard()
+                }
                 ForEach(pairs, id: \.first!.id) { pair in
                     VStack(spacing: 10) {
                         ForEach(pair) { person in

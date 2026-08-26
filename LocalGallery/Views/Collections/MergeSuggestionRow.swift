@@ -1,18 +1,24 @@
 import SwiftUI
 
-/// One "these two look like the same person" suggestion: a strip of crops from
-/// each group, how sure the core is in words, and the two answers.
+/// One suggested-merge group on the review list: every face the core paired,
+/// how sure it is in words, and a tap through to the select-to-merge screen.
 ///
 /// The crops are the whole point — a similarity number tells the user nothing
-/// they can check, and two rows of faces tell them everything. `Merge` is
-/// directional (see `MergeDirection`) and the button says which group survives.
+/// they can check. Exemplars used to cap this at four per group; a merge
+/// decision needs the rest of the photos too, which is why this loads every
+/// face and why the tap opens `MergeProposalView` rather than merging inline.
 struct MergeSuggestionRow: View {
-    let proposal: FaceService.Proposal
-    let direction: MergeDirection
-    let onMerge: () -> Void
-    let onDismiss: () -> Void
+    let group: MergeGroup
 
     @Environment(GalleryStore.self) private var store
+    @State private var faces: [FaceService.Face] = []
+
+    private let columns = [GridItem(.adaptive(minimum: 48), spacing: 4)]
+
+    private var clusters: [FaceService.Cluster] {
+        let byID = Dictionary(uniqueKeysWithValues: store.faces.allClusters.map { ($0.id, $0) })
+        return group.clusterIDs.compactMap { byID[$0] }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -26,52 +32,48 @@ struct MergeSuggestionRow: View {
                     .foregroundStyle(Design.ink2)
             }
 
-            faceStrip(direction.survivor)
-            faceStrip(direction.absorbed)
-
-            Text(direction.confirmation)
-                .font(.footnote)
-                .foregroundStyle(Design.ink2)
-
-            HStack(spacing: 10) {
-                Button(direction.buttonLabel, action: onMerge)
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                Button("Not the Same", action: onDismiss)
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                Spacer(minLength: 0)
+            LazyVGrid(columns: columns, spacing: 4) {
+                ForEach(displayedFaces) { face in
+                    PersonThumbnailView(
+                        url: face.url,
+                        region: face.region,
+                        size: 48,
+                        cornerRadius: 8
+                    )
+                    .frame(width: 48, height: 48)
+                }
             }
-            .disabled(store.faces.isCoreBusy)
+
+            HStack(spacing: 6) {
+                Text(namesLabel)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Design.ink2)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Design.ink3)
+            }
         }
         .padding(.vertical, 6)
-    }
-
-    private func faceStrip(_ cluster: FaceService.Cluster) -> some View {
-        HStack(spacing: 6) {
-            ForEach(cluster.exemplars) { face in
-                PersonThumbnailView(
-                    url: face.url,
-                    region: face.region,
-                    size: 48,
-                    cornerRadius: 8
-                )
+        .task(id: group.clusterIDs) {
+            var loaded: [FaceService.Face] = []
+            for id in group.clusterIDs {
+                loaded.append(contentsOf: await store.faces.faces(inCluster: id))
             }
-            if let name = cluster.name {
-                Text(name)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(Design.ink)
-                    .lineLimit(1)
-            }
-            Spacer(minLength: 0)
+            faces = loaded
         }
     }
 
-    /// The similarity as something a person can act on. The exact cosine is
-    /// meaningless outside the clustering thresholds, and showing it invites
-    /// the user to compare two numbers that were never on the same scale.
+    /// Full list once loaded; exemplars until then, so the row is not empty
+    /// for the length of the cluster-face queries.
+    private var displayedFaces: [FaceService.Face] {
+        if !faces.isEmpty { return faces }
+        return clusters.flatMap(\.exemplars)
+    }
+
     private var confidence: String {
-        switch proposal.similarity {
+        switch group.similarity {
         case 0.9...: return "Very likely the same person"
         case 0.8..<0.9: return "Likely the same person"
         default: return "Possibly the same person"
@@ -79,6 +81,15 @@ struct MergeSuggestionRow: View {
     }
 
     private var sizeLabel: String {
-        "\(direction.survivor.size) + \(direction.absorbed.size) faces"
+        let faceCount = clusters.reduce(0) { $0 + $1.size }
+        let groups = group.clusterCount == 1 ? "1 group" : "\(group.clusterCount) groups"
+        let faces = faceCount == 1 ? "1 face" : "\(faceCount) faces"
+        return "\(faces) · \(groups)"
+    }
+
+    private var namesLabel: String {
+        let names = clusters.map { $0.name ?? "Unnamed" }
+        if names.isEmpty { return "Review groups" }
+        return names.joined(separator: " · ")
     }
 }

@@ -70,9 +70,20 @@ struct PhotoFile: Identifiable, Hashable, Codable, Sendable {
     var dimensions: CGSize? = nil
     var exif: EXIFData? = nil
 
-    /// Flat leaf names derived from `hierarchicalTags`. Used for substring search
-    /// and the legacy "Tags" list in PhotoInfoPanel.
+    /// Flat leaf names derived from `hierarchicalTags`. Used for substring search.
     var keywords: [String] { hierarchicalTags.map(\.displayName) }
+
+    /// `People/*` keywords on the file, whether or not a face was detected.
+    var peopleTags: [HierarchicalTag] {
+        hierarchicalTags.filter { $0.namespace?.lowercased() == "people" }
+    }
+
+    /// People keywords that have no matching named MWG region — a name on
+    /// the file that this pack never boxed.
+    var peopleTagsWithoutFace: [HierarchicalTag] {
+        let detected = Set(faceRegions.compactMap { $0.name?.lowercased() })
+        return peopleTags.filter { !detected.contains($0.displayName.lowercased()) }
+    }
 
     enum CodingKeys: String, CodingKey {
         case id, url, filename, fileSize, dateTaken, dateFromMetadata, isVideo, livePhotoVideoURL, hierarchicalTags, countryCode, enrichedFileDate, fileModificationDate, gpsLatitude, gpsLongitude, faceRegions
@@ -128,6 +139,70 @@ struct PhotoFile: Identifiable, Hashable, Codable, Sendable {
     /// Deterministic UUID derived from the file URL path for stable identity across scans.
     static func stableID(for url: URL) -> UUID {
         StableUUID.derive(from: url.standardized.path)
+    }
+
+    /// Canonical sidecar (`IMG.jpg.xmp`). Matches `gallery_meta::sidecar_path`.
+    var sidecarURL: URL {
+        Self.canonicalSidecarURL(for: url)
+    }
+
+    /// Lightroom-style sidecar (`IMG.xmp`). Matches `gallery_meta::alt_sidecar_path`.
+    /// `nil` when there is no extension to replace (or the file already is `.xmp`).
+    var altSidecarURL: URL? {
+        Self.altSidecarURL(for: url)
+    }
+
+    /// Every on-disk file that belongs to this photo: the image/video, both
+    /// sidecar spellings, and a Live Photo's paired movie (plus that movie's
+    /// sidecars). Missing companions are skipped at delete time.
+    var onDiskURLs: [URL] {
+        var urls = [url, sidecarURL]
+        if let alt = altSidecarURL { urls.append(alt) }
+        if let live = livePhotoVideoURL {
+            urls.append(live)
+            urls.append(Self.canonicalSidecarURL(for: live))
+            if let alt = Self.altSidecarURL(for: live) { urls.append(alt) }
+        }
+        return urls
+    }
+
+    static func canonicalSidecarURL(for url: URL) -> URL {
+        URL(fileURLWithPath: url.path + ".xmp")
+    }
+
+    /// Same photo after an on-disk move. Identity follows the new URL
+    /// (`stableID`), which is what a later scan would derive.
+    func relocated(to url: URL, livePhotoVideoURL: URL? = nil) -> PhotoFile {
+        PhotoFile(
+            id: PhotoFile.stableID(for: url),
+            url: url,
+            filename: url.lastPathComponent,
+            fileSize: fileSize,
+            dateTaken: dateTaken,
+            dateFromMetadata: dateFromMetadata,
+            isVideo: isVideo,
+            livePhotoVideoURL: livePhotoVideoURL,
+            hierarchicalTags: hierarchicalTags,
+            countryCode: countryCode,
+            enrichedFileDate: enrichedFileDate,
+            fileModificationDate: fileModificationDate,
+            gpsLatitude: gpsLatitude,
+            gpsLongitude: gpsLongitude,
+            faceRegions: faceRegions,
+            locality: locality,
+            sidecarStatus: sidecarStatus
+        )
+    }
+
+    static func altSidecarURL(for url: URL) -> URL? {
+        let filename = url.lastPathComponent
+        guard let dot = filename.lastIndex(of: ".") else { return nil }
+        if dot == filename.startIndex { return nil }
+        let ext = filename[dot...]
+        if ext.lowercased() == ".xmp" { return nil }
+        let stem = filename[..<dot]
+        return url.deletingLastPathComponent()
+            .appendingPathComponent(String(stem) + ".xmp")
     }
 }
 

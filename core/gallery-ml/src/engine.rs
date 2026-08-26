@@ -14,9 +14,11 @@
 //!        │ miss
 //!  read bytes → decode → orient → resize → tensor → encode → store
 //!        │
-//!  read sidecar (owned tags) → score with hysteresis
+//!  skip if sidecar TaggerVersion == pack (unless stale / force)
 //!        │
-//!  gallery_meta::write_tags  ──unchanged──▶ nothing written, mtime untouched
+//!  CLIP: sidecar (same model) → sqlite → encode
+//!        │
+//!  score → gallery_meta::write_tags (always, prefix-replace Objects/Scenes)
 //!        │
 //!  ml_work → done
 //! ```
@@ -27,10 +29,11 @@
 //!
 //! # Parallelism
 //!
-//! A core-owned scoped thread pool, `available_parallelism().min(4)`. Four is
-//! the ceiling because this runs on a phone behind a foreground UI, each
-//! worker holds a decode buffer plus an ORT session, and inference is already
-//! pinned to one intra-op thread (so workers really are the only concurrency).
+//! A core-owned scoped thread pool, `available_parallelism().min(2)`. Two is
+//! the ceiling because this runs on a phone behind a foreground UI: each
+//! worker holds a decode buffer, inference is already pinned to one intra-op
+//! thread, and the ONNX weights are ~143 MB *per session*. Four workers each
+//! with their own session plus a 48 MP RGB buffer is what jetsams an iPhone.
 //! No `rayon`: the work is a flat list of independent items and a scoped
 //! thread pool over an atomic cursor is ~30 lines and one less dependency in a
 //! crate that ships to a phone.
@@ -46,10 +49,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use gallery_meta::{read_view, write_tags, TagWriteRequest};
+use gallery_meta::{is_content_tag, write_tags, TagWriteRequest};
 use gallery_vfs::Vfs;
 
-use crate::cache::{CacheDb, Stats, WorkItem};
+use crate::cache::{CacheDb, Stats, WorkItem, WorkState};
 use crate::encoder::ImageEncoder;
 use crate::error::{MlError, MlResult};
 use crate::hash::content_hash;
@@ -58,7 +61,17 @@ use crate::preprocess::{extension_supported, preprocess, PreprocessConfig};
 use crate::tagger::ZeroShotTagger;
 
 /// Upper bound on worker threads. See the module docs.
-pub const MAX_WORKERS: usize = 4;
+pub const MAX_WORKERS: usize = 2;
+
+/// ONNX sessions held at once, for every model the engines load.
+///
+/// `ort::Session::run` takes `&mut self`, so a pool of sessions is what lets
+/// workers infer concurrently. Each session also owns a copy of the weights.
+/// MobileCLIP-S2 is 143 MB on disk and more once Level3 has rewritten the
+/// graph; four of those, plus the face models, plus decode buffers, is the
+/// jetsam that killed a 12-minute debug scan on iPhone 16. One session
+/// serializes inference. Decode still overlaps across [`MAX_WORKERS`].
+pub const INFERENCE_SESSIONS: usize = 1;
 
 /// Minimum spacing between [`TaggingProgress::on_progress`] calls.
 pub const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
@@ -144,6 +157,11 @@ pub struct RunOptions {
     /// `/PhotosOld`. `None` means "everything", which is what the crate's own
     /// tests and CLI examples want.
     pub root_prefix: Option<String>,
+    /// Re-tag even when the sidecar's `TaggerVersion` already matches.
+    /// [`TaggingEngine::reset_queue`] sets this for the next run.
+    pub force: bool,
+    /// When set, only these absolute paths are taken off the queue.
+    pub only_paths: Option<Vec<String>>,
 }
 
 /// The tagging orchestrator.
@@ -153,6 +171,11 @@ pub struct TaggingEngine {
     encoder: Arc<dyn ImageEncoder>,
     vfs: Arc<dyn Vfs>,
     preprocess: PreprocessConfig,
+    /// Platform HEIC decode, when the host installed one. `None` in tests and
+    /// on the `cargo test` host, where [`crate::heif::HeifDecoder`] runs.
+    heic_decoder: Option<Arc<dyn crate::HostHeicDecoder>>,
+    /// Set by [`Self::reset_queue`]; consumed by the next [`Self::run`].
+    force_next: AtomicBool,
 }
 
 impl std::fmt::Debug for TaggingEngine {
@@ -184,7 +207,7 @@ impl TaggingEngine {
             &pack.manifest.model.output_name,
             pack.manifest.model.input_size,
             pack.manifest.model.embedding_dim,
-            default_workers(None),
+            INFERENCE_SESSIONS,
         )?;
         let cache = CacheDb::open(cache_db_path)?;
         TaggingEngine::with_encoder(cache, pack, Arc::new(encoder), vfs)
@@ -227,12 +250,23 @@ impl TaggingEngine {
             encoder,
             vfs,
             preprocess,
+            heic_decoder: None,
+            force_next: AtomicBool::new(false),
         })
     }
 
     /// The loaded pack.
     pub fn pack(&self) -> &ModelPack {
         &self.pack
+    }
+
+    /// Use `decoder` for HEIC photos. JPEG/PNG stay on the pinned Rust path.
+    ///
+    /// Builder-style so the FFI can open an engine and then, only on iOS,
+    /// install ImageIO without a second constructor on every test.
+    pub fn with_heic_decoder(mut self, decoder: Arc<dyn crate::HostHeicDecoder>) -> Self {
+        self.heic_decoder = Some(decoder);
+        self
     }
 
     /// Queue counts.
@@ -246,9 +280,21 @@ impl TaggingEngine {
         self.cache.enqueue(paths)
     }
 
+    /// Re-open one path so the next forced run will take it, even if it is
+    /// already `done`. Inserts the row when the queue has never seen it.
+    pub fn reopen(&self, path: &str) -> MlResult<()> {
+        self.cache.enqueue(&[path.to_string()])?;
+        self.cache.mark_stale(path)?;
+        Ok(())
+    }
+
     /// Forget every queue row (keeping cached embeddings), so the next run
     /// re-tags the whole library. This is the "Re-tag everything" button.
     pub fn reset_queue(&self) -> MlResult<()> {
+        // Rows come back `Pending` with no pack, which looks like a first-seen
+        // photo-tools file. Without this the next run would skip every sidecar
+        // already stamped with the current version.
+        self.force_next.store(true, Ordering::Relaxed);
         self.cache.reset_queue()
     }
 
@@ -313,19 +359,40 @@ impl TaggingEngine {
         self.restat_done_rows()?;
 
         let root_prefix = opts.root_prefix.as_deref().map(normalize_root_prefix);
-        let items = self
+        let mut items = self
             .cache
             .claimable(opts.limit.unwrap_or(0), root_prefix.as_deref())?;
-        let total = items.len();
+        if let Some(only) = &opts.only_paths {
+            items.retain(|item| only.iter().any(|p| p == &item.path));
+        }
         let tagged_at = opts.tagged_at.clone().unwrap_or_else(iso8601_utc_now);
-        let workers = default_workers(opts.workers).min(total.max(1));
+        let force = opts.force || self.force_next.swap(false, Ordering::Relaxed);
 
-        let cursor = AtomicUsize::new(0);
         let shared = Shared {
             done: AtomicUsize::new(0),
             totals: Mutex::new(RunSummary::default()),
             reporter: Mutex::new(Reporter::new()),
         };
+
+        // Count the photos that still need work *before* the bar starts.
+        // A sidecar already stamped with this pack is settled here so it
+        // leaves the queue, but it is not "5 / 20,592".
+        let (current, work): (Vec<_>, Vec<_>) = items
+            .into_iter()
+            .partition(|item| self.already_current(item, force));
+        for item in &current {
+            if cancel.load(Ordering::Relaxed) {
+                break;
+            }
+            let outcome = self.process(item, &tagged_at, force, cancel);
+            let _ = shared.absorb(item, outcome);
+        }
+
+        let total = work.len();
+        progress.on_progress(0, total);
+        let workers = default_workers(opts.workers).min(total.max(1));
+
+        let cursor = AtomicUsize::new(0);
 
         // `thread::scope` re-raises a worker panic in *this* thread. Left
         // unguarded that unwinds through the FFI's run thread, so its cleanup
@@ -341,9 +408,9 @@ impl TaggingEngine {
                             break;
                         }
                         let i = cursor.fetch_add(1, Ordering::Relaxed);
-                        let Some(item) = items.get(i) else { break };
+                        let Some(item) = work.get(i) else { break };
 
-                        let outcome = self.process(item, &tagged_at, cancel);
+                        let outcome = self.process(item, &tagged_at, force, cancel);
                         // An item abandoned mid-flight by cancellation is not
                         // "done" — it went back on the queue, and reporting it
                         // as progress would show a finished bar for a run the
@@ -397,7 +464,7 @@ impl TaggingEngine {
 
     /// One photo, start to finish. Never panics; every failure mode becomes an
     /// [`Outcome`].
-    fn process(&self, item: &WorkItem, tagged_at: &str, cancel: &AtomicBool) -> Outcome {
+    fn process(&self, item: &WorkItem, tagged_at: &str, force: bool, cancel: &AtomicBool) -> Outcome {
         // Claim first, *then* look at the file. A row this run does not own
         // must not be decoded and must not have a sidecar written for it — the
         // realistic loser is a reset-and-re-enqueue landing between
@@ -413,7 +480,7 @@ impl TaggingEngine {
                 .finish_skipped(&item.path, crate::preprocess::DECODER_VERSION);
             return Outcome::Skipped;
         }
-        match self.process_inner(item, tagged_at, cancel) {
+        match self.process_inner(item, tagged_at, force, cancel) {
             Ok(Some(result)) => {
                 // Stamp the stat this decision was made against, so a later run
                 // can spot an in-place edit. A file that vanished between the
@@ -452,10 +519,24 @@ impl TaggingEngine {
         &self,
         item: &WorkItem,
         tagged_at: &str,
+        force: bool,
         cancel: &AtomicBool,
     ) -> MlResult<Option<PhotoResult>> {
         let cancelled = || cancel.load(Ordering::Relaxed);
         let path = item.path.as_str();
+
+        // Same pack already stamped, file unchanged, not a forced re-tag.
+        if self.already_current(item, force) {
+            let tag_count = self
+                .sidecar_view(path)
+                .map(|view| view.tags_list.iter().filter(|t| is_content_tag(t)).count())
+                .unwrap_or(0);
+            return Ok(Some(PhotoResult {
+                tag_count,
+                written: false,
+                cache_hit: true,
+            }));
+        }
 
         // The streamed hash is a *probe key* only. It describes the bytes as
         // they were during the streaming read, and the file may be rewritten
@@ -466,34 +547,28 @@ impl TaggingEngine {
         };
 
         let model_key = self.pack.embedding_model_key();
-        let (embedding, cache_hit, hash) = match self.cache.embedding(&probe, &model_key)? {
-            // A hit means these exact bytes have been encoded before, and the
-            // pixels are never read, so there is nothing to disagree with.
-            Some(v) if v.len() == self.pack.manifest.model.embedding_dim => (v, true, probe),
-            _ => {
-                if cancelled() {
-                    return Ok(None);
+        let dim = self.pack.manifest.model.embedding_dim;
+        let (embedding, cache_hit, hash) =
+            if let Some(v) = self.sidecar_clip(path, dim) {
+                self.cache.put_embedding(&probe, &model_key, &v)?;
+                (v, true, probe)
+            } else {
+                match self.cache.embedding(&probe, &model_key)? {
+                    Some(v) if v.len() == dim => (v, true, probe),
+                    _ => {
+                        if cancelled() {
+                            return Ok(None);
+                        }
+                        let (tensor, hash) = self.decode_for_embed(path, &probe)?;
+                        if cancelled() {
+                            return Ok(None);
+                        }
+                        let v = self.encoder.embed(&tensor)?;
+                        self.cache.put_embedding(&hash, &model_key, &v)?;
+                        (v, false, hash)
+                    }
                 }
-                let bytes = self.vfs.read(path)?;
-                // Hash the buffer that is about to be decoded, not the one that
-                // was streamed. Storing this embedding under `probe` when the
-                // two differ would poison the cache permanently: the old
-                // content's key would forever return the new content's vector,
-                // and nothing invalidates an embedding row.
-                let hash = crate::hash::hash_bytes(&bytes);
-                let tensor = preprocess(path, &bytes, &self.preprocess)?;
-                // Drop the encoded bytes before inference: at four workers,
-                // holding a 30 MB JPEG across the encode call is 120 MB of
-                // avoidable resident memory.
-                drop(bytes);
-                if cancelled() {
-                    return Ok(None);
-                }
-                let v = self.encoder.embed(&tensor)?;
-                self.cache.put_embedding(&hash, &model_key, &v)?;
-                (v, false, hash)
-            }
-        };
+            };
 
         // Recorded after the fact, so the row names the bytes we actually
         // tagged. Zero rows affected means the row was reset from under us.
@@ -505,33 +580,16 @@ impl TaggingEngine {
             return Ok(None);
         }
 
-        let sidecar = gallery_meta::sidecar_path(path);
-        let has_sidecar = self.vfs.exists(&sidecar);
-        let owned = if has_sidecar {
-            self.owned_tags(&sidecar)
-        } else {
-            BTreeSet::new()
-        };
-        let tags = ZeroShotTagger::new(&self.pack).tags(&embedding, &owned);
-
-        // A photo the tagger has nothing to say about gets no sidecar. Writing
-        // a sentinel-only packet would be honest ("we looked, we found
-        // nothing") and would also drop a new file next to every untagged
-        // photo in the library — thousands of them, each one a cloud-sync
-        // event. When a sidecar already exists the write still happens, since
-        // an empty result may be a *retraction* of tags we wrote before.
-        if tags.is_empty() && !has_sidecar {
-            return Ok(Some(PhotoResult {
-                tag_count: 0,
-                written: false,
-                cache_hit,
-            }));
-        }
-
+        let tags = ZeroShotTagger::new(&self.pack).tags(&embedding, &BTreeSet::new());
         let request = TagWriteRequest::new(
             tags.clone(),
             self.pack.version().to_string(),
             tagged_at.to_string(),
+        )
+        .with_clip(
+            clip_embedding_b64(&embedding),
+            self.pack.version(),
+            tagged_at,
         );
         let outcome = write_tags(self.vfs.as_ref(), path, &request)?;
 
@@ -542,28 +600,57 @@ impl TaggingEngine {
         }))
     }
 
-    /// Tags this agent already claims in `sidecar`.
-    ///
-    /// A sidecar that is unreadable, unparseable, or written by a different
-    /// agent contributes nothing: hysteresis may only retain tags *we* put
-    /// there. Retaining somebody else's tag would be claiming it, and a later
-    /// run would then feel entitled to retract it.
-    ///
-    /// The pack version deliberately does *not* have to match. Hysteresis is
-    /// about not flapping a decision this agent already published; a pack
-    /// upgrade is exactly when scores shift by small amounts, which is exactly
-    /// when the band earns its keep.
-    fn owned_tags(&self, sidecar: &str) -> BTreeSet<String> {
-        let Ok(bytes) = self.vfs.read(sidecar) else {
-            return BTreeSet::new();
-        };
-        let Ok(view) = read_view(&bytes) else {
-            return BTreeSet::new();
-        };
-        if view.core.agent.as_deref() != Some(gallery_meta::CORE_AGENT) {
-            return BTreeSet::new();
+    fn sidecar_view(&self, path: &str) -> Option<gallery_meta::SidecarView> {
+        let bytes = self.vfs.read(&gallery_meta::sidecar_path(path)).ok()?;
+        gallery_meta::read_view(&bytes).ok()
+    }
+
+    /// Sidecar already carries this pack, file unchanged, not a forced re-tag.
+    /// Those photos are settled off the queue but are not the progress total.
+    fn already_current(&self, item: &WorkItem, force: bool) -> bool {
+        if force || item.state == WorkState::Stale {
+            return false;
         }
-        view.core.tags.into_iter().collect()
+        self.sidecar_view(&item.path).is_some_and(|view| {
+            view.photo_tools.tagger_version.as_deref() == Some(self.pack.version())
+        })
+    }
+
+    fn sidecar_clip(&self, path: &str, dim: usize) -> Option<Vec<f32>> {
+        let view = self.sidecar_view(path)?;
+        if view.photo_tools.clip_model.as_deref() != Some(self.pack.version()) {
+            return None;
+        }
+        clip_embedding_from_b64(view.photo_tools.clip_embedding.as_deref()?, dim)
+    }
+
+    /// Decode + preprocess one photo for embedding.
+    ///
+    /// HEIC on a host that installed a platform decoder skips the second full
+    /// file read (ImageIO opens the path itself) and the software HEVC
+    /// decode. A host failure is the photo's failure — software HEVC of a
+    /// 48 MP frame is the allocation a phone cannot absorb. JPEG/PNG stay
+    /// on the pinned `vfs.read` + `preprocess` path, hashed from the buffer
+    /// that is actually decoded so a rewrite between the probe hash and the
+    /// read cannot poison the cache.
+    fn decode_for_embed(&self, path: &str, probe: &[u8; 32]) -> MlResult<(crate::Tensor, [u8; 32])> {
+        if let Some(rgb) =
+            crate::preprocess::host_heic_decode(self.heic_decoder.as_deref(), path)?
+        {
+            // ImageIO already caps the long side; this is the backstop if a
+            // host decoder ignores its own thumbnail size.
+            let rgb = crate::preprocess::limit_long_side(
+                rgb,
+                crate::preprocess::ANALYSIS_MAX_LONG_SIDE,
+            );
+            let tensor = crate::preprocess::tensor_from_rgb(path, rgb, &self.preprocess)?;
+            return Ok((tensor, *probe));
+        }
+        let bytes = self.vfs.read(path)?;
+        let hash = crate::hash::hash_bytes(&bytes);
+        let tensor = preprocess(path, &bytes, &self.preprocess)?;
+        drop(bytes);
+        Ok((tensor, hash))
     }
 }
 
@@ -700,6 +787,85 @@ pub fn default_workers(requested: Option<usize>) -> usize {
     n.clamp(1, MAX_WORKERS)
 }
 
+/// photo-tools §1.2: `CLIPEmbedding` is standard-base64 of little-endian
+/// `f32` bytes. Hand-rolled so the crate does not pick up a codec just for
+/// one sidecar field — the alphabet and padding are the RFC 4648 ones
+/// `base64.b64encode` uses, which is what photo-tools writes and reads.
+fn clip_embedding_b64(embedding: &[f32]) -> String {
+    let mut bytes = Vec::with_capacity(embedding.len() * 4);
+    for value in embedding {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    encode_base64(&bytes)
+}
+
+fn clip_embedding_from_b64(b64: &str, dim: usize) -> Option<Vec<f32>> {
+    let bytes = decode_base64(b64)?;
+    if bytes.len() != dim * 4 {
+        return None;
+    }
+    Some(
+        bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect(),
+    )
+}
+
+fn decode_base64(input: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(input.len().div_ceil(4) * 3);
+    let mut buf = 0u32;
+    let mut bits = 0u32;
+    for &c in input.as_bytes() {
+        if c == b'=' {
+            break;
+        }
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'\n' | b'\r' | b' ' => continue,
+            _ => return None,
+        } as u32;
+        buf = (buf << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+            buf &= (1 << bits) - 1;
+        }
+    }
+    Some(out)
+}
+
+const BASE64_ALPHABET: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn encode_base64(input: &[u8]) -> String {
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let a = u32::from(chunk[0]);
+        let b = u32::from(chunk.get(1).copied().unwrap_or(0));
+        let c = u32::from(chunk.get(2).copied().unwrap_or(0));
+        let n = (a << 16) | (b << 8) | c;
+        out.push(BASE64_ALPHABET[((n >> 18) & 63) as usize] as char);
+        out.push(BASE64_ALPHABET[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            BASE64_ALPHABET[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            BASE64_ALPHABET[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
 /// `2026-08-03T10:00:00Z` from the system clock.
 ///
 /// Hand-rolled rather than pulling `chrono`/`time` in: this is the only date
@@ -780,5 +946,21 @@ mod tests {
         assert_eq!(default_workers(Some(1)), 1);
         assert_eq!(default_workers(Some(64)), MAX_WORKERS);
         assert!((1..=MAX_WORKERS).contains(&default_workers(None)));
+    }
+
+    #[test]
+    fn inference_sessions_do_not_multiply_the_weights() {
+        assert_eq!(INFERENCE_SESSIONS, 1);
+        assert!(INFERENCE_SESSIONS <= MAX_WORKERS);
+    }
+
+    #[test]
+    fn clip_embedding_b64_matches_the_photo_tools_fixture() {
+        // phototools.jpg.xmp: three little-endian f32s, 0.5 / 0.5 / 1.0.
+        assert_eq!(clip_embedding_b64(&[0.5, 0.5, 1.0]), "AAAAPwAAAD8AAIA/");
+        assert_eq!(
+            clip_embedding_from_b64("AAAAPwAAAD8AAIA/", 3).as_deref(),
+            Some(&[0.5, 0.5, 1.0][..])
+        );
     }
 }

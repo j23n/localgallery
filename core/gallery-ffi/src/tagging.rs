@@ -371,11 +371,20 @@ impl TaggingSession {
         cache_db_path: String,
         model_pack_dir: String,
     ) -> Result<Arc<TaggingSession>, TaggingError> {
-        let engine = TaggingEngine::open(&cache_db_path, &model_pack_dir, Arc::new(StdVfs))?;
-        Ok(Arc::new(TaggingSession {
-            engine: Arc::new(engine),
-            run: RunLock::new(),
-        }))
+        open_tagging_session(cache_db_path, model_pack_dir, None)
+    }
+
+    /// [`TaggingSession::new`] with a platform HEIC decoder (ImageIO on iOS).
+    ///
+    /// Tests keep using `new`; the app uses this so a 12 MP iPhone photo is a
+    /// hardware decode instead of several seconds of software HEVC.
+    #[uniffi::constructor]
+    pub fn with_heic_decoder(
+        cache_db_path: String,
+        model_pack_dir: String,
+        decoder: Arc<dyn crate::HeicDecoder>,
+    ) -> Result<Arc<TaggingSession>, TaggingError> {
+        open_tagging_session(cache_db_path, model_pack_dir, Some(decoder))
     }
 
     /// Add paths to the queue; returns how many rows were newly inserted.
@@ -466,6 +475,69 @@ impl TaggingSession {
         }
     }
 
+    /// Force-tag one photo. Re-opens its queue row and confines the run to
+    /// that path so a library with pending work is not swept along.
+    pub fn start_one(
+        &self,
+        progress: Arc<dyn TaggingProgressListener>,
+        path: String,
+        root_prefix: Option<String>,
+    ) -> Result<(), TaggingError> {
+        self.engine.reopen(&path)?;
+        let engine = Arc::clone(&self.engine);
+        let listener = Arc::clone(&progress);
+        let spawned = self.run.start("gallery-tagging", move |cancel, running| {
+            let reporter = Arc::clone(&listener);
+            let mut guard = FinishGuard::new(running, move |summary| {
+                reporter.on_finished(summary.unwrap_or(TaggingRunSummary {
+                    processed: 0,
+                    tagged: 0,
+                    sidecars_written: 0,
+                    cache_hits: 0,
+                    skipped: 0,
+                    failed: 0,
+                    cancelled: false,
+                    failure: Some(TaggingFailure::Inference),
+                }));
+            });
+            let adapter = ProgressAdapter {
+                inner: Arc::clone(&listener),
+            };
+            let opts = RunOptions {
+                tagged_at: Some(iso8601_utc_now()),
+                root_prefix,
+                force: true,
+                only_paths: Some(vec![path]),
+                ..RunOptions::default()
+            };
+            let outcome = engine.run_with_options(&adapter, &cancel, &opts);
+            guard.summary = Some(match outcome {
+                Ok(s) => TaggingRunSummary::from(s),
+                Err(e) => {
+                    let err = TaggingError::from(e);
+                    TaggingRunSummary {
+                        processed: 0,
+                        tagged: 0,
+                        sidecars_written: 0,
+                        cache_hits: 0,
+                        skipped: 0,
+                        failed: 0,
+                        cancelled: cancel.load(std::sync::atomic::Ordering::Acquire),
+                        failure: Some(TaggingFailure::from(&err)),
+                    }
+                }
+            });
+        });
+        match spawned {
+            Ok(()) => Ok(()),
+            Err(StartError::AlreadyRunning) => Err(TaggingError::AlreadyRunning),
+            Err(StartError::Spawn(detail)) => Err(TaggingError::Io {
+                path: String::new(),
+                detail: format!("could not spawn tagging thread: {detail}"),
+            }),
+        }
+    }
+
     /// Ask the in-flight run to stop. Returns immediately; the run ends at the
     /// next item boundary (or the next 256 KiB of a content hash) and reports
     /// through `on_finished` with `cancelled == true`.
@@ -513,11 +585,27 @@ impl Drop for TaggingSession {
     }
 }
 
+fn open_tagging_session(
+    cache_db_path: String,
+    model_pack_dir: String,
+    decoder: Option<Arc<dyn crate::HeicDecoder>>,
+) -> Result<Arc<TaggingSession>, TaggingError> {
+    let mut engine = TaggingEngine::open(&cache_db_path, &model_pack_dir, Arc::new(StdVfs))?;
+    if let Some(decoder) = decoder {
+        engine = engine.with_heic_decoder(Arc::new(crate::heic::HeicDecoderAdapter(decoder)));
+    }
+    Ok(Arc::new(TaggingSession {
+        engine: Arc::new(engine),
+        run: RunLock::new(),
+    }))
+}
+
 /// Verify and inspect a model pack directory without opening a session.
 ///
-/// This is what Settings calls after importing a pack: it runs the same
-/// SHA-256 verification [`TaggingSession::new`] does, so an invalid pack is
-/// rejected at import time rather than at the first "Tag Library Now".
+/// This is what the app calls to decide whether a directory is a usable pack
+/// without opening a session: it runs the same SHA-256 verification
+/// [`TaggingSession::new`] does, so an invalid pack is rejected at discovery
+/// time rather than at the first Scan Photos.
 #[uniffi::export]
 pub fn inspect_model_pack(model_pack_dir: String) -> Result<ModelPackInfo, TaggingError> {
     let pack = gallery_ml::ModelPack::load(&model_pack_dir)?;

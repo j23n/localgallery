@@ -183,6 +183,22 @@ final class PeopleStore {
         onWidgetAffectingChange?()
     }
 
+    /// A move changes a photo's stable id (it is derived from the path).
+    /// Cover photos would otherwise point at a now-missing id and fall
+    /// through to the automatic pick.
+    func remapFeaturedPhotoIDs(_ map: [UUID: UUID]) {
+        guard !map.isEmpty else { return }
+        var next = featuredPhotoByPerson
+        var changed = false
+        for (path, id) in featuredPhotoByPerson {
+            if let new = map[id] {
+                next[path] = new
+                changed = true
+            }
+        }
+        if changed { featuredPhotoByPerson = next }
+    }
+
     /// Carry every persisted decision about a person across a rename.
     ///
     /// All four of this type's persisted keys are tag paths, and the rescan

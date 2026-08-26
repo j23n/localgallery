@@ -36,7 +36,12 @@ final class TaggingService {
     struct Progress: Equatable, Sendable {
         var done: Int
         var total: Int
+        var startedAt: Date
         var fraction: Double { total > 0 ? Double(done) / Double(total) : 0 }
+        /// "X / Y" or "X / Y · ~M:SS" once throughput is known.
+        var countText: String {
+            ProgressETA.countText(processed: done, total: total, startedAt: startedAt)
+        }
     }
 
     /// What a finished run did.
@@ -137,14 +142,19 @@ final class TaggingService {
         get { refresh.onRefresh }
         set { refresh.onRefresh = newValue }
     }
+    /// Paths from one `onPhotosTagged` batch. `LibraryAnalysis` records
+    /// them into the live Scan Activity journal; the rescan does not need
+    /// them (it walks the tree).
+    @ObservationIgnored var onPhotosRecorded: (@MainActor ([String]) -> Void)?
     /// Called before an import replaces the installed pack. `GalleryStore`
     /// wires this to `FaceService`, which holds the *same* pack's face models
     /// open in its own session and would otherwise keep scanning under the
     /// version the user has just replaced.
     @ObservationIgnored var onPackWillChange: (@MainActor () async -> Void)?
 
-    /// Open session. Held across runs: it owns the ONNX sessions and the
-    /// SQLite connection, both of which are expensive to build.
+    /// Open session. Dropped at the end of each run: MobileCLIP is 143 MB
+    /// per ONNX session, and keeping it alive into the face phase is what
+    /// put two model pools on the heap at once.
     @ObservationIgnored private var session: TaggingSession?
     /// Which pack `session` was opened against, so a pack change reopens it
     /// instead of quietly tagging under the old one.
@@ -187,7 +197,6 @@ final class TaggingService {
     /// changed since the last successful verification is taken at its word
     /// rather than re-hashed. Pass `force` to re-verify regardless.
     func refreshAvailability(force: Bool = false) async {
-        defer { hasCheckedForPack = true }
         let bundled = PackResolver.candidates(in: bundledPackDirectory)
         hasBundledPack = !bundled.isEmpty
         guard let resolved = PackResolver.resolve(
@@ -196,20 +205,33 @@ final class TaggingService {
         ) else {
             pack = nil
             verifiedPack = nil
+            hasCheckedForPack = true
             return
         }
         let dir = resolved.directory
         let fingerprint = Self.fingerprint(of: dir)
         if !force, pack != nil, let verifiedPack, let fingerprint, verifiedPack == fingerprint {
+            hasCheckedForPack = true
             return
         }
         do {
             pack = try await Self.inspect(resolved)
             verifiedPack = fingerprint
+            hasCheckedForPack = true
             Log.ml.info("Model pack \(self.pack?.version ?? "?") ready (\(self.pack?.labelCount ?? 0) labels, \(resolved.source.label.lowercased()))")
+        } catch is CancellationError {
+            // Collections `.task` (and Settings') cancel when the view leaves
+            // the hierarchy — tab switch, a parent identity flicker, the
+            // library flipping out of `.ready`. Inspect is a detached hash of
+            // the ONNX; `await` on that from a cancelled task throws here
+            // *before* assigning `pack`. Marking "checked" would make the
+            // next caller think we looked and found nothing, so People stays
+            // empty until Settings runs a scan.
+            return
         } catch {
             pack = nil
             verifiedPack = nil
+            hasCheckedForPack = true
             lastError = TaggingServiceError(error)
             Log.ml.error("Model pack at \(Log.r.path(dir)) rejected: \(Log.r.error(error))")
         }
@@ -357,7 +379,7 @@ final class TaggingService {
 
         isRunning = true
         cancelRequested = false
-        progress = Progress(done: 0, total: paths.count)
+        progress = Progress(done: 0, total: 0, startedAt: Date())
         lastError = nil
 
         let session: TaggingSession
@@ -375,10 +397,11 @@ final class TaggingService {
             let inserted = try await Self.enqueue(paths, into: session)
             Log.ml.info("Enqueued \(paths.count) photos (\(inserted) new)")
         } catch {
-            isRunning = false
             progress = nil
             lastError = TaggingServiceError(error)
             Log.ml.error("Enqueue failed: \(Log.r.error(error))")
+            await releaseSession()
+            isRunning = false
             return
         }
 
@@ -389,22 +412,23 @@ final class TaggingService {
         // by not starting.
         if cancelRequested {
             cancelRequested = false
-            isRunning = false
             progress = nil
             lastSummary = Summary(cancelled: true)
             Log.ml.info("Tagging cancelled before the run started")
+            await releaseSession()
+            isRunning = false
             return
         }
 
         let bridge = ProgressBridge(
             progress: { [weak self] done, total in
                 Task { @MainActor [weak self] in
-                    self?.progress = Progress(done: done, total: total)
+                    self?.publishProgress(done: done, total: total)
                 }
             },
-            tagged: { [weak self] count in
+            tagged: { [weak self] paths in
                 Task { @MainActor [weak self] in
-                    self?.noteSidecarsWritten(count)
+                    self?.noteSidecarsWritten(paths)
                 }
             },
             finished: { [weak self] summary in
@@ -417,10 +441,74 @@ final class TaggingService {
         do {
             try session.start(progress: bridge, rootPrefix: rootPrefix)
         } catch {
-            isRunning = false
             progress = nil
             lastError = TaggingServiceError(error)
             Log.ml.error("Tagging run failed to start: \(Log.r.error(error))")
+            await releaseSession()
+            isRunning = false
+        }
+    }
+
+    /// Force-tag one photo without touching the rest of the queue.
+    func startOne(_ photo: PhotoFile) async {
+        guard !isRunning else { return }
+        guard Self.isEligible(photo) else { return }
+        guard let pack else {
+            lastError = .noModelPack
+            return
+        }
+        let path = photo.url.standardizedFileURL.path
+        let rootPrefix = libraryRoot?()?.standardizedFileURL.path
+
+        isRunning = true
+        cancelRequested = false
+        progress = Progress(done: 0, total: 1, startedAt: Date())
+        lastError = nil
+
+        let session: TaggingSession
+        do {
+            session = try await openSession(packDirectory: pack.directory)
+        } catch {
+            isRunning = false
+            progress = nil
+            lastError = TaggingServiceError(error)
+            Log.ml.error("Tagging session failed to open: \(Log.r.error(error))")
+            return
+        }
+        if cancelRequested {
+            cancelRequested = false
+            progress = nil
+            lastSummary = Summary(cancelled: true)
+            await releaseSession()
+            isRunning = false
+            return
+        }
+
+        let bridge = ProgressBridge(
+            progress: { [weak self] done, total in
+                Task { @MainActor [weak self] in
+                    self?.publishProgress(done: done, total: total)
+                }
+            },
+            tagged: { [weak self] paths in
+                Task { @MainActor [weak self] in
+                    self?.noteSidecarsWritten(paths)
+                }
+            },
+            finished: { [weak self] summary in
+                Task { @MainActor [weak self] in
+                    await self?.finish(summary)
+                }
+            }
+        )
+        do {
+            try session.startOne(progress: bridge, path: path, rootPrefix: rootPrefix)
+        } catch {
+            progress = nil
+            lastError = TaggingServiceError(error)
+            Log.ml.error("Tagging one-photo run failed to start: \(Log.r.error(error))")
+            await releaseSession()
+            isRunning = false
         }
     }
 
@@ -455,6 +543,7 @@ final class TaggingService {
             lastSummary = nil
             lastError = nil
             Log.ml.info("Tagging queue reset")
+            await releaseSession()
         } catch {
             lastError = TaggingServiceError(error)
             Log.ml.error("Tagging queue reset failed: \(Log.r.error(error))")
@@ -472,8 +561,20 @@ final class TaggingService {
         refresh.note()
     }
 
+    /// One `onPhotosTagged` batch: refresh plus the activity journal.
+    func noteSidecarsWritten(_ paths: [String]) {
+        noteSidecarsWritten(paths.count)
+        onPhotosRecorded?(paths)
+    }
+
+    /// Keep `startedAt` across ticks so the ETA is elapsed-since-start, not
+    /// elapsed-since-last-callback.
+    private func publishProgress(done: Int, total: Int) {
+        let startedAt = progress?.startedAt ?? Date()
+        progress = Progress(done: done, total: total, startedAt: startedAt)
+    }
+
     private func finish(_ summary: Summary) async {
-        isRunning = false
         cancelRequested = false
         progress = nil
         lastSummary = summary
@@ -489,6 +590,11 @@ final class TaggingService {
         // an earlier batch's rescan may have been coalesced away.
         scheduleRefresh()
         await refreshTask?.value
+        // Stay `isRunning` until the ONNX pool is gone. LibraryAnalysis
+        // starts faces the moment this flips, and two session pools jetsam
+        // the phone.
+        await releaseSession()
+        isRunning = false
     }
 
     /// Refresh now, regardless of the coalescing interval. Internal so tests
@@ -542,9 +648,10 @@ final class TaggingService {
             try await Task.detached(priority: .userInitiated) {
                 () -> Result<TaggingSession, TaggingServiceError> in
                 do {
-                    return .success(try TaggingSession(
+                    return .success(try TaggingSession.withHeicDecoder(
                         cacheDbPath: cacheURL.path,
-                        modelPackDir: packDirectory.path
+                        modelPackDir: packDirectory.path,
+                        decoder: ImageIOHeicDecoder.shared
                     ))
                 } catch {
                     return .failure(TaggingServiceError(error))
@@ -580,9 +687,6 @@ final class TaggingService {
         }.value
         self.session = nil
         self.sessionPackDirectory = nil
-        isRunning = false
-        cancelRequested = false
-        progress = nil
     }
 
     private nonisolated static func enqueue(
@@ -607,12 +711,12 @@ final class TaggingService {
 /// immutable `@Sendable` closures, so there is nothing to race.
 private final class ProgressBridge: TaggingProgressListener, Sendable {
     private let progressHandler: @Sendable (Int, Int) -> Void
-    private let taggedHandler: @Sendable (Int) -> Void
+    private let taggedHandler: @Sendable ([String]) -> Void
     private let finishedHandler: @Sendable (TaggingService.Summary) -> Void
 
     init(
         progress: @escaping @Sendable (Int, Int) -> Void,
-        tagged: @escaping @Sendable (Int) -> Void,
+        tagged: @escaping @Sendable ([String]) -> Void,
         finished: @escaping @Sendable (TaggingService.Summary) -> Void
     ) {
         self.progressHandler = progress
@@ -625,9 +729,7 @@ private final class ProgressBridge: TaggingProgressListener, Sendable {
     }
 
     func onPhotosTagged(paths: [String]) {
-        // Only the count crosses: the app re-reads the sidecars through the
-        // scanner anyway, so the paths would be dead weight on the main actor.
-        taggedHandler(paths.count)
+        taggedHandler(paths)
     }
 
     func onFinished(summary: TaggingRunSummary) {

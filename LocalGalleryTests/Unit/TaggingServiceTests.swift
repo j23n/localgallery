@@ -354,4 +354,25 @@ final class TaggingServiceTests: XCTestCase {
             )
         )
     }
+
+    /// Cancelling mid-verify used to set `hasCheckedForPack` with `pack` still
+    /// nil, so the next faces refresh treated that as "no pack" and hid People.
+    func testCancellingAvailabilityCheckDoesNotMarkThePackAsMissing() async throws {
+        let temp = makeTemp()
+        try installTestPack(in: temp)
+        let service = makeService(temp)
+
+        let task = Task { await service.refreshAvailability() }
+        task.cancel()
+        await task.value
+
+        XCTAssertFalse(
+            service.hasCheckedForPack && service.pack == nil,
+            "a cancelled verify must not look like 'we looked and found nothing'"
+        )
+
+        await service.refreshAvailability()
+        XCTAssertTrue(service.isAvailable)
+        XCTAssertTrue(service.hasCheckedForPack)
+    }
 }

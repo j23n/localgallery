@@ -90,6 +90,7 @@ fn visit(el: &Element, outer: &NsScope, view: &mut SidecarView) {
                 .people_hierarchical
                 .extend(collect_list(el, &scope)),
             PROP_CORE_REGIONS => view.core.regions.extend(collect_list(el, &scope)),
+            PROP_CORE_FACE_DECISIONS => view.core.decisions.extend(collect_list(el, &scope)),
             _ => absorb_photo_tools_scalar(&local, &el.text(), view),
         }
         return;
@@ -123,6 +124,7 @@ fn list_field_for<'v>(
         (NS_PHOTO_TOOLS, PROP_CORE_PEOPLE_SUBJECTS) => Some(&mut view.core.people_subjects),
         (NS_PHOTO_TOOLS, PROP_CORE_PEOPLE_HIERARCHICAL) => Some(&mut view.core.people_hierarchical),
         (NS_PHOTO_TOOLS, PROP_CORE_REGIONS) => Some(&mut view.core.regions),
+        (NS_PHOTO_TOOLS, PROP_CORE_FACE_DECISIONS) => Some(&mut view.core.decisions),
         _ => None,
     }
 }
@@ -138,10 +140,14 @@ fn absorb_photo_tools_scalar(local: &str, value: &str, view: &mut SidecarView) {
         PROP_TAGGED_AT => view.photo_tools.tagged_at = owned(),
         PROP_COUNTRY_CODE => view.photo_tools.country_code = Some(value.to_uppercase()),
         PROP_OCR_RAN => view.photo_tools.ocr_ran = owned(),
+        PROP_CLIP_EMBEDDING => view.photo_tools.clip_embedding = owned(),
+        PROP_CLIP_MODEL => view.photo_tools.clip_model = owned(),
+        PROP_CLIP_TIMESTAMP => view.photo_tools.clip_timestamp = owned(),
         PROP_CORE_AGENT => view.core.agent = owned(),
         PROP_CORE_MODEL_PACK => view.core.model_pack = owned(),
         PROP_CORE_TAGGED_AT => view.core.tagged_at = owned(),
         PROP_CORE_FACE_PACK => view.core.face_pack = owned(),
+        PROP_CORE_FACE_TAGGED_AT => view.core.face_tagged_at = owned(),
         _ => {}
     }
 }

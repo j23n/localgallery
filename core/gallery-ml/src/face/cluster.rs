@@ -119,9 +119,10 @@ pub enum Assignment {
 /// if the unlabeled one is a hair closer: the whole purpose of naming a cluster
 /// is that subsequent faces of that person land in it.
 ///
-/// [`ClusterState::Ignored`] clusters are candidates too. Not joining them
-/// would mean every dismissed non-face — a pattern on a shirt, a face on a
-/// poster — coming back as a brand-new cluster on the next run, forever.
+/// [`ClusterState::Ignored`] and [`ClusterState::Rejected`] clusters are
+/// candidates too. Not joining them would mean every dismissed face — a
+/// passer-by, a pattern on a shirt — coming back as a brand-new cluster on
+/// the next run, forever.
 pub fn assign(embedding: &[f32], clusters: &[ClusterRow], cfg: &ClusteringConfig) -> Assignment {
     let mut best: Option<(i64, f32)> = None;
     let mut best_named: Option<(i64, f32)> = None;
@@ -247,12 +248,15 @@ pub fn chinese_whispers(faces: &[FaceVec], cfg: &ClusteringConfig) -> Vec<Vec<([
 /// Cluster pairs whose centroids are similar enough to be worth asking about.
 ///
 /// Ordered strongest first, with `(a, b)` normalized so `a < b`. Ignored
-/// clusters are excluded: proposing to merge two things the user has already
-/// dismissed is noise.
+/// and rejected clusters are excluded: proposing to merge two things the
+/// user has already dismissed is noise.
 pub fn merge_proposals(clusters: &[ClusterRow], cfg: &ClusteringConfig) -> Vec<(i64, i64, f32)> {
     let live: Vec<&ClusterRow> = clusters
         .iter()
-        .filter(|c| c.state != ClusterState::Ignored && !c.centroid.is_empty())
+        .filter(|c| {
+            !matches!(c.state, ClusterState::Ignored | ClusterState::Rejected)
+                && !c.centroid.is_empty()
+        })
         .collect();
     let mut out = Vec::new();
     for (i, a) in live.iter().enumerate() {

@@ -12,6 +12,10 @@ settings:
     IPHONEOS_DEPLOYMENT_TARGET: "18.0"
     SWIFT_STRICT_CONCURRENCY: complete
     DEVELOPMENT_TEAM: HN22UT76EY
+    # cargo (pre-build) needs ~/.cargo, rustup, core/target, and the ORT
+    # cache. git rev-list for the build number needs .git/objects, not just
+    # HEAD. Xcode has no per-script sandbox exception.
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
     # GalleryCore.xcframework carries arm64 device + arm64 simulator slices
     # (no x86_64 sim). Debug builds already use the active arch, but Release
     # builds both and would fail to link an Intel sim. Remove this once
@@ -51,8 +55,13 @@ targets:
         excludes:
           - Info.plist
           - LocalGallery.entitlements
-      # UniFFI bindings for the Rust core. Generated, git-ignored, and
-      # produced by `./scripts/build_core.sh` — run it before `xcodegen`.
+          - GalleryCore-Bridging-Header.h
+          # Bindings live in build/core/Generated. A stray copy here is how
+          # Swift checksums can disagree with the xcframework this build
+          # just linked (UniFFI fatalError at launch).
+          - GalleryCore.swift
+      # Written by the Build Rust Core pre-build phase from the dylib that
+      # same phase just compiled. Compile Sources waits on this file.
       - path: build/core/Generated
       # The on-device model pack (~157 MB), staged by
       # `./scripts/prepare_pack.sh` — run it before `xcodegen` too. A folder
@@ -108,6 +117,9 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.j23n.localgallery.app
         MARKETING_VERSION: "1.0.0"
+        # Fallback only. The post-build script overwrites the *built*
+        # CFBundleVersion with `git rev-list --count HEAD` (same as
+        # j23n/localcontacts). Source Info.plists stay on this token.
         CURRENT_PROJECT_VERSION: "1"
         CODE_SIGN_ENTITLEMENTS: LocalGallery/LocalGallery.entitlements
         # The Rust core links ONNX Runtime (via gallery-ml → `ort`).
@@ -117,26 +129,31 @@ targets:
         # to state itself. ORT is C++ (`-lc++`) and its Apple build references
         # CoreML symbols even with the CPU execution provider.
         OTHER_LDFLAGS: -lc++ -framework CoreML
+        # UniFFI C decls. Same header bindgen just wrote — not the
+        # xcframework clang module, which Xcode caches across core rebuilds
+        # and then hides new symbols (HeicDecoder FFI "not in scope").
+        SWIFT_OBJC_BRIDGING_HEADER: LocalGallery/GalleryCore-Bridging-Header.h
+    preBuildScripts:
+      - name: Build Rust Core
+        basedOnDependencyAnalysis: false
+        showEnvVars: false
+        shell: /bin/bash
+        # So Compile Sources waits for bindgen instead of type-checking
+        # ImageIOHeicDecoder.swift against a stale GalleryCore.swift.
+        outputFiles:
+          - $(SRCROOT)/build/core/Generated/GalleryCore.swift
+          - $(SRCROOT)/build/core/headers/GalleryCoreFFI.h
+        script: |
+          set -euo pipefail
+          exec /bin/bash "$SRCROOT/scripts/build_core.sh"
     postBuildScripts:
       - name: Set Build Number from Git
         basedOnDependencyAnalysis: false
-        inputFiles:
-          - $(SRCROOT)/.git/HEAD
-        outputFiles:
-          - $(DERIVED_FILE_DIR)/build-number.stamp
+        showEnvVars: false
+        shell: /bin/bash
         script: |
           set -euo pipefail
-          export PATH="/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"
-          BUILD=$(/usr/bin/git -C "$SRCROOT" rev-list --count HEAD)
-          if [ -z "$BUILD" ]; then
-            echo "error: git rev-list --count HEAD returned empty" >&2
-            exit 1
-          fi
-          PLIST="${TARGET_BUILD_DIR}/${INFOPLIST_PATH}"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$PLIST"
-          mkdir -p "$DERIVED_FILE_DIR"
-          echo "$BUILD" > "$DERIVED_FILE_DIR/build-number.stamp"
-          echo "note: set CFBundleVersion=$BUILD in $PLIST"
+          exec /bin/bash "$SRCROOT/scripts/set_build_number.sh"
     dependencies:
       - target: LocalGalleryWidgets
       # Static library — linked, never embedded. Device + simulator arm64 slices.
@@ -175,23 +192,11 @@ targets:
     postBuildScripts:
       - name: Set Build Number from Git
         basedOnDependencyAnalysis: false
-        inputFiles:
-          - $(SRCROOT)/.git/HEAD
-        outputFiles:
-          - $(DERIVED_FILE_DIR)/build-number.stamp
+        showEnvVars: false
+        shell: /bin/bash
         script: |
           set -euo pipefail
-          export PATH="/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"
-          BUILD=$(/usr/bin/git -C "$SRCROOT" rev-list --count HEAD)
-          if [ -z "$BUILD" ]; then
-            echo "error: git rev-list --count HEAD returned empty" >&2
-            exit 1
-          fi
-          PLIST="${TARGET_BUILD_DIR}/${INFOPLIST_PATH}"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$PLIST"
-          mkdir -p "$DERIVED_FILE_DIR"
-          echo "$BUILD" > "$DERIVED_FILE_DIR/build-number.stamp"
-          echo "note: set CFBundleVersion=$BUILD in $PLIST"
+          exec /bin/bash "$SRCROOT/scripts/set_build_number.sh"
 
   # Temporary headless profiling driver — remove after profiling.
   LocalGalleryUITests:

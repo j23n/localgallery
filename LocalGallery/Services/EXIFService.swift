@@ -57,11 +57,20 @@ enum EXIFService {
                 guard let value = CGImageMetadataTagCopyValue(tag) as? String,
                       !value.isEmpty else { continue }
                 switch name {
-                case "TaggerVersion": meta.taggerVersion = meta.taggerVersion ?? value
-                case "TaggedAt":      meta.taggedAt = meta.taggedAt ?? value
-                case "CountryCode":   meta.countryCode = meta.countryCode ?? value.uppercased()
+                case "TaggerVersion":
+                    meta.taggerVersion = value
+                case "CoreModelPack":
+                    meta.taggerVersion = meta.taggerVersion ?? value
+                case "TaggedAt":
+                    meta.taggedAt = value
+                case "CoreTaggedAt":
+                    meta.taggedAt = meta.taggedAt ?? value
                 case "CLIPModel":     meta.clipModel = meta.clipModel ?? value
                 case "CLIPTimestamp": meta.clipTimestamp = meta.clipTimestamp ?? value
+                case "CoreFacePack":
+                    meta.facePack = meta.facePack ?? value
+                case "CoreFaceTaggedAt":
+                    meta.faceTaggedAt = meta.faceTaggedAt ?? value
                 default: break
                 }
             }
@@ -82,11 +91,16 @@ enum EXIFService {
                 }
                 return nil
             }
-            meta.taggerVersion = meta.taggerVersion ?? scalar("TaggerVersion")
-            meta.taggedAt = meta.taggedAt ?? scalar("TaggedAt")
-            if meta.countryCode == nil, let cc = scalar("CountryCode") { meta.countryCode = cc.uppercased() }
+            meta.taggerVersion = meta.taggerVersion
+                ?? scalar("TaggerVersion")
+                ?? scalar("CoreModelPack")
+            meta.taggedAt = meta.taggedAt
+                ?? scalar("TaggedAt")
+                ?? scalar("CoreTaggedAt")
             meta.clipModel = meta.clipModel ?? scalar("CLIPModel")
             meta.clipTimestamp = meta.clipTimestamp ?? scalar("CLIPTimestamp")
+            meta.facePack = meta.facePack ?? scalar("CoreFacePack")
+            meta.faceTaggedAt = meta.faceTaggedAt ?? scalar("CoreFaceTaggedAt")
         }
 
         return meta

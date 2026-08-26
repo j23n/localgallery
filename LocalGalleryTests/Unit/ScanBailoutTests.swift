@@ -52,6 +52,7 @@ final class ScanBailoutTests: XCTestCase {
                 mlCacheDatabaseURL: temp.appending("gallery-cache.sqlite"),
                 modelPacksDirectoryURL: temp.appending("ModelPacks", isDirectory: true),
                 bundledModelPackURL: nil,
+                geocodeCacheURL: temp.appending("geocode-cache.json"),
                 bookmarkKey: "rootFolderBookmark"
             ),
             defaults: defaults,

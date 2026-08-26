@@ -25,6 +25,9 @@ private let decodeLimiter = AsyncSemaphore(limit: 4)
 final class ThumbnailService {
     private let thumbnailCache = NSCache<NSURL, UIImage>()
     private let fullImageCache = NSCache<NSURL, UIImage>()
+    /// Cropped face cells. Keyed by path + region + cell size, not by photo —
+    /// two faces in one group shot must not share a bitmap.
+    private let faceCropCache = NSCache<NSString, UIImage>()
 
     private let thumbnailDiskCacheDir: URL
 
@@ -46,6 +49,7 @@ final class ThumbnailService {
         try? FileManager.default.createDirectory(at: thumbnailDir, withIntermediateDirectories: true)
         thumbnailCache.totalCostLimit = 100 * 1024 * 1024
         fullImageCache.totalCostLimit = 200 * 1024 * 1024
+        faceCropCache.totalCostLimit = 40 * 1024 * 1024
     }
 
     /// Sync hit on the in-memory cache. Returns nil on miss without touching
@@ -312,6 +316,29 @@ final class ThumbnailService {
         return UIImage(cgImage: cgImage)
     }
 
+    /// ImageIO thumbnail at `maxPixelSize`, no disk write. Used for face
+    /// crops so the grid JPEG cache stays at cell size.
+    private nonisolated static func decodeImagePixels(
+        url: URL, maxPixelSize: CGFloat
+    ) async throws -> UIImage? {
+        let options: [CFString: Any] = [kCGImageSourceShouldCache: false]
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, options as CFDictionary) else {
+            return nil
+        }
+        try Task.checkCancellation()
+        let thumbOptions: [CFString: Any] = [
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+        ]
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbOptions as CFDictionary) else {
+            return nil
+        }
+        try Task.checkCancellation()
+        return UIImage(cgImage: cgImage)
+    }
+
     /// JPEG-encode a CGImage directly via `CGImageDestination`. The previous
     /// implementation routed through `UIGraphicsImageRenderer` to flatten any
     /// alpha channel, but `UIGraphicsImageRendererFormat()`'s default init
@@ -340,9 +367,47 @@ final class ThumbnailService {
 
     func clearThumbnailCache() {
         thumbnailCache.removeAllObjects()
+        fullImageCache.removeAllObjects()
+        faceCropCache.removeAllObjects()
         try? FileManager.default.removeItem(at: thumbnailDiskCacheDir)
         try? FileManager.default.createDirectory(at: thumbnailDiskCacheDir, withIntermediateDirectories: true)
         Log.thumb.info("Thumbnail cache cleared")
+    }
+
+    /// A face-sized crop for a review cell. Decodes through the same limiter
+    /// as grid thumbnails, crops, then drops the source so a 300-face grid
+    /// never holds 300 viewer-sized bitmaps.
+    func faceCrop(for url: URL, region: FaceRegion, cellSize: CGFloat) async -> UIImage? {
+        let key = Self.faceCropKey(url: url, region: region, cellSize: cellSize)
+        if let cached = faceCropCache.object(forKey: key) {
+            return cached
+        }
+        let maxPixelSize = PersonThumbnailView.sourcePixelSize(
+            cellSize: cellSize,
+            region: region,
+            scale: UIScreen.main.scale
+        )
+        do {
+            await decodeLimiter.acquire()
+            try Task.checkCancellation()
+            let source = try await Self.decodeImagePixels(url: url, maxPixelSize: maxPixelSize)
+            await decodeLimiter.release()
+            guard let source else { return nil }
+            let cropped = PersonThumbnailView.crop(source, to: region)
+            let cost = cropped.cgImage.map { $0.bytesPerRow * $0.height } ?? 0
+            faceCropCache.setObject(cropped, forKey: key, cost: cost)
+            return cropped
+        } catch is CancellationError {
+            await decodeLimiter.release()
+            return nil
+        } catch {
+            await decodeLimiter.release()
+            return nil
+        }
+    }
+
+    private static func faceCropKey(url: URL, region: FaceRegion, cellSize: CGFloat) -> NSString {
+        "\(url.path)#\(region.centerX),\(region.centerY),\(region.width),\(region.height)#\(Int(cellSize.rounded()))" as NSString
     }
 
     // MARK: - Full Resolution
@@ -376,7 +441,8 @@ final class ThumbnailService {
             kCGImageSourceThumbnailMaxPixelSize: 2000,
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceShouldCacheImmediately: true
+            kCGImageSourceShouldCache: false,
+            kCGImageSourceShouldCacheImmediately: false,
         ]
         guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbOptions as CFDictionary) else {
             return nil

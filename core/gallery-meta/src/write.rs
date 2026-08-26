@@ -1,14 +1,17 @@
-//! The sidecar write path: read-modify-write with surgical retraction.
+//! The sidecar write path: read-modify-write with prefix-replace for
+//! Objects/Scenes.
 //!
 //! # What the core owns
 //!
-//! Exactly three keyword fields (schema §1.1) and six sentinel fields:
+//! Exactly three keyword fields (schema §1.1), the CLIP cache fields
+//! (schema §1.2), and six sentinel fields:
 //!
 //! | Field | Content |
 //! |---|---|
 //! | `dc:subject` | leaf names of the tags we added |
 //! | `digiKam:TagsList` | full `/`-separated paths |
 //! | `lr:hierarchicalSubject` | full `\|`-separated paths |
+//! | `photo-tools:CLIPEmbedding` / `CLIPModel` / `CLIPTimestamp` | cached encoder output |
 //! | `photo-tools:Core*` | the sentinel (see [`crate::model::CoreSentinel`]) |
 //!
 //! `IPTC:Keywords` is *not* written: an XMP sidecar has no IIM section, so
@@ -16,30 +19,21 @@
 //! `mwg-rs:RegionInfo`, the OCR fields and the IPTC location fields are all
 //! read-only here — Phase 1 has no business in any of them.
 //!
-//! `photo-tools:TaggerVersion` is deliberately never written. It is
-//! photo-tools' "already tagged" sentinel (§1.6); stamping it would make
-//! photo-tools skip files it has never seen.
+//! `photo-tools:TaggerVersion` is the shared skip key (pack version).
+//! `CLIPEmbedding` / `CLIPModel` / `CLIPTimestamp` are written when the
+//! request carries a vector; a reader treats a mismatched `CLIPModel` as
+//! a miss.
 //!
 //! # Retraction
 //!
-//! photo-tools retracts its own tags by *root prefix* (`Objects/`, `Scenes/`,
-//! …). The core cannot: it writes those same roots, so prefix-based retraction
-//! would let each tool delete the other's work. Instead the sentinel records
-//! the exact list of tags — and, separately, the exact `dc:subject` leaves and
-//! `lr:hierarchicalSubject` entries — that this agent added. A tag that was
-//! already in the file when we arrived is never claimed, and therefore never
-//! retracted.
+//! Objects/ and Scenes/ are a **replace set**. Whatever those roots already
+//! hold — this agent, photo-tools, an older 2-segment path — is removed and
+//! the request's list is written. `photo-tools:TaggerVersion` is the skip
+//! key: a sidecar stamped with the running pack is left alone. People/,
+//! Places/, Landmarks/ and bare human keywords are not in the replace set.
 //!
-//! All three lists are needed because none of the three fields is derivable
-//! from another: `dc:subject` is lossy (many paths, one leaf), and Lightroom
-//! writes `lr:hierarchicalSubject` with no `digiKam:TagsList` beside it.
-//!
-//! Sidecars written before `CoreHierarchical` existed carry no such list. Their
-//! `lr:hierarchicalSubject` entries are therefore treated as somebody else's
-//! and are never retracted — a leaked entry, not a deleted one. That is the
-//! deliberate direction: the two states ("core wrote this lr entry" and
-//! "Lightroom wrote it before we arrived") are indistinguishable after the
-//! fact, and only one of the two mistakes destroys user data.
+//! `dc:subject` leaves of a removed path come out only when no surviving
+//! tag still needs them. `lr:hierarchicalSubject` follows the same paths.
 
 use std::collections::BTreeSet;
 
@@ -51,7 +45,7 @@ use crate::model::SidecarView;
 use crate::read::view_of;
 use crate::schema::*;
 use crate::sidecar::{alt_sidecar_path, sidecar_path};
-use crate::tags::{leaf_of, nfc, nfc_lower, normalize_tag_list, to_lr_path};
+use crate::tags::{is_content_tag, leaf_of, nfc, nfc_lower, normalize_tag_list, to_lr_path};
 use crate::xml::{parse, serialize, Document};
 
 /// What to write into a sidecar.
@@ -70,6 +64,15 @@ pub struct TagWriteRequest {
     /// Supplied by the caller rather than read from a clock so the crate stays
     /// pure and the output stays byte-reproducible in tests.
     pub tagged_at: String,
+    /// Base64 of the little-endian `f32` CLIP vector, when this write
+    /// carries an embedding. `None` leaves any existing CLIP fields alone —
+    /// they may belong to photo-tools.
+    pub clip_embedding: Option<String>,
+    /// Encoder id for [`Self::clip_embedding`] (pack version).
+    pub clip_model: Option<String>,
+    /// When the embedding was produced. Same stamp as [`Self::tagged_at`]
+    /// on a tagging run.
+    pub clip_timestamp: Option<String>,
 }
 
 impl TagWriteRequest {
@@ -84,12 +87,29 @@ impl TagWriteRequest {
             agent: CORE_AGENT.to_string(),
             model_pack: model_pack.into(),
             tagged_at: tagged_at.into(),
+            clip_embedding: None,
+            clip_model: None,
+            clip_timestamp: None,
         }
     }
 
     /// Override the agent name (Phase 2 writes faces under its own agent).
     pub fn with_agent(mut self, agent: impl Into<String>) -> Self {
         self.agent = agent.into();
+        self
+    }
+
+    /// Attach a CLIP embedding. All three fields are written together so a
+    /// reader never sees a vector whose model or time is missing.
+    pub fn with_clip(
+        mut self,
+        embedding_b64: impl Into<String>,
+        model: impl Into<String>,
+        timestamp: impl Into<String>,
+    ) -> Self {
+        self.clip_embedding = Some(embedding_b64.into());
+        self.clip_model = Some(model.into());
+        self.clip_timestamp = Some(timestamp.into());
         self
     }
 }
@@ -264,54 +284,58 @@ struct Plan {
     model_pack: String,
     tagged_at: String,
     sentinel_is_current: bool,
+    clip_embedding: Option<String>,
+    clip_model: Option<String>,
+    clip_timestamp: Option<String>,
+    clip_is_current: bool,
 }
 
-impl Plan {
+    impl Plan {
     fn build(view: &SidecarView, requested: &[String], request: &TagWriteRequest) -> Plan {
-        // Every comparison below is on NFC forms, and `dc:subject` leaves
-        // additionally on lowercase. `requested` is already NFC (it came
-        // through `normalize_tag_list`); the file's entries may not be. See
-        // `tags::nfc` for the full policy.
-        let requested_set: BTreeSet<String> = requested.iter().map(|t| nfc(t)).collect();
-        let prev_tags: Vec<String> = view.core.tags.iter().map(|t| nfc(t)).collect();
-        let existing_tags: BTreeSet<String> = view.tags_list.iter().map(|t| nfc(t)).collect();
+        // Only Objects/Scenes are a replace set. People/Places/Landmarks and
+        // anything else stay. `requested` is already NFC.
+        let requested: Vec<String> = requested
+            .iter()
+            .filter(|t| is_content_tag(t))
+            .cloned()
+            .collect();
+        let requested_set: BTreeSet<String> = requested.iter().cloned().collect();
 
-        // Retract only what we claimed and no longer want.
-        let mut tags_to_remove: Vec<String> = prev_tags
+        let existing_tags: Vec<String> = view.tags_list.iter().map(|t| nfc(t)).collect();
+        let existing_machine: BTreeSet<String> = existing_tags
+            .iter()
+            .filter(|t| is_content_tag(t))
+            .cloned()
+            .collect();
+
+        let mut tags_to_remove: Vec<String> = existing_machine
             .iter()
             .filter(|t| !requested_set.contains(*t))
             .cloned()
             .collect();
         tags_to_remove.sort();
-        tags_to_remove.dedup();
-        // Add only what is not already there — a tag somebody else wrote stays
-        // theirs, and we never claim it.
         let tags_to_add: Vec<String> = requested
             .iter()
-            .filter(|t| !existing_tags.contains(&nfc(t)))
+            .filter(|t| !existing_machine.contains(*t))
             .cloned()
             .collect();
+        let owned_tags = requested.clone();
 
-        let prev_set: BTreeSet<&String> = prev_tags.iter().collect();
-        let added_set: BTreeSet<&String> = tags_to_add.iter().collect();
-        let owned_tags: Vec<String> = requested
+        let retained: BTreeSet<String> = existing_tags
             .iter()
-            .filter(|t| prev_set.contains(&nfc(t)) || added_set.contains(t))
+            .filter(|t| !is_content_tag(t))
             .cloned()
+            .chain(requested.iter().cloned())
             .collect();
-
-        // The tags that will be in `digiKam:TagsList` once this write lands.
-        let removed_set: BTreeSet<&String> = tags_to_remove.iter().collect();
-        let retained_leaves: BTreeSet<String> = existing_tags
+        let retained_leaves: BTreeSet<String> = retained
             .iter()
-            .filter(|t| !removed_set.contains(t))
-            .chain(added_set.iter().copied())
             .map(|t| nfc_lower(leaf_of(t)))
             .collect();
 
-        // `dc:subject` is lossy: many paths share one leaf, and humans type
-        // bare leaves. Retract a leaf only if we added it *and* no surviving
-        // tag still needs it.
+        // `dc:subject` is lossy: a human "Dog" and `Objects/Animal/Dog` share
+        // one leaf. Retract only leaves we introduced and that nothing
+        // surviving still needs. Machine paths themselves are prefix-replaced
+        // above; this is just the flat projection.
         let existing_subjects_lower: BTreeSet<String> =
             view.subject.iter().map(|s| nfc_lower(s)).collect();
         let mut subjects_to_remove: Vec<String> = view
@@ -350,52 +374,37 @@ impl Plan {
         owned_subjects.sort();
         owned_subjects.dedup();
 
-        // `lr:hierarchicalSubject` needs an ownership list of its own, for the
-        // same reason `dc:subject` does. It is *not* a pure function of
-        // `digiKam:TagsList`: Lightroom writes `lr:hierarchicalSubject` and no
-        // TagsList at all, so `Objects|Animal|Dog` can already be in the file
-        // when we arrive. Without `CoreHierarchical`, adding and later
-        // retracting `Objects/Animal/Dog` would delete the user's entry.
         let existing_lr: BTreeSet<String> =
             view.hierarchical_subject.iter().map(|p| nfc(p)).collect();
-        let retained_lr: BTreeSet<String> = existing_tags
-            .iter()
-            .filter(|t| !removed_set.contains(t))
-            .chain(added_set.iter().copied())
-            .map(|t| to_lr_path(t))
-            .collect();
         let lr_to_add: Vec<String> = tags_to_add
             .iter()
             .map(|t| to_lr_path(t))
             .filter(|p| !existing_lr.contains(p))
             .collect();
-        // Retract only what we recorded as ours and no surviving tag needs.
-        let mut lr_to_remove: Vec<String> = view
-            .core
-            .hierarchical
-            .iter()
-            .map(|p| nfc(p))
-            .filter(|p| !retained_lr.contains(p))
-            .collect();
+        let mut lr_to_remove: Vec<String> = tags_to_remove.iter().map(|t| to_lr_path(t)).collect();
         lr_to_remove.sort();
-        lr_to_remove.dedup();
-        let removed_lr: BTreeSet<&String> = lr_to_remove.iter().collect();
-        let mut owned_hierarchical: Vec<String> = view
-            .core
-            .hierarchical
-            .iter()
-            .map(|p| nfc(p))
-            .filter(|p| !removed_lr.contains(p))
-            .chain(lr_to_add.iter().cloned())
-            .collect();
+        let mut owned_hierarchical: Vec<String> = owned_tags.iter().map(|t| to_lr_path(t)).collect();
         owned_hierarchical.sort();
-        owned_hierarchical.dedup();
 
-        let sentinel_is_current = view.core.agent.as_deref() == Some(request.agent.as_str())
-            && view.core.model_pack.as_deref() == Some(request.model_pack.as_str())
-            && view.core.tags == owned_tags
-            && view.core.subjects == owned_subjects
-            && view.core.hierarchical == owned_hierarchical;
+        let sentinel_is_current = view.photo_tools.tagger_version.as_deref()
+            == Some(request.model_pack.as_str())
+            && existing_machine == requested_set;
+
+        let clip_is_current = match (
+            &request.clip_embedding,
+            &request.clip_model,
+            &request.clip_timestamp,
+        ) {
+            (None, None, None) => true,
+            (Some(e), Some(m), Some(_)) => {
+                // Timestamp is provenance, not identity: a re-run with the
+                // same vector must not rewrite every sidecar just to stamp
+                // a new `CLIPTimestamp`.
+                view.photo_tools.clip_embedding.as_deref() == Some(e.as_str())
+                    && view.photo_tools.clip_model.as_deref() == Some(m.as_str())
+            }
+            _ => false,
+        };
 
         Plan {
             tags_to_add,
@@ -411,6 +420,10 @@ impl Plan {
             model_pack: request.model_pack.clone(),
             tagged_at: request.tagged_at.clone(),
             sentinel_is_current,
+            clip_embedding: request.clip_embedding.clone(),
+            clip_model: request.clip_model.clone(),
+            clip_timestamp: request.clip_timestamp.clone(),
+            clip_is_current,
         }
     }
 
@@ -452,7 +465,7 @@ impl MatchMode {
 }
 
 fn apply_plan(doc: &mut Document, root: &NodePath, plan: &Plan) {
-    if !plan.touches_keywords() && plan.sentinel_is_current {
+    if !plan.touches_keywords() && plan.sentinel_is_current && plan.clip_is_current {
         // Nothing to do — and crucially, do not refresh `CoreTaggedAt`, or
         // every re-run would rewrite every sidecar.
         return;
@@ -496,6 +509,8 @@ fn apply_plan(doc: &mut Document, root: &NodePath, plan: &Plan) {
     let scalar = |doc: &mut Document, local: &str, value: &str| {
         edit::set_scalar(doc, root, NS_PHOTO_TOOLS, pt, local, value);
     };
+    scalar(doc, PROP_TAGGER_VERSION, &plan.model_pack);
+    scalar(doc, PROP_TAGGED_AT, &plan.tagged_at);
     scalar(doc, PROP_CORE_AGENT, &plan.agent);
     scalar(doc, PROP_CORE_MODEL_PACK, &plan.model_pack);
     scalar(doc, PROP_CORE_TAGGED_AT, &plan.tagged_at);
@@ -526,6 +541,16 @@ fn apply_plan(doc: &mut Document, root: &NodePath, plan: &Plan) {
         "Bag",
         &plan.owned_hierarchical,
     );
+
+    if let (Some(embedding), Some(model), Some(timestamp)) = (
+        &plan.clip_embedding,
+        &plan.clip_model,
+        &plan.clip_timestamp,
+    ) {
+        scalar(doc, PROP_CLIP_EMBEDDING, embedding);
+        scalar(doc, PROP_CLIP_MODEL, model);
+        scalar(doc, PROP_CLIP_TIMESTAMP, timestamp);
+    }
 }
 
 /// [`edit_list`] with case-sensitive matching, for [`crate::faces`].

@@ -75,9 +75,16 @@ extension ContactInfo {
         id: String = "contact-1",
         givenName: String = "Alice",
         familyName: String = "Anderson",
+        nickname: String = "",
         birthday: DateComponents? = nil
     ) -> ContactInfo {
-        ContactInfo(id: id, givenName: givenName, familyName: familyName, birthday: birthday)
+        ContactInfo(
+            id: id,
+            givenName: givenName,
+            familyName: familyName,
+            nickname: nickname,
+            birthday: birthday
+        )
     }
 }
 

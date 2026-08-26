@@ -25,10 +25,10 @@
 //! ```
 //!
 //! Naming a cluster is the one thing that leaves the cache: [`naming`] turns it
-//! into `People/<Name>` keywords and `XMP-mwg-rs:RegionInfo` regions through
-//! `gallery_meta::write_faces`. Everything *else* here stops at the cache DB,
-//! which is the standing decision that unlabeled clusters and embeddings are
-//! per-device derived data while only named results travel.
+//! into `People/<Name>` keywords, `XMP-mwg-rs:RegionInfo` regions, and
+//! `CoreFaceDecisions` (named / ignored / rejected) through
+//! `gallery_meta::write_faces`. Unlabeled clusters and embeddings stay in the
+//! cache DB — per-device derived data. Judgments travel.
 //!
 //! # What this module does not do
 //!
@@ -62,6 +62,10 @@ pub mod cluster;
 pub mod detect;
 pub mod engine;
 pub mod naming;
+/// REMOVE AFTER: one-shot keyword backfill. Delete this line with the file.
+pub mod named_keyword_resync;
+/// REMOVE AFTER: one-shot dismissal backfill. Delete this line with the file.
+pub mod face_decision_resync;
 pub mod quality;
 
 pub use align::{align_crop, align_tensor, umeyama, ALIGN_VERSION, ARCFACE_TEMPLATE};

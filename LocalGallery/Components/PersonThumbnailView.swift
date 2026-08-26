@@ -1,17 +1,26 @@
 import SwiftUI
 import UIKit
 
-/// People-rail thumbnail. When `region` is non-nil, crops the source image to
-/// the face rectangle plus 1× padding on each side (per the user spec:
-/// `[x(padding) – 2x(face) – x(padding)]` → total span = 3× the region's
-/// extent). Falls back to the standard `ThumbnailView` aspect-fill when no
-/// region is provided.
+/// People-rail thumbnail. When `region` is non-nil, crops a sized ImageIO
+/// decode to the detected MWG box plus a little padding on each axis. The
+/// crop is the face rectangle, not a square of the longer side: twenty faces
+/// in a row are each ~5% of the photo width, and a square of the (taller)
+/// head would pull in the neighbours. SwiftUI fill-clips that rect into the
+/// square cell. Falls back to `ThumbnailView` when no region is provided.
 ///
-/// We load the full image rather than the cached 128px thumbnail so the crop
-/// has enough resolution to render a recognisable face. The full image goes
-/// through `ThumbnailService.loadFullImage`, which caches at 2000px on a
-/// shared NSCache — so subsequent People rail renders are cheap.
+/// Decode is the same gated ImageIO path the photo grid uses, not
+/// `loadFullImage`. The source is dropped after the crop so a review grid
+/// does not hold one viewer-sized bitmap per face.
 struct PersonThumbnailView: View {
+    /// Padding on each side of the MWG box, as a fraction of that axis.
+    /// 0.1 → 10% extra per side (1.2× the box). Enough for a hairline,
+    /// tight enough that a packed lineup still reads as one face.
+    static let cropPadding: CGFloat = 0.1
+    /// Upper bound for the decode used to cut a crop. Same cap as the
+    /// viewer's `loadFullImage` path — small faces need the pixels, but
+    /// we never keep this bitmap after cropping.
+    static let sourceMaxPixelSize: CGFloat = 2000
+
     let url: URL
     let region: FaceRegion?
     let size: CGFloat
@@ -19,23 +28,15 @@ struct PersonThumbnailView: View {
     var isRemote: Bool = false
 
     @Environment(GalleryStore.self) private var store
-    @State private var fullImage: UIImage?
-    @State private var placeholder: UIImage?
+    @State private var image: UIImage?
 
     var body: some View {
         Group {
             if region == nil {
                 ThumbnailView(url: url, size: size, cornerRadius: cornerRadius, isRemote: isRemote)
                     .frame(width: size, height: size)
-            } else if let fullImage {
-                Image(uiImage: fullImage)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .frame(width: size, height: size)
-                    .clipped()
-                    .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
-            } else if let placeholder {
-                Image(uiImage: placeholder)
+            } else if let image {
+                Image(uiImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
                     .frame(width: size, height: size)
@@ -47,60 +48,72 @@ struct PersonThumbnailView: View {
                     .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
             }
         }
-        .task(id: url) {
+        .task(id: cropTaskID) {
             await load()
         }
     }
 
-    private func load() async {
-        guard let region else { return }
-        // Quick placeholder — the cached thumbnail (uncropped) so the cell
-        // never sits on a shimmer for long.
-        placeholder = await store.thumbnail(
-            for: url, size: CGSize(width: size, height: size), isVideo: false
-        )
-        guard let full = await store.loadFullImage(for: url) else { return }
-        fullImage = Self.crop(full, to: region)
+    /// URL plus the region, so two faces in the same group photo do not
+    /// reuse one view's crop when SwiftUI recycles the cell.
+    private var cropTaskID: String {
+        guard let region else { return url.path }
+        return "\(url.path)#\(region.centerX),\(region.centerY),\(region.width),\(region.height)#\(Int(size))"
     }
 
-    /// Crop around the face with enough padding that the face occupies a
-    /// portrait-style proportion of the frame (~20%) rather than filling
-    /// it. Clamped to the image bounds — when the face is near an edge we
-    /// shift the rect rather than shrink it so the face stays centred.
+    private func load() async {
+        guard let region else { return }
+        image = await store.faceCrop(for: url, region: region, cellSize: size)
+    }
+
+    /// Longest source edge so the face fills `cellSize` after cropping.
+    /// Tiny faces would otherwise demand a 4k decode; those are capped.
+    static func sourcePixelSize(
+        cellSize: CGFloat,
+        region: FaceRegion,
+        scale: CGFloat
+    ) -> CGFloat {
+        let cellPx = max(cellSize * scale, 1)
+        let frac = CGFloat(max(region.width, region.height, 0.04))
+        return min(sourceMaxPixelSize, max(cellPx, (cellPx / frac).rounded()))
+    }
+
+    /// Crop around the face. Clamped to the image bounds — when the face is
+    /// near an edge we shift the rect rather than shrink it so the face
+    /// stays as centred as the photo allows.
     static func crop(_ image: UIImage, to region: FaceRegion) -> UIImage {
         guard let cgImage = image.cgImage else { return image }
         let imgW = CGFloat(cgImage.width)
         let imgH = CGFloat(cgImage.height)
+        let rect = cropRect(
+            imageSize: CGSize(width: imgW, height: imgH),
+            region: region
+        )
+        guard rect.width > 8, rect.height > 8,
+              let cropped = cgImage.cropping(to: rect) else { return image }
+        return UIImage(cgImage: cropped, scale: image.scale, orientation: image.imageOrientation)
+    }
 
-        // MWG: centre + extent, normalized.
+    /// The padded MWG box. Axes are padded independently so a tall head in a
+    /// packed row does not grow the crop sideways into the next person.
+    static func cropRect(imageSize: CGSize, region: FaceRegion) -> CGRect {
+        let imgW = imageSize.width
+        let imgH = imageSize.height
         let cx = CGFloat(region.centerX) * imgW
         let cy = CGFloat(region.centerY) * imgH
-        let rW = CGFloat(region.width) * imgW
-        let rH = CGFloat(region.height) * imgH
-
-        // Span is 5× the region extent so the face occupies ~20% of the
-        // crop — a comfortable headshot proportion. Clamp to a minimum of
-        // 35% of the shorter image side so a tiny face still produces a
-        // recognisable framing instead of a tight pixel-peeped crop.
-        let minSpan = min(imgW, imgH) * 0.35
-        let span = max(max(rW, rH) * 5, minSpan)
+        let rW = max(CGFloat(region.width) * imgW, 8)
+        let rH = max(CGFloat(region.height) * imgH, 8)
+        let padW = rW * cropPadding
+        let padH = rH * cropPadding
         var rect = CGRect(
-            x: cx - span / 2,
-            y: cy - span / 2,
-            width: span, height: span
+            x: cx - rW / 2 - padW,
+            y: cy - rH / 2 - padH,
+            width: rW + 2 * padW,
+            height: rH + 2 * padH
         )
-        // Clamp to image bounds — shift instead of shrink so the face stays
-        // centred when we hit an edge.
         if rect.minX < 0 { rect.origin.x = 0 }
         if rect.minY < 0 { rect.origin.y = 0 }
         if rect.maxX > imgW { rect.origin.x = imgW - rect.width }
         if rect.maxY > imgH { rect.origin.y = imgH - rect.height }
-        // After shifting, the rect can still be larger than the image on one
-        // axis — final clamp keeps it in bounds at the cost of breaking the
-        // square aspect, which the SwiftUI fill-clip will re-square.
-        rect = rect.intersection(CGRect(x: 0, y: 0, width: imgW, height: imgH))
-        guard rect.width > 8, rect.height > 8,
-              let cropped = cgImage.cropping(to: rect) else { return image }
-        return UIImage(cgImage: cropped, scale: image.scale, orientation: image.imageOrientation)
+        return rect.intersection(CGRect(x: 0, y: 0, width: imgW, height: imgH))
     }
 }

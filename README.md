@@ -44,18 +44,26 @@ brew install xcodegen
 # Stage the model pack into build/pack, which the app bundles
 ./scripts/prepare_pack.sh
 
-# Build the Rust core (must run before xcodegen, and again after any change
-# under core/). Needs network access the first time — see below.
+# Generate UniFFI Swift (HeicDecoder, TaggingSession, …) then the Xcode project
 ./scripts/build_core.sh
-
-# Generate the Xcode project
 xcodegen
 
 # Open in Xcode
 open LocalGallery.xcodeproj
 ```
 
-Then build and run on a simulator (iOS 18+).
+`xcodegen` only *lists* `build/core/Generated/GalleryCore.swift`. It does not
+run UniFFI. If that file is from an older core, Xcode reports `Cannot find
+type 'HeicDecoder'` and similar. `./scripts/build_core.sh` regenerates it.
+
+Then build and run on a simulator (iOS 18+). The LocalGallery target's
+**Build Rust Core** phase also runs `scripts/build_core.sh` before compile, so
+a later core change is just Product → Build. Pass `--release` yourself only
+when invoking the script from the CLI; an Xcode Release/Archive build already
+does. The first core build on a machine needs network access — see below.
+
+If `xcodegen` complains that `GalleryCore.xcframework` is missing, the
+`build_core.sh` step above is what creates it.
 
 ### Model pack
 
@@ -66,9 +74,8 @@ and `scripts/prepare_pack.sh` stages the newest build into
 `build/pack/<version>`, which the app bundles. Run `prepare_pack.sh` with no
 pack built and it prints the exact command that builds one.
 
-The app ships the staged pack, so a fresh install can tag and scan faces with
-no setup. Settings → Import Model Pack… still installs a newer pack over it;
-whichever pack has the higher version wins.
+The app ships the staged pack, so a fresh install can tag, find faces, and
+name places from GPS with no setup. Settings → Scan Photos runs all three.
 
 **Licence:** the face models in the default (full) pack are insightface's
 `buffalo_sc` — SCRFD-500M and w600k_mbf — which are **research /
@@ -80,13 +87,15 @@ PACK_VARIANT=tagging ./scripts/prepare_pack.sh
 ```
 
 or substitute face models whose licence permits it. A tagging-only pack is a
-valid pack: the app simply hides the face-scanning controls.
+valid pack: Scan Photos still tags objects/scenes and names places; it skips
+the face pass.
 
 The first `build_core.sh` on a machine downloads a prebuilt static ONNX Runtime
 (~85 MB) into `~/Library/Caches/ort.pyke.io/`; offline builds work with
 `ORT_LIB_LOCATION` pointing at a directory containing `libonnxruntime.a`.
-Nothing else in the core needs a toolchain beyond `cargo` — image decoding,
-HEIC included, is pure Rust.
+JPEG and PNG decode in the core is pure Rust. HEIC on iOS uses ImageIO
+(hardware) so a first-run scan is not several seconds of software HEVC per
+photo; `cargo test` and non-iOS hosts keep the software path.
 
 ### Third-party licences
 

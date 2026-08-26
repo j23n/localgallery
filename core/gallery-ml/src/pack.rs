@@ -281,7 +281,8 @@ pub struct ClusteringConfig {
     /// Edge threshold of the chinese-whispers graph in the full pass.
     pub edge: f32,
     /// Faces below this quality still cluster, but are excluded from
-    /// auto-tagging and from cover-crop selection.
+    /// auto-tagging, from written face regions, and from cover-crop selection.
+    /// A user-confirmed name still writes the `People/<Name>` keyword.
     pub min_quality: f32,
     /// Label-propagation rounds in the full pass. Convergence is typically
     /// under five; the cap is a bound, not a target.

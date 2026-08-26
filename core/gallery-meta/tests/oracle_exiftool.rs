@@ -287,11 +287,10 @@ fn a_sidecar_created_from_nothing_is_valid_to_exiftool() {
             .and_then(Value::as_str),
         Some("mobileclip-s2-2026.1")
     );
-    // photo-tools' own sentinel must be absent, or photo-tools would skip the
-    // file on its next run (schema §1.6).
-    assert!(
-        !map.keys().any(|k| k.ends_with(":TaggerVersion")),
-        "{map:?}"
+    assert_eq!(
+        map.get("XMP-phototools:TaggerVersion")
+            .and_then(Value::as_str),
+        Some("mobileclip-s2-2026.1")
     );
 }
 
@@ -412,10 +411,15 @@ fn exiftool_reads_back_the_region_structure_we_meant_to_write() {
         Some("buffalo_sc-2026.1")
     );
     assert_eq!(
+        by_tag(&map, "CoreFaceTaggedAt").and_then(Value::as_str),
+        Some("2026-08-03T10:00:00Z")
+    );
+    assert_eq!(
         as_list(by_tag(&map, "CorePeople")),
         vec!["People/Alice", "People/Bob"]
     );
     assert_eq!(as_list(by_tag(&map, "CoreRegions")).len(), 2);
+    // Face writes do not stamp the tagging skip key.
     assert!(!map.keys().any(|k| k.ends_with(":TaggerVersion")));
 }
 

@@ -19,7 +19,7 @@ use crate::error::MlResult;
 /// Chunk size for streaming reads.
 ///
 /// 256 KiB: large enough that syscall overhead disappears, small enough that
-/// four concurrent workers cost 1 MiB of buffers rather than the file sizes.
+/// two concurrent workers cost 512 KiB of buffers rather than the file sizes.
 const CHUNK: usize = 256 * 1024;
 
 /// SHA-256 of `path`'s bytes, read through `vfs` in bounded chunks.

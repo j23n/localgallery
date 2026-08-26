@@ -249,6 +249,82 @@ pub fn parse_claim(entry: &str) -> Option<RegionClaim> {
     })
 }
 
+/// One judgment about a detected face, persisted in
+/// [`crate::schema::PROP_CORE_FACE_DECISIONS`].
+///
+/// Distinct from [`RegionClaim`]: a claim is "we authored this MWG box". A
+/// decision is the portable identity — including faces that never get a public
+/// box (below the quality floor) and faces that must not appear as people
+/// (`ignored` passer-by, `rejected` not-a-person).
+#[derive(Debug, Clone, PartialEq)]
+pub enum FaceDecision {
+    /// This face is `name`. May or may not have a matching MWG region.
+    Named {
+        /// Where the face is.
+        area: Area,
+        /// Normalized person name.
+        name: String,
+    },
+    /// A real face the user does not want to name (passer-by, poster).
+    Ignored {
+        /// Where the face is.
+        area: Area,
+    },
+    /// Not a person / not a face. Dismissed so it is not offered again.
+    Rejected {
+        /// Where the detection is.
+        area: Area,
+    },
+}
+
+impl FaceDecision {
+    /// The box this decision is about.
+    pub fn area(&self) -> Area {
+        match *self {
+            FaceDecision::Named { area, .. }
+            | FaceDecision::Ignored { area }
+            | FaceDecision::Rejected { area } => area,
+        }
+    }
+
+    /// The bag entry written for this decision.
+    pub fn to_claim(&self) -> String {
+        let coords = self.area().to_claim_coords();
+        match self {
+            FaceDecision::Named { name, .. } => format!("{coords} named {name}"),
+            FaceDecision::Ignored { .. } => format!("{coords} ignored"),
+            FaceDecision::Rejected { .. } => format!("{coords} rejected"),
+        }
+    }
+}
+
+/// Parse one `CoreFaceDecisions` entry. `None` for anything malformed.
+pub fn parse_decision(entry: &str) -> Option<FaceDecision> {
+    let (coords, rest) = entry.trim().split_once(' ')?;
+    let mut parts = coords.split(',');
+    let mut next = || parts.next()?.trim().parse::<f64>().ok();
+    let (x, y, w, h) = (next()?, next()?, next()?, next()?);
+    if parts.next().is_some() {
+        return None;
+    }
+    let area = Area { x, y, w, h };
+    let rest = rest.trim();
+    if rest == "ignored" {
+        return Some(FaceDecision::Ignored { area });
+    }
+    if rest == "rejected" {
+        return Some(FaceDecision::Rejected { area });
+    }
+    let name = rest.strip_prefix("named ")?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    Some(FaceDecision::Named {
+        area,
+        name: name.to_string(),
+    })
+}
+
 /// Bind claims to regions **one to one**, and say which claim owns each region.
 ///
 /// Returns one entry per element of `regions`: the index of the claim that owns
@@ -577,6 +653,33 @@ mod tests {
     fn degenerate_pixel_boxes_are_refused() {
         assert!(Area::from_pixel_box([0.0, 0.0, 10.0, 10.0], 0.0, 100.0).is_none());
         assert!(Area::from_pixel_box([10.0, 10.0, 10.0, 10.0], 100.0, 100.0).is_none());
+    }
+
+    #[test]
+    fn a_decision_round_trips_through_its_claim_string() {
+        let named = FaceDecision::Named {
+            area: area(0.4, 0.35, 0.12, 0.16),
+            name: "Mary Jane".into(),
+        };
+        assert_eq!(parse_decision(&named.to_claim()), Some(named));
+        let ignored = FaceDecision::Ignored {
+            area: area(0.1, 0.2, 0.08, 0.1),
+        };
+        assert_eq!(parse_decision(&ignored.to_claim()), Some(ignored));
+        let rejected = FaceDecision::Rejected {
+            area: area(0.7, 0.7, 0.05, 0.05),
+        };
+        assert_eq!(parse_decision(&rejected.to_claim()), Some(rejected));
+        assert_eq!(
+            parse_decision("0.400000,0.350000,0.120000,0.160000 named ignored"),
+            Some(FaceDecision::Named {
+                area: area(0.4, 0.35, 0.12, 0.16),
+                name: "ignored".into(),
+            })
+        );
+        assert!(parse_decision("0.4,0.35,0.12,0.16").is_none());
+        assert!(parse_decision("0.4,0.35,0.12,0.16 named ").is_none());
+        assert!(parse_decision("not-coords named Alice").is_none());
     }
 
     #[test]

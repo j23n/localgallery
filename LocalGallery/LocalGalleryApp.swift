@@ -350,7 +350,14 @@ struct ContentView: View {
             }
         }
         .task {
-            await store.restoreFolder()
+            // Folder restore and cluster load are independent: clusters live
+            // in `gallery-cache.sqlite`, not the photo tree. Running them
+            // together means Review New People can appear before the scan
+            // finishes, and neither is tied to Collections remaining on
+            // screen (its `.task` cancels on tab switch).
+            async let restored: Void = store.restoreFolder()
+            async let clusters: Void = store.faces.refreshClusters()
+            _ = await (restored, clusters)
         }
     }
 }

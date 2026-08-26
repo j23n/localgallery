@@ -69,6 +69,22 @@ pub fn root_of(tag: &str) -> &str {
 /// accident; the face half reaches it through [`normalize_person`], which is
 /// the deliberate door.
 pub const PEOPLE_ROOT: &str = "People";
+/// The reverse-geocoding root (schema §2.2). A single nested
+/// `Places/<Country>[/<Region>[/<City>[/<Neighborhood>]]]` path.
+pub const PLACES_ROOT: &str = "Places";
+/// Content tags the tagger owns and replaces on each write.
+pub const OBJECTS_ROOT: &str = "Objects";
+/// Scene tags the tagger owns and replaces on each write.
+pub const SCENES_ROOT: &str = "Scenes";
+
+/// Whether `tag` is an `Objects/*` or `Scenes/*` path the tagger replaces.
+///
+/// Accepts either `/` or `|` so the same check works on `digiKam:TagsList`
+/// and `lr:hierarchicalSubject`.
+pub fn is_content_tag(tag: &str) -> bool {
+    let root = tag.split(['/', '|']).next().unwrap_or(tag);
+    root.eq_ignore_ascii_case(OBJECTS_ROOT) || root.eq_ignore_ascii_case(SCENES_ROOT)
+}
 
 /// Characters that occupy no space when rendered.
 ///
@@ -265,6 +281,16 @@ mod tests {
     #[test]
     fn lr_paths_use_the_pipe_separator() {
         assert_eq!(to_lr_path("Objects/Animal/Dog"), "Objects|Animal|Dog");
+    }
+
+    #[test]
+    fn content_tags_are_objects_and_scenes() {
+        assert!(is_content_tag("Objects/Animal/Dog"));
+        assert!(is_content_tag("Scenes|Urban|Street"));
+        assert!(!is_content_tag("People/Ada"));
+        assert!(!is_content_tag("Places/Italy"));
+        assert!(!is_content_tag("Landmarks/Colosseum"));
+        assert!(!is_content_tag("Holiday"));
     }
 
     #[test]

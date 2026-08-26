@@ -82,11 +82,15 @@ pub mod preprocess;
 pub mod tagger;
 
 pub use cache::{
-    CacheDb, ClusterRow, ClusterState, FaceLibraryStats, FaceThumb, NamedFace, Stats, StoredFace,
+    CacheDb, ClusterRow, ClusterState, DismissedFace, FaceLibraryStats, FaceThumb, NamedFace,
+    Stats, StoredFace,
     WorkItem, WorkState,
 };
 pub use encoder::{ImageEncoder, ModelOutput, MultiOutputModel};
-pub use engine::{NoProgress, RunOptions, RunSummary, TaggingEngine, TaggingProgress, MAX_WORKERS};
+pub use engine::{
+    NoProgress, RunOptions, RunSummary, TaggingEngine, TaggingProgress, INFERENCE_SESSIONS,
+    MAX_WORKERS,
+};
 pub use error::{ErrorCode, MlError, MlResult};
 pub use face::{
     Detection, FaceEngine, FaceProgress, FaceRunOptions, FaceRunSummary, FailedWrite,
@@ -95,7 +99,8 @@ pub use face::{
 pub use heif::HeifDecoder;
 pub use pack::{ClusteringConfig, FaceSpec, Manifest, ModelPack, RootConfig};
 pub use preprocess::{
-    CrateDecoder, ImageDecoder, ImageKind, PreprocessConfig, ResizeFilter, Tensor, DECODER_VERSION,
-    PREPROCESS_VERSION,
+    host_heic_decode, limit_long_side, rgb_from_packed, CrateDecoder, HostHeicDecoder,
+    ImageDecoder, ImageKind, PreprocessConfig, ResizeFilter, RgbImage, Tensor,
+    ANALYSIS_MAX_LONG_SIDE, DECODER_VERSION, PREPROCESS_VERSION,
 };
 pub use tagger::{ScoredTag, ZeroShotTagger};

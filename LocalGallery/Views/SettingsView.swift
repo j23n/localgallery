@@ -30,27 +30,18 @@ struct SettingsView: View {
                     }
                     .tint(.primary)
 
-                    Button {
+                    SettingsProgressRow(
+                        title: "Reload Library",
+                        systemImage: "arrow.clockwise",
+                        phase: store.scanProgress?.shortLabel ?? "Scanning",
+                        progressText: store.scanProgress?.countText,
+                        isRunning: store.isScanning || store.scanProgress != nil,
+                        disabled: store.analysis.isRunning,
+                        idleTrailing: lastSyncedText
+                    ) {
                         Task { await store.rescan(kind: .full, silent: false) }
-                    } label: {
-                        Label("Reload Library", systemImage: "arrow.clockwise")
-                    }
-                    .disabled(store.isScanning)
-
-                    if let lastSync = store.lastSyncedAt {
-                        LabeledContent("Last Synced", value: lastSync,
-                                       format: .dateTime.month(.abbreviated).day().hour().minute())
-                    }
-
-                    if let progress = store.scanProgress {
-                        scanProgressRow(progress)
-                    } else if store.isScanning {
-                        HStack(spacing: 8) {
-                            ProgressView()
-                            Text("Scanning folder…")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
+                    } cancel: {
+                        store.cancelScan()
                     }
                 }
 
@@ -101,6 +92,7 @@ struct SettingsView: View {
                 Section("Stats") {
                     LabeledContent("Photos", value: "\(store.allPhotos.count)")
                     LabeledContent("People", value: "\(tagCount(namespace: "people"))")
+                    LabeledContent("Places", value: "\(tagCount(namespace: "places"))")
                     LabeledContent("Objects", value: "\(tagCount(namespace: "objects"))")
                     LabeledContent("Scenes", value: "\(tagCount(namespace: "scenes"))")
                 }
@@ -212,7 +204,10 @@ struct SettingsView: View {
     }
 
     private var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"
+        let short = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
+        if build.isEmpty || build == short { return short }
+        return "\(short) (\(build))"
     }
 
     private func tagCount(namespace: String) -> Int {
@@ -221,36 +216,10 @@ struct SettingsView: View {
         }
     }
 
-    @ViewBuilder
-    private func scanProgressRow(_ progress: ScanProgress) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                ProgressView()
-                    .controlSize(.small)
-                Text(progress.label)
-                    .font(.caption.weight(.semibold))
-                Spacer(minLength: 0)
-                Text(scanProgressDetail(progress))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-            switch progress.phase {
-            case .scanning:
-                ProgressView().progressViewStyle(.linear)
-            case .enriching:
-                if let total = progress.total, total > 0 {
-                    ProgressView(value: Double(progress.processed), total: Double(total))
-                        .progressViewStyle(.linear)
-                } else {
-                    ProgressView().progressViewStyle(.linear)
-                }
-            }
-        }
-    }
-
-    private func scanProgressDetail(_ progress: ScanProgress) -> String {
-        // Shared count/ETA text — see `ScanProgress.countText`.
-        progress.countText
+    /// `lastSyncedAt` as the Reload Library trailing value, same format the
+    /// old "Last Synced" row used.
+    private var lastSyncedText: String? {
+        store.lastSyncedAt?.formatted(.dateTime.month(.abbreviated).day().hour().minute())
     }
 
     // MARK: - Crash banner
@@ -307,16 +276,9 @@ struct SettingsView: View {
 
     // MARK: - On-device tagging
 
-    @State private var showModelPackPicker = false
-    @State private var showResetTaggingAlert = false
-    @State private var showRemovePackAlert = false
-
-    /// Tagging status, model-pack import, and the "Tag Library Now" run
-    /// controls. The section is always present — with no pack installed it
-    /// explains what's missing rather than hiding the feature.
     @ViewBuilder
     private var taggingSection: some View {
-        let tagging = store.tagging
+        let analysis = store.analysis
         Section {
             LabeledContent {
                 Text(modelPackSummary)
@@ -325,117 +287,66 @@ struct SettingsView: View {
                 Label("Model Pack", systemImage: "shippingbox")
             }
 
-            // Where the active pack came from. Worth a row of its own because
-            // the two sources behave differently: the bundled pack cannot be
-            // removed, and an imported one is only in use while it is the
-            // newest.
-            if let pack = tagging.pack {
+            SettingsProgressRow(
+                title: "Scan Photos",
+                systemImage: "sparkles.rectangle.stack",
+                phase: analysis.progress?.shortLabel ?? "Tagging",
+                progressText: analysis.progress?.countText,
+                isRunning: analysis.isRunning,
+                disabled: store.isScanning || analysis.isRunning || store.allPhotos.isEmpty,
+                idleTrailing: analysis.lastSummary.map { Self.analysisSummaryLine($0) }
+            ) {
+                Task { await analysis.start() }
+            } cancel: {
+                analysis.cancel()
+            }
+
+            NavigationLink {
+                DropAndRescanView()
+            } label: {
+                Label("Drop and Rescan", systemImage: "arrow.triangle.2.circlepath")
+            }
+            .disabled(store.isScanning || analysis.isRunning || store.allPhotos.isEmpty)
+
+            NavigationLink {
+                ScanActivityView()
+            } label: {
                 LabeledContent {
-                    Text(pack.source.label)
+                    Text(scanActivitySubtitle)
                         .foregroundStyle(.secondary)
                 } label: {
-                    Label("Source", systemImage: pack.source == .bundled ? "shippingbox.fill" : "tray.and.arrow.down")
+                    Label("Scan Activity", systemImage: "list.bullet.rectangle")
                 }
             }
 
-            Button {
-                showModelPackPicker = true
-            } label: {
-                Label("Import Model Pack…", systemImage: "square.and.arrow.down")
-            }
-            .tint(.primary)
-            .disabled(tagging.isRunning)
-
-            // Only for an imported pack: the bundled one ships with the app
-            // and there is nothing to delete.
-            if tagging.pack?.source == .imported {
-                Button(role: .destructive) {
-                    showRemovePackAlert = true
-                } label: {
-                    Label("Remove Imported Pack", systemImage: "trash")
-                }
-                .disabled(tagging.isRunning)
-            }
-
-            if tagging.isRunning {
-                taggingProgressRow
-                Button(role: .destructive) {
-                    tagging.cancel()
-                } label: {
-                    Label("Cancel Tagging", systemImage: "stop.circle")
-                }
-            } else {
-                Button {
-                    Task { await store.tagging.startTagging() }
-                } label: {
-                    Label("Tag Library Now", systemImage: "sparkles.rectangle.stack")
-                }
-                // Not while a face scan is running: the two engines hold
-                // separate SQLite connections to the same cache file, and WAL
-                // allows one writer. Serialising them here is cheaper (and far
-                // more legible) than teaching both to retry SQLITE_BUSY.
-                .disabled(
-                    !tagging.isAvailable || store.isScanning || store.allPhotos.isEmpty
-                        || store.faces.isRunning
-                )
-            }
-
-            // Recovery for a queue that has got itself stuck: rows that failed
-            // out of their retry budget, or paths left over from a library
-            // root the user has moved away from. Cached embeddings survive the
-            // reset, so re-tagging afterwards costs a hash per photo, not an
-            // inference.
-            Button(role: .destructive) {
-                showResetTaggingAlert = true
-            } label: {
-                Label("Reset Tagging Data", systemImage: "arrow.counterclockwise")
-            }
-            .disabled(!tagging.isAvailable || tagging.isRunning)
-
-            if let summary = tagging.lastSummary {
-                LabeledContent("Last Run") {
-                    Text(Self.summaryLine(summary))
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            if let error = tagging.lastError, error != .cancelled {
-                Text(error.message)
+            if let error = analysis.lastError {
+                Text(error)
                     .font(.footnote)
                     .foregroundStyle(.red)
             }
-
-            facesRows
         } header: {
             Text("On-device Tagging")
         } footer: {
-            Text(taggingFooter)
-        }
-        .fileImporter(isPresented: $showModelPackPicker, allowedContentTypes: [.folder]) { result in
-            guard case .success(let url) = result else { return }
-            Task { await store.tagging.importModelPack(from: url) }
-        }
-        .alert("Remove imported pack?", isPresented: $showRemovePackAlert) {
-            Button("Cancel", role: .cancel) { }
-            Button("Remove", role: .destructive) {
-                Task { await store.tagging.removeImportedPack() }
+            if let footer = taggingFooter {
+                Text(footer)
+            } else {
+                Text("Scan Photos runs tagging, faces, and places, skipping work that is already current. Drop and Rescan overwrites one of those passes on every photo. Scan Activity → On file lists People tags with no detected face.")
             }
-        } message: {
-            Text("Deletes the imported model pack and goes back to the one that ships with the app. Tags already written to `.xmp` sidecars are kept.")
-        }
-        .alert("Reset tagging data?", isPresented: $showResetTaggingAlert) {
-            Button("Cancel", role: .cancel) { }
-            Button("Reset", role: .destructive) {
-                Task { await store.tagging.resetQueue() }
-            }
-        } message: {
-            Text("Clears the tagging queue so every photo is considered again. Tags already written to `.xmp` sidecars are kept, and the cached image embeddings are kept too, so re-tagging does not re-run inference.")
         }
         .task {
-            // Cheap on repeat visits: a pack whose manifest hasn't changed
-            // since it was verified isn't re-hashed. See `PackFingerprint`.
             await store.tagging.refreshAvailability()
         }
+    }
+
+    /// Idle count, or a waiting line while the run has not written yet.
+    /// The row stays tappable during a scan — that is the point of the screen.
+    private var scanActivitySubtitle: String {
+        let activity = store.analysis.activity
+        if store.analysis.isRunning, activity.entries.isEmpty {
+            return "Waiting…"
+        }
+        if activity.entries.isEmpty { return "None" }
+        return activity.entries.count.formatted()
     }
 
     private var modelPackSummary: String {
@@ -446,136 +357,41 @@ struct SettingsView: View {
         return tagging.hasCheckedForPack ? "None installed" : "Checking…"
     }
 
-    /// What the section says about itself.
-    ///
-    /// The app ships a pack, so "no pack" is no longer a state the user is
-    /// expected to be in: either this build never staged one
-    /// (`scripts/prepare_pack.sh`) or the bundled one failed verification.
-    /// Only the first is fixed by importing, so only the first says so.
-    private var taggingFooter: String {
+    /// Footer only when there is no usable pack — tagging and faces stay off,
+    /// but reverse-geocoding still runs from Scan Photos.
+    private var taggingFooter: String? {
         let tagging = store.tagging
-        let base = "Tags photos with the photo-tools Objects and Scenes taxonomy and writes the result into each photo's `.xmp` sidecar — the image files are never modified. Everything runs on this device, and tagging a photo twice writes nothing. A pack that also ships face models adds face scanning: groups of faces appear under People › Review New People, and naming one writes `People/<name>` keywords and face regions to the same sidecars."
-        guard tagging.hasCheckedForPack, tagging.pack == nil else {
-            return base + " Importing a newer pack replaces the one in use; whichever pack has the higher version wins."
-        }
+        guard tagging.hasCheckedForPack, tagging.pack == nil else { return nil }
         if tagging.hasBundledPack {
-            return base + " The model pack that ships with this build could not be verified. Importing a pack replaces it."
+            return "The model pack that ships with this build could not be verified. Tagging and face scanning are off; place names from GPS still work."
         }
-        return base + " This build ships no model pack, so tagging is off until you import one."
+        return "This build ships no model pack, so tagging and face scanning are off. Place names from GPS still work."
     }
 
-    @ViewBuilder
-    private var taggingProgressRow: some View {
-        let progress = store.tagging.progress
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                ProgressView()
-                    .controlSize(.small)
-                Text("Tagging…")
-                    .font(.caption.weight(.semibold))
-                Spacer(minLength: 0)
-                if let progress {
-                    Text("\(progress.done) / \(progress.total)")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
-            }
-            if let progress, progress.total > 0 {
-                ProgressView(value: Double(progress.done), total: Double(progress.total))
-                    .progressViewStyle(.linear)
-            } else {
-                ProgressView().progressViewStyle(.linear)
-            }
+    private static func analysisSummaryLine(_ summary: LibraryAnalysis.Summary) -> String {
+        if summary.cancelled
+            && summary.tagging == nil
+            && summary.faces == nil
+            && summary.places == nil
+        {
+            return "Cancelled"
         }
-    }
-
-    // MARK: - Faces
-
-    /// The faces half of the On-device Tagging section.
-    ///
-    /// Rows rather than a section of its own: faces come from the *same* model
-    /// pack, and a separate section would imply a separate thing to install.
-    /// Present only when the installed pack actually ships face models — a
-    /// tagging-only pack is valid, so there is nothing to explain.
-    @ViewBuilder
-    private var facesRows: some View {
-        let faces = store.faces
-        if faces.isAvailable {
-            if faces.isRunning {
-                facesProgressRow
-                Button(role: .destructive) {
-                    faces.cancel()
-                } label: {
-                    Label("Cancel Face Scan", systemImage: "stop.circle")
-                }
-            } else {
-                Button {
-                    Task { await store.faces.startScan() }
-                } label: {
-                    Label("Scan Faces", systemImage: "person.crop.square.badge.camera")
-                }
-                .disabled(store.isScanning || store.allPhotos.isEmpty || store.tagging.isRunning)
-            }
-
-            if let summary = faces.lastSummary {
-                LabeledContent("Last Face Scan") {
-                    Text(Self.faceSummaryLine(summary))
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            if let error = faces.lastError, error != .cancelled {
-                Text(error.message)
-                    .font(.footnote)
-                    .foregroundStyle(.red)
-            }
+        var parts: [String] = []
+        if let tagging = summary.tagging {
+            if tagging.tagged > 0 { parts.append("\(tagging.tagged) tagged") }
+            else if tagging.processed > 0 { parts.append("\(tagging.processed) photos") }
         }
-    }
-
-    @ViewBuilder
-    private var facesProgressRow: some View {
-        let progress = store.faces.progress
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                ProgressView()
-                    .controlSize(.small)
-                Text("Finding faces…")
-                    .font(.caption.weight(.semibold))
-                Spacer(minLength: 0)
-                if let progress {
-                    Text("\(progress.done) / \(progress.total)")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
-            }
-            if let progress, progress.total > 0 {
-                ProgressView(value: Double(progress.done), total: Double(progress.total))
-                    .progressViewStyle(.linear)
-            } else {
-                ProgressView().progressViewStyle(.linear)
-            }
+        if let faces = summary.faces, faces.facesFound > 0 {
+            parts.append("\(faces.facesFound) faces")
         }
-    }
-
-    private static func faceSummaryLine(_ summary: FaceService.Summary) -> String {
-        if summary.processed == 0 && summary.facesFound == 0 {
-            return summary.cancelled ? "Cancelled" : "Nothing to do"
+        if let places = summary.places, places.written > 0 {
+            parts.append("\(places.written) places")
         }
-        var parts = ["\(summary.facesFound) faces", "\(summary.clustersCreated) new groups"]
-        if summary.sidecarsWritten > 0 { parts.append("\(summary.sidecarsWritten) written") }
-        if summary.failed > 0 { parts.append("\(summary.failed) failed") }
+        if let tagging = summary.tagging, tagging.failed > 0 { parts.append("\(tagging.failed) failed") }
+        if let faces = summary.faces, faces.failed > 0 { parts.append("\(faces.failed) failed") }
+        if let places = summary.places, places.failed > 0 { parts.append("\(places.failed) failed") }
         if summary.cancelled { parts.append("cancelled") }
-        return parts.joined(separator: ", ")
-    }
-
-    private static func summaryLine(_ summary: TaggingService.Summary) -> String {
-        if summary.processed == 0 && summary.sidecarsWritten == 0 {
-            return summary.cancelled ? "Cancelled" : "Nothing to do"
-        }
-        var parts = ["\(summary.tagged) tagged", "\(summary.sidecarsWritten) written"]
-        if summary.failed > 0 { parts.append("\(summary.failed) failed") }
-        if summary.cancelled { parts.append("cancelled") }
-        return parts.joined(separator: ", ")
+        return parts.isEmpty ? "Nothing to do" : parts.joined(separator: ", ")
     }
 
     // MARK: - Cloud Storage
@@ -655,6 +471,49 @@ struct SettingsView: View {
         }
     }
 
+}
+
+/// One Settings action row that keeps its title and swaps the trailing
+/// accessory: idle value on the right (last synced / last scan), or the
+/// shared progress chip + Cancel while running.
+private struct SettingsProgressRow: View {
+    let title: String
+    let systemImage: String
+    let phase: String
+    let progressText: String?
+    let isRunning: Bool
+    let disabled: Bool
+    var idleTrailing: String? = nil
+    let action: () -> Void
+    let cancel: () -> Void
+
+    var body: some View {
+        if isRunning {
+            HStack(spacing: 8) {
+                ScanProgressChip(phase: phase, detail: progressText)
+                Spacer(minLength: 8)
+                Button("Cancel", action: cancel)
+                    .font(.subheadline)
+                    .buttonStyle(.borderless)
+                    .layoutPriority(2)
+            }
+        } else {
+            Button(action: action) {
+                if let idleTrailing {
+                    LabeledContent {
+                        Text(idleTrailing)
+                            .foregroundStyle(.secondary)
+                    } label: {
+                        Label(title, systemImage: systemImage)
+                    }
+                } else {
+                    Label(title, systemImage: systemImage)
+                }
+            }
+            .tint(.primary)
+            .disabled(disabled)
+        }
+    }
 }
 
 // MARK: - Hidden People sub-screen

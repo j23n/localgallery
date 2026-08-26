@@ -129,4 +129,4 @@ else
 fi
 echo "    $(du -sh "$DEST" | cut -f1)  $DEST"
 echo
-echo "Next: ./scripts/build_core.sh && xcodegen && xcodebuild ..."
+echo "Next: xcodegen && xcodebuild  (the Xcode build compiles the Rust core)"

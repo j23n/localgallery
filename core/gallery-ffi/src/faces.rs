@@ -313,8 +313,10 @@ pub struct FaceLibraryStats {
     pub unlabeled_clusters: u64,
     /// Clusters a person's name is attached to.
     pub named_clusters: u64,
-    /// Clusters the user dismissed.
+    /// Clusters the user ignored (passer-by).
     pub ignored_clusters: u64,
+    /// Clusters the user rejected (not a person / not a face).
+    pub rejected_clusters: u64,
     /// Outstanding merge proposals. Computed and stored; applying one is not
     /// implemented (Phase 2 status), so this is advisory.
     pub merge_proposals: u64,
@@ -402,8 +404,10 @@ pub enum ClusterState {
     Unlabeled,
     /// A person's name is attached; new faces joining it are auto-tagged.
     Named,
-    /// The user said "not a person".
+    /// A real face the user does not want to name (passer-by, poster).
     Ignored,
+    /// The user said "not a person" / "not a face".
+    Rejected,
 }
 
 impl From<CoreClusterState> for ClusterState {
@@ -412,6 +416,7 @@ impl From<CoreClusterState> for ClusterState {
             CoreClusterState::Unlabeled => ClusterState::Unlabeled,
             CoreClusterState::Named => ClusterState::Named,
             CoreClusterState::Ignored => ClusterState::Ignored,
+            CoreClusterState::Rejected => ClusterState::Rejected,
         }
     }
 }
@@ -570,13 +575,13 @@ pub trait FaceProgressListener: Send + Sync {
     /// Throttled progress, plus one final call at the end of the run.
     fn on_progress(&self, done: u32, total: u32);
 
-    /// Absolute paths that turned out to contain at least one face, batched.
+    /// Absolute paths this run finished, batched — with faces or without.
     ///
-    /// A *cache* change, not a disk change: nothing has been written yet.
+    /// The app journals these into Scan Activity as the scan goes.
     fn on_photos_with_faces(&self, paths: Vec<String>);
 
-    /// Absolute paths whose sidecars the auto-tag pass rewrote, once, near the
-    /// end of the run.
+    /// Absolute paths whose sidecars this run actually rewrote (per-photo
+    /// stamp, mid-run named write, or the auto-tag pass).
     ///
     /// This is the one that obliges the app to re-read sidecars.
     fn on_sidecars_written(&self, paths: Vec<String>);
@@ -755,11 +760,18 @@ impl FaceSession {
         cache_db_path: String,
         model_pack_dir: String,
     ) -> Result<Arc<FaceSession>, FaceError> {
-        let engine = FaceEngine::open(&cache_db_path, &model_pack_dir, Arc::new(StdVfs))?;
-        Ok(Arc::new(FaceSession {
-            engine: Arc::new(engine),
-            run: RunLock::new(),
-        }))
+        open_face_session(cache_db_path, model_pack_dir, None)
+    }
+
+    /// [`FaceSession::new`] with a platform HEIC decoder. See tagging's
+    /// `with_heic_decoder` — same decoder, same reason.
+    #[uniffi::constructor]
+    pub fn with_heic_decoder(
+        cache_db_path: String,
+        model_pack_dir: String,
+        decoder: Arc<dyn crate::HeicDecoder>,
+    ) -> Result<Arc<FaceSession>, FaceError> {
+        open_face_session(cache_db_path, model_pack_dir, Some(decoder))
     }
 
     /// Add paths to the face queue; returns how many rows were newly inserted.
@@ -836,6 +848,56 @@ impl FaceSession {
         }
     }
 
+    /// Force-scan one photo. Re-opens its queue row so a prior `done` does
+    /// not skip it, and confines the run to that path so neighbours stay put.
+    pub fn start_one(
+        &self,
+        progress: Arc<dyn FaceProgressListener>,
+        path: String,
+        root_prefix: Option<String>,
+    ) -> Result<(), FaceError> {
+        self.engine.reopen(&path)?;
+        let engine = Arc::clone(&self.engine);
+        let listener = Arc::clone(&progress);
+        let spawned = self.run.start("gallery-faces", move |cancel, running| {
+            let reporter = Arc::clone(&listener);
+            let mut guard = FinishGuard::new(running, move |summary| {
+                reporter.on_finished(summary.unwrap_or_else(|| {
+                    FaceRunSummary::failed_with(FaceFailure::Inference, false)
+                }));
+            });
+            let adapter = ProgressAdapter {
+                inner: Arc::clone(&listener),
+            };
+            let opts = FaceRunOptions {
+                tagged_at: Some(iso8601_utc_now()),
+                root_prefix,
+                force: true,
+                only_paths: Some(vec![path]),
+                ..FaceRunOptions::default()
+            };
+            let outcome = engine.run_with_options(&adapter, &cancel, &opts);
+            guard.summary = Some(match outcome {
+                Ok(s) => FaceRunSummary::from(s),
+                Err(e) => {
+                    let err = FaceError::from(e);
+                    FaceRunSummary::failed_with(
+                        FaceFailure::from(&err),
+                        cancel.load(Ordering::Acquire),
+                    )
+                }
+            });
+        });
+        match spawned {
+            Ok(()) => Ok(()),
+            Err(StartError::AlreadyRunning) => Err(FaceError::AlreadyRunning),
+            Err(StartError::Spawn(detail)) => Err(FaceError::Io {
+                path: String::new(),
+                detail: format!("could not spawn face thread: {detail}"),
+            }),
+        }
+    }
+
     /// Ask the in-flight run to stop. Returns immediately; the run ends at the
     /// next photo (or the next face of a group shot) and reports through
     /// `on_finished` with `cancelled == true`.
@@ -869,6 +931,7 @@ impl FaceSession {
             unlabeled_clusters: s.unlabeled_clusters,
             named_clusters: s.named_clusters,
             ignored_clusters: s.ignored_clusters,
+            rejected_clusters: s.rejected_clusters,
             merge_proposals: s.merge_proposals,
         })
     }
@@ -890,18 +953,19 @@ impl FaceSession {
     /// that is about to grow.
     pub fn clusters(&self) -> Result<Vec<ClusterSummary>, FaceError> {
         let rows = self.engine.clusters()?;
+        let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+        let mut thumbs = self
+            .engine
+            .cache()
+            .cluster_face_thumbs_for(&ids, EXEMPLAR_POOL)?;
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
-            let thumbs = self
-                .engine
-                .cache()
-                .cluster_face_thumbs(row.id, EXEMPLAR_POOL)?;
             out.push(ClusterSummary {
                 id: row.id,
                 size: row.size,
                 state: row.state.into(),
                 name: row.person_name,
-                exemplars: exemplars(thumbs),
+                exemplars: exemplars(thumbs.remove(&row.id).unwrap_or_default()),
             });
         }
         Ok(out)
@@ -971,8 +1035,8 @@ impl FaceSession {
             .into())
     }
 
-    /// Dismiss a cluster ("not a person") and retract anything it had written.
-    /// Kept rather than deleted, so its faces do not come back as a fresh
+    /// Ignore a cluster (passer-by / poster) and retract anything it had written.
+    /// Kept rather than deleted, so those faces do not come back as a fresh
     /// cluster on the next pass.
     pub fn ignore_cluster(
         &self,
@@ -983,6 +1047,21 @@ impl FaceSession {
         Ok(self
             .engine
             .ignore_cluster(cluster_id, Some(&iso8601_utc_now()), root_prefix.as_deref())?
+            .into())
+    }
+
+    /// Reject a cluster ("not a person" / "not a face") and retract anything
+    /// it had written. Kept rather than deleted, so the detections do not
+    /// come back as a fresh cluster on the next pass.
+    pub fn reject_cluster(
+        &self,
+        cluster_id: i64,
+        root_prefix: Option<String>,
+    ) -> Result<SidecarWriteReport, FaceError> {
+        let _guard = self.mutating()?;
+        Ok(self
+            .engine
+            .reject_cluster(cluster_id, Some(&iso8601_utc_now()), root_prefix.as_deref())?
             .into())
     }
 
@@ -1022,10 +1101,29 @@ impl FaceSession {
         from: i64,
         root_prefix: Option<String>,
     ) -> Result<SidecarWriteReport, FaceError> {
+        self.merge_clusters_many(into, vec![from], root_prefix)
+    }
+
+    /// Fold every cluster in `from` into `into` in one pass.
+    ///
+    /// Same policy as [`FaceSession::merge_clusters`], once: one membership
+    /// move, one centroid, one sidecar rewrite. An empty `from` is a no-op.
+    /// Refused while a run is in flight — see the module docs.
+    pub fn merge_clusters_many(
+        &self,
+        into: i64,
+        from: Vec<i64>,
+        root_prefix: Option<String>,
+    ) -> Result<SidecarWriteReport, FaceError> {
         let _guard = self.mutating()?;
         Ok(self
             .engine
-            .merge_clusters(into, from, Some(&iso8601_utc_now()), root_prefix.as_deref())?
+            .merge_clusters_many(
+                into,
+                &from,
+                Some(&iso8601_utc_now()),
+                root_prefix.as_deref(),
+            )?
             .into())
     }
 
@@ -1089,6 +1187,38 @@ impl FaceSession {
         Ok(())
     }
 
+    /// REMOVE AFTER: named-keyword-resync. Delete this method with that module.
+    ///
+    /// Re-derive `People/<Name>` onto photos of already-named clusters, once.
+    /// A successful pass is a no-op afterwards. Refused while a run is in
+    /// flight — same lock as the other writers.
+    pub fn resync_named_keywords_once(
+        &self,
+        root_prefix: Option<String>,
+    ) -> Result<SidecarWriteReport, FaceError> {
+        let _guard = self.mutating()?;
+        Ok(self
+            .engine
+            .resync_named_keywords_once(Some(&iso8601_utc_now()), root_prefix.as_deref())?
+            .into())
+    }
+
+    /// REMOVE AFTER: face-decision-resync. Delete this method with that module.
+    ///
+    /// Write `CoreFaceDecisions` for already-dismissed clusters, once.
+    /// A successful pass is a no-op afterwards. Refused while a run is in
+    /// flight — same lock as the other writers.
+    pub fn resync_face_decisions_once(
+        &self,
+        root_prefix: Option<String>,
+    ) -> Result<SidecarWriteReport, FaceError> {
+        let _guard = self.mutating()?;
+        Ok(self
+            .engine
+            .resync_face_decisions_once(Some(&iso8601_utc_now()), root_prefix.as_deref())?
+            .into())
+    }
+
     /// Rebuild the partition of every unlabeled face from scratch.
     ///
     /// Named, ignored and hand-edited (merged or split) clusters are untouched.
@@ -1113,6 +1243,21 @@ impl Drop for FaceSession {
     fn drop(&mut self) {
         self.run.shutdown();
     }
+}
+
+fn open_face_session(
+    cache_db_path: String,
+    model_pack_dir: String,
+    decoder: Option<Arc<dyn crate::HeicDecoder>>,
+) -> Result<Arc<FaceSession>, FaceError> {
+    let mut engine = FaceEngine::open(&cache_db_path, &model_pack_dir, Arc::new(StdVfs))?;
+    if let Some(decoder) = decoder {
+        engine = engine.with_heic_decoder(Arc::new(crate::heic::HeicDecoderAdapter(decoder)));
+    }
+    Ok(Arc::new(FaceSession {
+        engine: Arc::new(engine),
+        run: RunLock::new(),
+    }))
 }
 
 #[cfg(test)]

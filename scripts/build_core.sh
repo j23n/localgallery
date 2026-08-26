@@ -2,18 +2,20 @@
 #
 # Build the Rust core and assemble everything Xcode needs:
 #
-#   build/core/GalleryCore.xcframework   static lib + headers + modulemap
-#   build/core/Generated/GalleryCore.swift  UniFFI-generated Swift bindings
+#   build/core/GalleryCore.xcframework     static lib (no clang module)
+#   build/core/headers/GalleryCoreFFI.h    C FFI, via the app bridging header
+#   build/core/Generated/GalleryCore.swift UniFFI Swift, compiled into the app
 #
-# Usage:  ./scripts/build_core.sh [--release]
+# Usage:
+#   ./scripts/build_core.sh [--release] [--sdk iphoneos|iphonesimulator|all]
 #
-# Run this before `xcodegen`/`xcodebuild` whenever the Rust sources change.
-# Cargo is deliberately *not* wired into an Xcode script phase: Xcode's script
-# sandboxing (ENABLE_USER_SCRIPT_SANDBOXING) fights cargo's file access, and a
-# sandbox escape hatch is worse than one explicit command.
+# Xcode's LocalGallery target runs this as a pre-build script. Inside Xcode
+# it reads CONFIGURATION (Release → --release) and PLATFORM_NAME (so a
+# simulator build does not also compile the device slice). User Script
+# Sandboxing is off on the project: cargo needs ~/.cargo, rustup, core/target,
+# and the ORT download cache.
 #
-# Builds both the device (`aarch64-apple-ios`) and simulator
-# (`aarch64-apple-ios-sim`) slices into one xcframework so Xcode can switch
+# From the CLI, both slices are built so the xcframework can switch
 # destinations without a rebuild.
 #
 # ## ONNX Runtime
@@ -66,16 +68,55 @@ XCFRAMEWORK="$OUT_DIR/$MODULE.xcframework"
 # cargo uses for the default builds ("debug" / "release").
 PROFILE="debug"
 CARGO_PROFILE="dev"
-for arg in "$@"; do
-    case "$arg" in
-        --release) PROFILE="release"; CARGO_PROFILE="release" ;;
+SDK="all"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --release) PROFILE="release"; CARGO_PROFILE="release"; shift ;;
+        --sdk)
+            SDK="${2:?--sdk requires iphoneos, iphonesimulator, or all}"
+            shift 2
+            ;;
+        --sdk=*)
+            SDK="${1#--sdk=}"
+            shift
+            ;;
         # Everything from the shebang to the `set -e` is the doc comment.
         -h|--help) sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d'; exit 0 ;;
-        *) echo "error: unknown argument '$arg' (expected --release)" >&2; exit 2 ;;
+        *) echo "error: unknown argument '$1' (expected --release or --sdk)" >&2; exit 2 ;;
     esac
 done
 
+# Inside Xcode, match the destination and configuration so a Debug simulator
+# run is not also a device Release compile.
+if [[ -n "${XCODE_VERSION_ACTUAL:-}" ]]; then
+    if [[ "$PROFILE" == "debug" && "${CONFIGURATION:-}" == "Release" ]]; then
+        PROFILE="release"
+        CARGO_PROFILE="release"
+    fi
+    if [[ "$SDK" == "all" ]]; then
+        case "${PLATFORM_NAME:-}" in
+            iphoneos) SDK="iphoneos" ;;
+            iphonesimulator) SDK="iphonesimulator" ;;
+        esac
+    fi
+fi
+
+case "$SDK" in
+    all|iphoneos|iphonesimulator) ;;
+    *) echo "error: --sdk must be iphoneos, iphonesimulator, or all (got $SDK)" >&2; exit 2 ;;
+esac
+
+BUILD_DEVICE=0
+BUILD_SIM=0
+if [[ "$SDK" == "all" || "$SDK" == "iphoneos" ]]; then
+    BUILD_DEVICE=1
+fi
+if [[ "$SDK" == "all" || "$SDK" == "iphonesimulator" ]]; then
+    BUILD_SIM=1
+fi
+
 # Homebrew's rustup is keg-only, so cargo isn't on a default PATH.
+# Xcode's script PATH is also too thin for cargo.
 if ! command -v cargo >/dev/null 2>&1; then
     export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
 fi
@@ -186,30 +227,48 @@ build_and_merge() {
     echo "+onnxrt:   $(du -h "$MERGED_LIB" | cut -f1)  $MERGED_LIB"
 }
 
-build_and_merge "$DEVICE_TARGET" "$PLATFORM_IOS" "IOS"
-DEVICE_MERGED="$MERGED_LIB"
-build_and_merge "$SIM_TARGET" "$PLATFORM_IOSSIMULATOR" "IOSSIMULATOR"
-SIM_MERGED="$MERGED_LIB"
+DEVICE_MERGED=""
+SIM_MERGED=""
+if [[ "$BUILD_DEVICE" -eq 1 ]]; then
+    build_and_merge "$DEVICE_TARGET" "$PLATFORM_IOS" "IOS"
+    DEVICE_MERGED="$MERGED_LIB"
+fi
+if [[ "$BUILD_SIM" -eq 1 ]]; then
+    build_and_merge "$SIM_TARGET" "$PLATFORM_IOSSIMULATOR" "IOSSIMULATOR"
+    SIM_MERGED="$MERGED_LIB"
+fi
 
-# UniFFI reads the interface metadata straight out of the built library, so the
-# bindings can never drift from the binary they describe. Either slice works;
-# the simulator dylib is enough and keeps the bindgen step independent of
-# which destination the developer will run next.
-#
-# Note: *not* `--xcframework`. That flag emits `framework module GalleryCoreFFI`,
-# which only resolves inside a real .framework bundle; a library-based
-# xcframework exposes a plain Headers directory, so it needs a plain
-# `module` declaration or `#if canImport(GalleryCoreFFI)` silently fails and the
-# app fails to compile with "Cannot find type 'RustBuffer' in scope".
+# UniFFI reads the interface metadata out of the dylib this run produced.
+# Swift must not `import GalleryCoreFFI` from the xcframework: Xcode caches
+# that clang module and a device-only (or sim-only) rebuild leaves the
+# other slice's *old* header in DerivedData. New GalleryCore.swift then
+# calls `uniffi_…_heicdecoder` symbols the cached module does not declare.
+# C decls come from the bridging header instead (the .h this run wrote).
 echo "==> uniffi-bindgen (swift)"
 STAGING="$(mktemp -d)"
 trap 'rm -rf "$STAGING"' EXIT
 SIM_DYLIB="$CORE_DIR/target/$SIM_TARGET/$PROFILE/$DYLIB_NAME"
+DEVICE_DYLIB="$CORE_DIR/target/$DEVICE_TARGET/$PROFILE/$DYLIB_NAME"
+# Use a dylib this run just produced. Preferring whichever sim slice
+# happens to exist is how a device-only Xcode build links a new
+# xcframework against Swift bindings generated from yesterday's sim
+# dylib — UniFFI then fatalErrors on API checksum mismatch.
+BINDGEN_DYLIB=""
+if [[ "$BUILD_SIM" -eq 1 && -f "$SIM_DYLIB" ]]; then
+    BINDGEN_DYLIB="$SIM_DYLIB"
+elif [[ "$BUILD_DEVICE" -eq 1 && -f "$DEVICE_DYLIB" ]]; then
+    BINDGEN_DYLIB="$DEVICE_DYLIB"
+fi
+if [[ -z "$BINDGEN_DYLIB" ]]; then
+    echo "error: no gallery-ffi dylib from this build to run uniffi-bindgen against" >&2
+    exit 1
+fi
+echo "    bindgen library: $BINDGEN_DYLIB"
 (cd "$CORE_DIR" && cargo run --quiet -p uniffi-bindgen --bin uniffi-bindgen-swift -- \
     --swift-sources --headers --modulemap \
     --module-name "${MODULE}FFI" \
     --modulemap-filename module.modulemap \
-    "$SIM_DYLIB" "$STAGING")
+    "$BINDGEN_DYLIB" "$STAGING")
 
 for expected in "$MODULE.swift" "${MODULE}FFI.h" "module.modulemap"; do
     [[ -f "$STAGING/$expected" ]] || {
@@ -229,22 +288,56 @@ copy_if_changed() {
     fi
 }
 
+# Drop `#if canImport(GalleryCoreFFI) / import GalleryCoreFFI`. Those C
+# types come from LocalGallery/GalleryCore-Bridging-Header.h instead.
+strip_gallerycore_ffi_import() {
+    python3 -c '
+import pathlib, re, sys
+p = pathlib.Path(sys.argv[1])
+text = p.read_text()
+patched, n = re.subn(
+    r"\n#if canImport\(GalleryCoreFFI\)\nimport GalleryCoreFFI\n#endif\n",
+    "\n",
+    text,
+    count=1,
+)
+if n:
+    p.write_text(patched)
+' "$1"
+}
+
 mkdir -p "$HEADERS_DIR" "$GENERATED_DIR"
 copy_if_changed "$STAGING/$MODULE.swift" "$GENERATED_DIR/$MODULE.swift"
+strip_gallerycore_ffi_import "$GENERATED_DIR/$MODULE.swift"
 copy_if_changed "$STAGING/${MODULE}FFI.h" "$HEADERS_DIR/${MODULE}FFI.h"
-copy_if_changed "$STAGING/module.modulemap" "$HEADERS_DIR/module.modulemap"
+# Do not install a clang module named GalleryCoreFFI. Xcode caches it.
+rm -f "$HEADERS_DIR/module.modulemap"
+APP_BINDINGS="$ROOT/LocalGallery/$MODULE.swift"
+if [[ -e "$APP_BINDINGS" ]]; then
+    copy_if_changed "$GENERATED_DIR/$MODULE.swift" "$APP_BINDINGS"
+fi
+if [[ -n "${MODULE_CACHE_DIR:-}" ]]; then
+    rm -rf "$MODULE_CACHE_DIR"/GalleryCoreFFI-* 2>/dev/null || true
+fi
 
 echo "==> $MODULE.xcframework"
-# -create-xcframework refuses to overwrite, so this is a clean rebuild every
-# time. It is fast (a copy) compared to the cargo builds above.
+# Library only — headers are the bridging header, not a GalleryCoreFFI module.
 rm -rf "$XCFRAMEWORK"
+XC_ARGS=()
+if [[ -n "$DEVICE_MERGED" ]]; then
+    XC_ARGS+=(-library "$DEVICE_MERGED")
+fi
+if [[ -n "$SIM_MERGED" ]]; then
+    XC_ARGS+=(-library "$SIM_MERGED")
+fi
 xcodebuild -create-xcframework \
-    -library "$DEVICE_MERGED" -headers "$HEADERS_DIR" \
-    -library "$SIM_MERGED" -headers "$HEADERS_DIR" \
+    "${XC_ARGS[@]}" \
     -output "$XCFRAMEWORK" >/dev/null
 
 echo
 echo "framework: $XCFRAMEWORK"
 echo "bindings:  $GENERATED_DIR/$MODULE.swift"
-echo
-echo "Next: xcodegen && xcodebuild ..."
+if [[ -z "${XCODE_VERSION_ACTUAL:-}" ]]; then
+    echo
+    echo "Next: xcodegen && xcodebuild ..."
+fi

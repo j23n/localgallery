@@ -15,8 +15,8 @@ import XCTest
 /// and several in `face_bright.png`, so "which photos should have gained a
 /// sidecar" is a property of the inputs rather than of a model nobody can read.
 ///
-/// If these fail, suspect the build chain first:
-/// `./scripts/build_core.sh && xcodegen`.
+/// If these fail, suspect the build chain first: Xcode's **Build Rust Core**
+/// phase (`scripts/build_core.sh`).
 final class FaceSessionTests: XCTestCase {
     private var temp: TempDir!
 
@@ -104,7 +104,8 @@ final class FaceSessionTests: XCTestCase {
             }
         }
         // And the inspector reports the same fact without opening a session,
-        // which is how Settings decides whether to show "Scan Faces".
+        // which is how the app decides whether the face pass of Scan Photos
+        // can run.
         let tagOnly = try inspectModelPack(modelPackDir: try resourceDirectory("testpack").path)
         XCTAssertFalse(tagOnly.hasFaces)
         let withFaces = try inspectModelPack(modelPackDir: try resourceDirectory("facepack").path)
@@ -130,8 +131,11 @@ final class FaceSessionTests: XCTestCase {
         XCTAssertEqual(summary.failed, 0)
         XCTAssertGreaterThan(summary.facesFound, 0, "the fixtures contain faces")
         XCTAssertGreaterThan(summary.clustersCreated, 0)
-        XCTAssertEqual(summary.facesAutoTagged, 0, "nothing is named yet, so nothing is written")
-        XCTAssertEqual(summary.sidecarsWritten, 0)
+        XCTAssertEqual(summary.facesAutoTagged, 0, "nothing is named yet, so nobody is written")
+        XCTAssertEqual(
+            summary.sidecarsWritten, Self.stagedPhotos.count,
+            "every scanned photo gets a CoreFacePack stamp"
+        )
         XCTAssertFalse(session.isRunning())
 
         // Progress: at least one report, always the same total, ending at 100%,
@@ -140,14 +144,17 @@ final class FaceSessionTests: XCTestCase {
         XCTAssertTrue(recorder.progressReports.allSatisfy { $0.total == Self.stagedPhotos.count })
         XCTAssertEqual(recorder.progressReports.last?.done, Self.stagedPhotos.count)
         XCTAssertEqual(recorder.finishedCount, 1)
-        // Detections went into the cache; nothing on disk changed, so the two
-        // path callbacks disagree — which is the whole reason they are separate.
-        XCTAssertGreaterThan(recorder.photosWithFaces.count, 0)
-        XCTAssertEqual(recorder.sidecarsWritten.count, 0)
+        XCTAssertEqual(recorder.photosWithFaces.count, Self.stagedPhotos.count)
+        XCTAssertEqual(recorder.sidecarsWritten.count, Self.stagedPhotos.count)
         for name in Self.stagedPhotos {
-            XCTAssertFalse(
+            XCTAssertTrue(
                 FileManager.default.fileExists(atPath: sidecar(name).path),
-                "\(name) gained a sidecar from a run that named nobody"
+                "\(name) should have a scan stamp"
+            )
+            let xmp = try parsed(name)
+            XCTAssertFalse(
+                xmp.rawTags.contains(where: { $0.hasPrefix("People/") }),
+                "\(name) was named before anyone confirmed: \(xmp.rawTags)"
             )
         }
 
@@ -234,12 +241,13 @@ final class FaceSessionTests: XCTestCase {
         XCTAssertEqual(named.name, "Ada Lovelace")
         XCTAssertEqual(try session.libraryStats().namedClusters, 1)
 
-        // Photos the cluster never reached are untouched — naming one person
-        // must not create a sidecar next to every photo in the library.
+        // Photos the cluster never reached keep their scan stamp but must
+        // not gain this person's keyword.
         for name in Self.stagedPhotos where !touched.contains(temp.appending(name).path) {
+            let xmp = try parsed(name)
             XCTAssertFalse(
-                FileManager.default.fileExists(atPath: sidecar(name).path),
-                "\(name) got a sidecar it should not have"
+                xmp.rawTags.contains("People/Ada Lovelace"),
+                "\(name) was named without being in the cluster: \(xmp.rawTags)"
             )
         }
     }
@@ -312,6 +320,19 @@ final class FaceSessionTests: XCTestCase {
         XCTAssertEqual(dismissed.state, .ignored)
         XCTAssertNil(dismissed.name)
         XCTAssertEqual(try session.libraryStats().ignoredClusters, 1)
+    }
+
+    func testRejectingAClusterKeepsItOutOfTheReviewQueue() async throws {
+        try stageLibrary()
+        let session = try makeSession()
+        try await scan(session)
+        let cluster = try biggestCluster(session)
+
+        _ = try session.rejectCluster(clusterId: cluster.id, rootPrefix: nil)
+        let dismissed = try XCTUnwrap(try session.clusters().first { $0.id == cluster.id })
+        XCTAssertEqual(dismissed.state, .rejected)
+        XCTAssertNil(dismissed.name)
+        XCTAssertEqual(try session.libraryStats().rejectedClusters, 1)
     }
 
     /// A name a user can type but nobody can use has to come back as its own
@@ -440,6 +461,49 @@ final class FaceSessionTests: XCTestCase {
         )
     }
 
+    /// Two absorbed groups in one call: the name reaches both, and neither
+    /// source survives. Pairwise looping used to rewrite the growing union
+    /// twice; this is one report.
+    func testMergingManyIntoANamedClusterNamesEveryAbsorbedPhoto() async throws {
+        try stageLibrary()
+        let session = try makeSession()
+        try await scan(session)
+        let cluster = try biggestCluster(session)
+        let faces = try session.clusterFaces(clusterId: cluster.id)
+        XCTAssertGreaterThanOrEqual(faces.count, 3)
+
+        let byPath = Dictionary(grouping: faces, by: \.path)
+        let leaving = byPath.keys.sorted().compactMap { path -> (String, String)? in
+            guard let key = byPath[path]?.first?.faceKey else { return nil }
+            return (path, key)
+        }
+        XCTAssertGreaterThanOrEqual(leaving.count, 2, "need two photos to take one face from")
+
+        let first = try session.splitCluster(
+            clusterId: cluster.id, faceKeys: [leaving[0].1], rootPrefix: nil
+        )
+        let second = try session.splitCluster(
+            clusterId: cluster.id, faceKeys: [leaving[1].1], rootPrefix: nil
+        )
+        _ = try session.nameCluster(clusterId: cluster.id, name: "Ada", rootPrefix: nil)
+
+        let report = try session.mergeClustersMany(
+            into: cluster.id, from: [first.newClusterId, second.newClusterId], rootPrefix: nil
+        )
+        XCTAssertGreaterThan(report.written, 0, "\(report)")
+        XCTAssertEqual(report.failed, 0)
+        XCTAssertNil(try session.clusters().first { $0.id == first.newClusterId })
+        XCTAssertNil(try session.clusters().first { $0.id == second.newClusterId })
+        XCTAssertEqual(
+            try session.clusters().first { $0.id == cluster.id }?.size, cluster.size
+        )
+        for (path, _) in leaving.prefix(2) {
+            let name = URL(fileURLWithPath: path).lastPathComponent
+            let joined = try parsed(name)
+            XCTAssertTrue(joined.rawTags.contains("People/Ada"), "\(name): \(joined.rawTags)")
+        }
+    }
+
     /// A selection the boundary never handed out is a programming error and its
     /// own case; a *stale* one — a face the cache no longer has — is counted and
     /// skipped, because a review screen open across a run is ordinary.
@@ -547,14 +611,20 @@ final class FaceSessionTests: XCTestCase {
             ("nameCluster", { _ = try session.nameCluster(clusterId: 1, name: "Ada", rootPrefix: nil) }),
             ("unnameCluster", { _ = try session.unnameCluster(clusterId: 1, rootPrefix: nil) }),
             ("ignoreCluster", { _ = try session.ignoreCluster(clusterId: 1, rootPrefix: nil) }),
+            ("rejectCluster", { _ = try session.rejectCluster(clusterId: 1, rootPrefix: nil) }),
             ("renamePerson", { _ = try session.renamePerson(old: "Ada", new: "Grace", rootPrefix: nil) }),
             ("mergeClusters", { _ = try session.mergeClusters(into: 1, from: 2, rootPrefix: nil) }),
+            ("mergeClustersMany", { _ = try session.mergeClustersMany(into: 1, from: [2, 3], rootPrefix: nil) }),
             ("splitCluster", {
                 _ = try session.splitCluster(clusterId: 1, faceKeys: [], rootPrefix: nil)
             }),
             ("dismissMergeProposal", { try session.dismissMergeProposal(a: 1, b: 2) }),
             ("recluster", { _ = try session.recluster() }),
             ("resetQueue", { try session.resetQueue() }),
+            // REMOVE AFTER: named-keyword-resync
+            ("resyncNamedKeywordsOnce", { _ = try session.resyncNamedKeywordsOnce(rootPrefix: nil) }),
+            // REMOVE AFTER: face-decision-resync
+            ("resyncFaceDecisionsOnce", { _ = try session.resyncFaceDecisionsOnce(rootPrefix: nil) }),
         ]
         for (label, call) in refusals {
             XCTAssertThrowsError(try call(), label) { error in

@@ -14,8 +14,7 @@ struct PeopleListView: View {
         return all.filter { $0.displayName.localizedCaseInsensitiveContains(searchText) }
     }
 
-    /// Unlabeled face clusters big enough to ask about. See
-    /// `FaceService.reviewMinimumFaces` for the threshold and why it is 3.
+    /// Unlabeled face clusters waiting for a name or Ignore.
     private var reviewable: [FaceService.Cluster] {
         store.faces.reviewableClusters
     }
@@ -51,6 +50,28 @@ struct PeopleListView: View {
                     )
                 }
             }
+
+            if filteredPeople.isEmpty, searchText.isEmpty, reviewable.isEmpty {
+                Section {
+                    VStack(spacing: 8) {
+                        Text("No people yet")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(Design.ink)
+                        Text(
+                            store.analysis.isRunning || store.faces.isRunning
+                                ? "Looking for faces in your library. Each group — including a single face — will show up here to name or ignore."
+                                : "After a photo scan, unnamed face groups appear here. Name one and they’ll show up in Collections."
+                        )
+                        .font(.system(size: 13))
+                        .foregroundStyle(Design.ink2)
+                        .multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 28)
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                }
+            }
         }
         .listStyle(.plain)
         .searchable(text: $searchText, prompt: "Search")
@@ -64,8 +85,6 @@ struct PeopleListView: View {
             RenamePersonSheet(person: person)
         }
         .task {
-            // Cheap (one bounded query per cluster) and the only place the
-            // review entry point can learn it has something to offer.
             await store.faces.refreshClusters()
         }
     }
@@ -78,41 +97,30 @@ struct PeopleListRow: View {
     let tag: TagSuggestion
     @Environment(GalleryStore.self) private var store
 
-    private var rowPhotos: [PhotoFile] {
-        let all = store.photos(forTag: tag)
-        guard let cover = store.people.featuredPhoto(for: tag) else {
-            return Array(all.prefix(2))
-        }
-        var result = [cover]
-        if let other = all.first(where: { $0.id != cover.id }) {
-            result.append(other)
-        }
-        return result
+    private var coverPhoto: PhotoFile? {
+        store.people.featuredPhoto(for: tag)
     }
 
     var body: some View {
         HStack(spacing: 12) {
-            HStack(spacing: 4) {
-                ForEach(rowPhotos) { photo in
-                    PersonThumbnailView(
-                        url: photo.url,
-                        region: store.people.faceRegion(for: photo, person: tag.displayName),
-                        size: 52,
-                        cornerRadius: 9,
-                        isRemote: photo.locality.isRemotePlaceholder
-                    )
+            if let photo = coverPhoto {
+                PersonThumbnailView(
+                    url: photo.url,
+                    region: store.people.faceRegion(for: photo, person: tag.displayName),
+                    size: 52,
+                    cornerRadius: 9,
+                    isRemote: photo.locality.isRemotePlaceholder
+                )
+                .frame(width: 52, height: 52)
+            } else {
+                RoundedRectangle(cornerRadius: 9)
+                    .fill(Design.bgGrouped)
                     .frame(width: 52, height: 52)
-                }
-                if rowPhotos.isEmpty {
-                    RoundedRectangle(cornerRadius: 9)
-                        .fill(Design.bgGrouped)
-                        .frame(width: 52, height: 52)
-                        .overlay {
-                            Image(systemName: "person.fill")
-                                .font(.system(size: 22))
-                                .foregroundStyle(Design.ink3)
-                        }
-                }
+                    .overlay {
+                        Image(systemName: "person.fill")
+                            .font(.system(size: 22))
+                            .foregroundStyle(Design.ink3)
+                    }
             }
 
             VStack(alignment: .leading, spacing: 3) {

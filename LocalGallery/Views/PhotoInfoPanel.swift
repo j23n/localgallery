@@ -7,9 +7,11 @@ import MapKit
 struct PhotoInfoPanel: View {
     let photo: PhotoFile
     @Environment(GalleryStore.self) private var store
+    @Environment(\.openURL) private var openURL
     @State private var exifData: EXIFData?
     @State private var photoToolsData: PhotoToolsMetadata = PhotoToolsMetadata()
     @State private var isLoading = true
+    @State private var debugExpanded = false
 
     var body: some View {
         ScrollView {
@@ -29,6 +31,12 @@ struct PhotoInfoPanel: View {
             photoToolsData = await pt
             isLoading = false
         }
+        .onChange(of: store.analysis.isRunning) { _, running in
+            guard !running else { return }
+            Task {
+                photoToolsData = await store.loadPhotoToolsMetadata(for: photo)
+            }
+        }
     }
 
     @ViewBuilder
@@ -38,46 +46,300 @@ struct PhotoInfoPanel: View {
                 .frame(maxWidth: .infinity, minHeight: 200)
         } else {
             VStack(alignment: .leading, spacing: 20) {
-                if !photo.hierarchicalTags.isEmpty {
-                    section("Tags") {
-                        HierarchicalTagFlowView(tags: photo.hierarchicalTags)
-                            .padding(.vertical, 2)
-                    }
+                header
+
+                peopleSection
+
+                if hasPlace {
+                    placeSection
                 }
 
-                if let lat = exifData?.gpsLatitude, let lon = exifData?.gpsLongitude {
-                    section("Location") {
-                        infoRow("Coordinates", value: String(format: "%.5f, %.5f", lat, lon))
-                        mapView(latitude: lat, longitude: lon)
-                    }
+                seenSection
+
+                if hasShot {
+                    shotSection
                 }
 
-                section("File") {
-                    infoRow("Filename", value: photo.filename)
-                    infoRow("Dimensions", value: dimensionsText)
-                    infoRow("File Size", value: formattedFileSize(photo.fileSize))
-                    infoRow("Date Taken", value: formattedDate)
-                }
-
-                section("Camera") {
-                    infoRow("Camera", value: cameraText)
-                    infoRow("Lens", value: exifData?.lens)
-                    infoRow("Aperture", value: apertureText)
-                    infoRow("Shutter Speed", value: shutterSpeedText)
-                    infoRow("ISO", value: exifData?.iso.map { "\($0)" })
-                }
-
-                if !photoToolsData.isEmpty {
-                    section("photo-tools") {
-                        infoRow("Tagger Version", value: photoToolsData.taggerVersion)
-                        infoRow("Tagged At", value: photoToolsData.taggedAt)
-                        infoRow("Country Code", value: photoToolsData.countryCode)
-                        infoRow("CLIP Model", value: photoToolsData.clipModel)
-                        infoRow("CLIP Timestamp", value: photoToolsData.clipTimestamp)
-                    }
-                }
+                debugSection
             }
             .padding(.horizontal, 16)
+        }
+    }
+
+    // MARK: - Header
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let date = takenDate {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(PhotoInfoFormatting.headerDate(date))
+                        .font(.title3.weight(.semibold))
+                    Spacer(minLength: 8)
+                    Text(PhotoInfoFormatting.headerTime(date))
+                        .font(.title3.weight(.regular))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Text(photo.filename)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+
+            if let meta = headerMetaLine {
+                Text(meta)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+
+            if let filesURL = PhotoInfoFormatting.filesAppURL(for: photo.url) {
+                Button {
+                    openURL(filesURL)
+                } label: {
+                    Label("Show in Files", systemImage: "folder")
+                        .font(.subheadline.weight(.medium))
+                }
+                .padding(.top, 4)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 4)
+    }
+
+    // MARK: - People
+
+    private var peopleSection: some View {
+        section("People") {
+            if photo.faceRegions.isEmpty {
+                Text("No faces on this photo.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 4)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(alignment: .top, spacing: 10) {
+                        ForEach(Array(photo.faceRegions.enumerated()), id: \.offset) { index, region in
+                            faceChip(region, index: index)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
+
+            if !photo.peopleTagsWithoutFace.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("On file, no box")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HierarchicalTagFlowView(tags: photo.peopleTagsWithoutFace)
+                }
+                .padding(.top, 6)
+            }
+        }
+    }
+
+    private func faceChip(_ region: FaceRegion, index: Int) -> some View {
+        let label = region.name ?? "Face \(index + 1)"
+        return VStack(spacing: 6) {
+            PersonThumbnailView(
+                url: photo.url,
+                region: region,
+                size: 56,
+                cornerRadius: 8,
+                isRemote: photo.locality.isRemotePlaceholder
+            )
+            Text(label)
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(region.name == nil ? .secondary : .primary)
+                .lineLimit(1)
+                .frame(width: 56)
+        }
+    }
+
+    // MARK: - Place
+
+    private var placeSection: some View {
+        section("Place") {
+            if let title = PhotoChrome.formattedLocation(for: photo) {
+                Text(title)
+                    .font(.subheadline.weight(.medium))
+                    .padding(.vertical, 2)
+            } else {
+                Text("No place yet.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 2)
+            }
+
+            if let lat = latitude, let lon = longitude {
+                Text(String(format: "%.5f, %.5f", lat, lon))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                mapView(latitude: lat, longitude: lon)
+                    .padding(.top, 6)
+            }
+        }
+    }
+
+    // MARK: - Seen
+
+    private var seenSection: some View {
+        section("Seen") {
+            if objectTags.isEmpty && sceneTags.isEmpty && otherSeenTags.isEmpty {
+                Text("Not tagged yet.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 4)
+            } else {
+                if !objectTags.isEmpty {
+                    tagGroup("Objects", tags: objectTags)
+                }
+                if !sceneTags.isEmpty {
+                    tagGroup("Scenes", tags: sceneTags)
+                }
+                if !otherSeenTags.isEmpty {
+                    tagGroup("Other", tags: otherSeenTags)
+                }
+            }
+        }
+    }
+
+    private func tagGroup(_ title: String, tags: [HierarchicalTag]) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HierarchicalTagFlowView(tags: tags)
+        }
+        .padding(.vertical, 4)
+    }
+
+    // MARK: - Shot
+
+    private var shotSection: some View {
+        section("Shot") {
+            if cameraText != nil || exifData?.lens != nil {
+                HStack(alignment: .firstTextBaseline) {
+                    if let camera = cameraText {
+                        Text(camera)
+                            .font(.subheadline.weight(.medium))
+                    }
+                    Spacer(minLength: 8)
+                    if let lens = exifData?.lens {
+                        Text(lens)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.trailing)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+
+            if hasExposure {
+                HStack(spacing: 16) {
+                    if let aperture = apertureText {
+                        Text(aperture)
+                    }
+                    if let shutter = shutterSpeedText {
+                        Text(shutter)
+                    }
+                    if let iso = exifData?.iso {
+                        Text("ISO \(iso)")
+                    }
+                }
+                .font(.subheadline.monospacedDigit())
+                .padding(.vertical, 2)
+            }
+        }
+    }
+
+    // MARK: - Debug
+
+    private var debugSection: some View {
+        section("On-device") {
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) { debugExpanded.toggle() }
+            } label: {
+                HStack(spacing: 8) {
+                    Text(debugExpanded ? "Hide debug" : "Debug")
+                        .font(.subheadline.weight(.medium))
+                    Spacer()
+                    if store.analysis.isRunning && debugExpanded {
+                        ProgressView()
+                            .controlSize(.mini)
+                    }
+                    Image(systemName: debugExpanded ? "chevron.up" : "chevron.down")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .buttonStyle(.plain)
+            .padding(.vertical, 2)
+
+            if debugExpanded {
+                debugBody
+                    .padding(.top, 8)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var debugBody: some View {
+        Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 8) {
+            debugRow("Tag", primary: photoToolsData.taggerVersion, secondary: taggedAgo, detail: clipDetail)
+            debugRow("Face", primary: photoToolsData.facePack, secondary: facedAgo, detail: facesDebugText)
+            debugRow("Place", primary: placeDebugPrimary, secondary: nil, detail: nil)
+            debugRow("Sidecar", primary: PhotoInfoFormatting.sidecarLabel(photo.sidecarStatus), secondary: nil, detail: nil)
+            if let source = PhotoInfoFormatting.dateSourceLabel(
+                hasDate: takenDate != nil,
+                fromMetadata: photo.dateFromMetadata
+            ) {
+                debugRow("Date", primary: source, secondary: nil, detail: nil)
+            }
+        }
+
+        Divider()
+            .padding(.vertical, 10)
+
+        HStack(spacing: 8) {
+            rerunButton("Tag", systemImage: "tag", enabled: canRetag) {
+                Task { await store.analysis.startOne(photo, phases: [.tagging]) }
+            }
+            rerunButton("Faces", systemImage: "person.crop.rectangle", enabled: canRescanFaces) {
+                Task { await store.analysis.startOne(photo, phases: [.faces]) }
+            }
+            rerunButton("Geocode", systemImage: "mappin.and.ellipse", enabled: canRegeocode) {
+                Task { await store.analysis.startOne(photo, phases: [.places]) }
+            }
+        }
+    }
+
+    private func debugRow(_ label: String, primary: String?, secondary: String?, detail: String?) -> some View {
+        GridRow {
+            Text(label)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .textCase(.uppercase)
+                .gridColumnAlignment(.trailing)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(primary ?? "—")
+                    .font(.subheadline.weight(.medium))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                if let secondary {
+                    Text(secondary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if let detail {
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
         }
     }
 
@@ -92,7 +354,7 @@ struct PhotoInfoPanel: View {
                 .textCase(.uppercase)
                 .tracking(0.8)
                 .padding(.leading, 14)
-            VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 0) {
                 content()
             }
             .padding(.horizontal, 14)
@@ -102,20 +364,109 @@ struct PhotoInfoPanel: View {
         }
     }
 
-    // MARK: - Info Row
+    // MARK: - Derived
 
-    private func infoRow(_ label: String, value: String?) -> some View {
-        HStack {
-            Text(label)
-                .foregroundStyle(.secondary)
-                .font(.subheadline)
-            Spacer()
-            Text(value ?? "—")
-                .font(.subheadline)
-                .fontWeight(.medium)
-                .multilineTextAlignment(.trailing)
+    private var takenDate: Date? {
+        exifData?.dateTimeOriginal ?? photo.dateTaken
+    }
+
+    private var latitude: Double? { exifData?.gpsLatitude ?? photo.gpsLatitude }
+    private var longitude: Double? { exifData?.gpsLongitude ?? photo.gpsLongitude }
+
+    private var headerMetaLine: String? {
+        var parts: [String] = []
+        if let dimensions = dimensionsText { parts.append(dimensions) }
+        parts.append(formattedFileSize(photo.fileSize))
+        if let format = PhotoInfoFormatting.fileFormat(filename: photo.filename) {
+            parts.append(format)
         }
-        .padding(.vertical, 5)
+        return parts.isEmpty ? nil : parts.joined(separator: "  ·  ")
+    }
+
+    private var hasPlace: Bool {
+        latitude != nil || PhotoChrome.formattedLocation(for: photo) != nil
+    }
+
+    private var hasShot: Bool {
+        cameraText != nil || exifData?.lens != nil || hasExposure
+    }
+
+    private var hasExposure: Bool {
+        apertureText != nil || shutterSpeedText != nil || exifData?.iso != nil
+    }
+
+    private var objectTags: [HierarchicalTag] {
+        tags(in: "objects")
+    }
+
+    private var sceneTags: [HierarchicalTag] {
+        tags(in: "scenes")
+    }
+
+    private var otherSeenTags: [HierarchicalTag] {
+        photo.hierarchicalTags.filter { tag in
+            switch tag.namespace?.lowercased() {
+            case "people", "places", "objects", "scenes": return false
+            default: return true
+            }
+        }
+    }
+
+    private func tags(in namespace: String) -> [HierarchicalTag] {
+        photo.hierarchicalTags.filter { $0.namespace?.lowercased() == namespace }
+    }
+
+    private var taggedAgo: String? {
+        photoToolsData.taggedAt.map { PhotoInfoFormatting.relativeTimestamp($0) }
+    }
+
+    private var facedAgo: String? {
+        photoToolsData.faceTaggedAt.map { PhotoInfoFormatting.relativeTimestamp($0) }
+    }
+
+    private var clipDetail: String? {
+        photoToolsData.clipModel.map { "CLIP  \($0)" }
+    }
+
+    private var facesDebugText: String? {
+        let named = photo.faceRegions.filter { $0.name != nil }.count
+        let unnamed = photo.faceRegions.count - named
+        return PhotoInfoFormatting.facesSummary(
+            named: named,
+            unnamed: unnamed,
+            scanned: photoToolsData.facePack != nil
+        )
+    }
+
+    private var placeDebugPrimary: String {
+        if PhotoChrome.formattedLocation(for: photo) != nil { return "city on file" }
+        if latitude != nil { return "not geocoded" }
+        return "no GPS"
+    }
+
+    private var canRetag: Bool {
+        store.tagging.isAvailable && TaggingService.isEligible(photo) && !store.analysis.isRunning
+    }
+
+    private var canRescanFaces: Bool {
+        store.faces.isAvailable && FaceService.isEligible(photo) && !store.analysis.isRunning
+    }
+
+    private var canRegeocode: Bool {
+        GeocodingService.isEligible(photo, force: true) && !store.analysis.isRunning
+    }
+
+    private func rerunButton(_ title: String, systemImage: String, enabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage)
+                .font(.caption.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .labelStyle(.titleAndIcon)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .buttonBorderShape(.roundedRectangle)
+        .disabled(!enabled)
     }
 
     // MARK: - Formatted Values
@@ -126,15 +477,6 @@ struct PhotoInfoPanel: View {
             exifHeight: exifData?.pixelHeight,
             runtimeSize: photo.dimensions
         )
-    }
-
-    private var formattedDate: String? {
-        let date = exifData?.dateTimeOriginal ?? photo.dateTaken
-        guard let date = date else { return nil }
-        let formatter = DateFormatter()
-        formatter.dateStyle = .long
-        formatter.timeStyle = .short
-        return formatter.string(from: date)
     }
 
     private var cameraText: String? {
@@ -166,8 +508,8 @@ struct PhotoInfoPanel: View {
         Map(initialPosition: .region(region)) {
             Marker("", coordinate: coordinate)
         }
-        .frame(height: 200)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .frame(height: 88)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
         .allowsHitTesting(false)
     }
 }
@@ -181,7 +523,7 @@ private struct HierarchicalTagFlowView: View {
         FlowLayout(spacing: 6) {
             ForEach(tags, id: \.fullPath) { tag in
                 Label {
-                    Text(tag.fullPath)
+                    Text(tag.displayName)
                         .font(.caption)
                         .fontWeight(.medium)
                 } icon: {

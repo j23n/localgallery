@@ -34,6 +34,7 @@ pub mod error;
 pub mod faces;
 pub mod media;
 pub mod model;
+pub mod places;
 pub mod read;
 pub mod regions;
 pub mod schema;
@@ -44,11 +45,15 @@ pub mod xml;
 
 pub use error::{MetaError, MetaResult};
 pub use faces::{apply_faces, write_faces, AppliedFaces, Authority, FaceWriteRequest};
+pub use places::{apply_places, write_places, PlaceWriteRequest};
 pub use media::{read_image_metadata, read_video_date, ImageMetadata};
 pub use model::{AppliedDimensions, CoreSentinel, FaceRegion, PhotoToolsFields, SidecarView};
 pub use read::read_view;
-pub use regions::{bind_claims, Area, FaceRegionWrite, RegionClaim, REGION_MATCH_IOU};
+pub use regions::{
+    bind_claims, parse_decision, Area, FaceDecision, FaceRegionWrite, RegionClaim,
+    REGION_MATCH_IOU,
+};
 pub use schema::CORE_AGENT;
 pub use sidecar::{alt_sidecar_path, sidecar_path};
-pub use tags::{normalize_person, person_tag};
+pub use tags::{is_content_tag, normalize_person, person_tag};
 pub use write::{apply_tags, write_tags, AppliedTags, TagWriteRequest, WriteOutcome};

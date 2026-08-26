@@ -3,9 +3,9 @@ import XCTest
 
 /// Toolchain smoke tests for the Rust core (Phase 0).
 ///
-/// If these fail, suspect the build chain before the logic:
-/// `./scripts/build_core.sh && xcodegen` regenerates the XCFramework and the
-/// UniFFI bindings that `LocalGallery` compiles.
+/// If these fail, suspect the build chain before the logic: Xcode's
+/// **Build Rust Core** phase (`scripts/build_core.sh`) regenerates the
+/// XCFramework and the UniFFI bindings that `LocalGallery` compiles.
 final class GalleryCoreFFITests: XCTestCase {
 
     func testCoreVersionCrossesTheBoundary() {
@@ -19,7 +19,7 @@ final class GalleryCoreFFITests: XCTestCase {
     func testBindingsMatchTheLinkedBinary() {
         // UniFFI's contract-version + per-function checksum handshake. It
         // `fatalError`s on a mismatch, so this is a crash canary for "someone
-        // changed core/ and forgot to re-run ./scripts/build_core.sh".
+        // changed core/ and the UniFFI bindings in this build are stale".
         uniffiEnsureGalleryFfiInitialized()
     }
 

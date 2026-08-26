@@ -16,6 +16,7 @@ struct PhotoViewerView: View {
     @State private var isInfoOpen: Bool = false
     @State private var dismissOffset: CGFloat = 0
     @State private var shareRequest: PhotoShareRequest?
+    @State private var showDeleteConfirm = false
     /// Window-derived safe-area insets. `GeometryReader { geo in … }` paired
     /// with `.ignoresSafeArea()` — the pattern this view uses to get a
     /// full-screen canvas — reports zero insets inside a `fullScreenCover`
@@ -213,6 +214,17 @@ struct PhotoViewerView: View {
             }
         }
         .photoShareSheet(request: $shareRequest)
+        .alert(
+            PhotoDeletePrompt.title(for: currentPhoto.map { [$0] } ?? []),
+            isPresented: $showDeleteConfirm
+        ) {
+            Button("Cancel", role: .cancel) { }
+            Button("Delete", role: .destructive) {
+                Task { await deleteCurrentPhoto() }
+            }
+        } message: {
+            Text(PhotoDeletePrompt.message(for: currentPhoto.map { [$0] } ?? []))
+        }
     }
 
     // MARK: Chrome
@@ -232,6 +244,17 @@ struct PhotoViewerView: View {
                 HStack {
                     ViewerDismissButton { dismiss() }
                     Spacer()
+                    if currentPhoto != nil {
+                        ViewerMenuButton {
+                            Button(
+                                currentPhoto?.isVideo == true ? "Delete Video" : "Delete Photo",
+                                systemImage: "trash",
+                                role: .destructive
+                            ) {
+                                showDeleteConfirm = true
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -265,6 +288,26 @@ struct PhotoViewerView: View {
                 .padding(.horizontal, 14)
                 .padding(.vertical, 9)
                 .chromeGlass(in: Capsule(), legacyOpacity: 0.18)
+        }
+    }
+
+    /// Remove the current photo from disk, then stay on a neighbour or dismiss.
+    private func deleteCurrentPhoto() async {
+        guard let photo = currentPhoto, let idx = currentIndex else { return }
+        let nextID: UUID? = {
+            if photos.indices.contains(idx + 1) { return photos[idx + 1].id }
+            if photos.indices.contains(idx - 1) { return photos[idx - 1].id }
+            return nil
+        }()
+        // Point at the neighbour first so `onChange(of: photos)` does not
+        // dismiss the viewer the moment the deleted id drops out.
+        if let nextID {
+            currentPhotoID = nextID
+        }
+        let result = await store.deletePhotos([photo])
+        guard result.deletedIDs.contains(photo.id) else { return }
+        if nextID == nil {
+            dismiss()
         }
     }
 

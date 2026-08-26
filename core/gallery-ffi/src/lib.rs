@@ -29,7 +29,9 @@
 uniffi::setup_scaffolding!("GalleryCore");
 
 pub mod faces;
+pub mod heic;
 pub mod library;
+pub mod places;
 pub mod scanner;
 mod support;
 pub mod tagging;
@@ -38,6 +40,7 @@ pub use faces::{
     ClusterState, ClusterSummary, FaceError, FaceFailure, FaceLibraryStats, FaceProgressListener,
     FaceRef, FaceRunSummary, FaceSession, FaceStats, ReclusterSummary, SidecarWriteReport,
 };
+pub use heic::{HeicDecodeError, HeicDecoder, HeicPixels};
 pub use library::{
     compute_scheduled_memories, generate_memories, memory_cluster_key, memory_country_name,
     scheduled_memory_horizon_days, LibraryIndex, LibraryIndexSummary, LibraryTagSuggestions,
@@ -51,6 +54,7 @@ pub use scanner::{
     ScanRegion, ScanRequest, ScanSidecarRow, ScanTag, ScanTimings, ScannerSession,
     SidecarParseRecord, SnapshotRecord, VfsProviderAttrs, WallClock,
 };
+pub use places::{write_places, PlaceWrite, PlacesError};
 pub use tagging::{
     inspect_model_pack, ModelPackInfo, TaggingError, TaggingFailure, TaggingProgressListener,
     TaggingRunSummary, TaggingSession, TaggingStats,

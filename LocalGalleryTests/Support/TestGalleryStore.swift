@@ -30,6 +30,7 @@ enum TestGalleryStore {
             mlCacheDatabaseURL: tempDir.appending("gallery-cache.sqlite"),
             modelPacksDirectoryURL: tempDir.appending("ModelPacks", isDirectory: true),
             bundledModelPackURL: nil,
+            geocodeCacheURL: tempDir.appending("geocode-cache.json"),
             bookmarkKey: "rootFolderBookmark"
         )
         let defaults = TestUserDefaults.make()

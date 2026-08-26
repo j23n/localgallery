@@ -63,4 +63,23 @@ final class LibraryRootMonitorTests: XCTestCase {
             "deletions must not wait out the tagging/faces window"
         )
     }
+
+    /// Sidecar writes during an ML run are our own. Swallowing them is what
+    /// stops the 1.5 s watcher from chaining light rescans for the whole run.
+    @MainActor
+    func testDiskEventsAreIgnoredWhileShouldIgnoreEventsIsTrue() async {
+        let monitor = LibraryRootMonitor()
+        var refreshes = 0
+        monitor.coalescer.onRefresh = { refreshes += 1 }
+        monitor.shouldIgnoreEvents = { true }
+
+        monitor.considerDiskEvent(requireWatching: false)
+        await monitor.coalescer.task?.value
+        XCTAssertEqual(refreshes, 0, "an ML-run sidecar write started a rescan")
+
+        monitor.shouldIgnoreEvents = { false }
+        monitor.considerDiskEvent(requireWatching: false)
+        await monitor.coalescer.task?.value
+        XCTAssertEqual(refreshes, 1)
+    }
 }

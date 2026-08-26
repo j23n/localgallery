@@ -5,9 +5,10 @@ import Foundation
 ///
 /// The core's `merge(into:from:)` is directional and deliberately carries no
 /// policy: "which one should win" is a presentation question. It is answered
-/// here, once, because both entry points — the suggested-merge row and the
-/// "Merge with…" picker — have to answer it the same way or the same pair of
-/// groups would merge differently depending on where the user tapped.
+/// here, once, because every entry point — the suggested-merge select screen
+/// and naming a group with a name that already exists — has to answer it the
+/// same way or the same pair of groups would merge differently depending on
+/// where the user tapped.
 ///
 /// The rule, in order:
 ///
@@ -78,5 +79,26 @@ struct MergeDirection: Equatable {
             return "\(absorbed.size == 1 ? "1 face" : "\(absorbed.size) faces") join \(kept), and their photos gain the tag. One group of \(faces) faces."
         }
         return "One group of \(faces) faces, still unnamed. Nothing is written to a sidecar until you name it."
+    }
+}
+
+/// Whether a typed person name should save this group or merge it into one
+/// that already carries that name.
+enum FaceClusterNaming {
+    static func mergeTarget(
+        typed: String,
+        clusterID: Int64,
+        currentName: String?,
+        named: [FaceService.Cluster]
+    ) -> FaceService.Cluster? {
+        let trimmed = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if let currentName, currentName.localizedCaseInsensitiveCompare(trimmed) == .orderedSame {
+            return nil
+        }
+        return named.first {
+            $0.id != clusterID
+                && $0.name?.localizedCaseInsensitiveCompare(trimmed) == .orderedSame
+        }
     }
 }

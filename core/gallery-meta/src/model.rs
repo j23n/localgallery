@@ -45,8 +45,8 @@ pub struct FaceRegion {
 /// own sentinel fields.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PhotoToolsFields {
-    /// `photo-tools:TaggerVersion` — photo-tools' "already tagged" sentinel.
-    /// Read so callers can see it; **never written** by this crate.
+    /// `photo-tools:TaggerVersion` — skip key for Objects/Scenes. Written as
+    /// the running pack version.
     pub tagger_version: Option<String>,
     /// `photo-tools:TaggedAt`.
     pub tagged_at: Option<String>,
@@ -56,15 +56,20 @@ pub struct PhotoToolsFields {
     pub ocr_text: Vec<String>,
     /// `photo-tools:OCRRan` timestamp.
     pub ocr_ran: Option<String>,
+    /// `photo-tools:CLIPEmbedding` — base64 of little-endian `f32`.
+    pub clip_embedding: Option<String>,
+    /// `photo-tools:CLIPModel`.
+    pub clip_model: Option<String>,
+    /// `photo-tools:CLIPTimestamp`.
+    pub clip_timestamp: Option<String>,
 }
 
-/// The core's sentinel: who tagged, with which model pack, when, and exactly
-/// what was added.
+/// The core's sentinel: who tagged, with which model pack, when, and what
+/// Objects/Scenes this write left behind.
 ///
-/// The tag/subject lists are the whole point — they make retraction on re-run
-/// surgical instead of prefix-based. photo-tools retracts by root prefix
-/// (`Objects/`, `Scenes/`, …), which would let one tool delete the other's
-/// tags, since both write those roots.
+/// `TaggerVersion` is the skip key. `CoreTags` mirrors the replace set.
+/// `CoreSubjects` still records leaves we introduced, so a human keyword
+/// that shares a leaf is not deleted when the path comes out.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CoreSentinel {
     /// `photo-tools:CoreAgent`, e.g. `localgallery-core`.
@@ -87,6 +92,8 @@ pub struct CoreSentinel {
     /// `photo-tools:CoreFacePack` — the face model pack behind [`Self::people`]
     /// and [`Self::regions`].
     pub face_pack: Option<String>,
+    /// `photo-tools:CoreFaceTaggedAt`, ISO 8601 UTC.
+    pub face_tagged_at: Option<String>,
     /// `People/<Name>` paths the agent added to `digiKam:TagsList`.
     pub people: Vec<String>,
     /// `dc:subject` leaves the *face* half added.
@@ -96,6 +103,9 @@ pub struct CoreSentinel {
     /// Region claims, `"<x>,<y>,<w>,<h> <Name>"`; see
     /// [`crate::schema::PROP_CORE_REGIONS`].
     pub regions: Vec<String>,
+    /// Face judgments, `"<x>,<y>,<w>,<h> <kind> …"`; see
+    /// [`crate::schema::PROP_CORE_FACE_DECISIONS`].
+    pub decisions: Vec<String>,
 }
 
 impl CoreSentinel {
@@ -107,8 +117,10 @@ impl CoreSentinel {
     /// Whether the face half has ever written to this file.
     pub fn has_faces(&self) -> bool {
         self.face_pack.is_some()
+            || self.face_tagged_at.is_some()
             || !self.people.is_empty()
             || !self.regions.is_empty()
+            || !self.decisions.is_empty()
             || !self.people_subjects.is_empty()
             || !self.people_hierarchical.is_empty()
     }

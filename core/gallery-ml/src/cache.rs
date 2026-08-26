@@ -69,6 +69,7 @@
 //! only at row boundaries (a hash lookup, a state update), never while
 //! decoding or running inference.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -77,7 +78,7 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use crate::error::{ErrorCode, MlResult};
 
 /// Schema version stored in `meta`. Bump when [`MIGRATIONS`] grows.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// `meta` key holding the applied schema version.
 pub const META_SCHEMA_VERSION: &str = "schema_version";
@@ -234,6 +235,17 @@ const MIGRATIONS: &[&str] = &[
     r#"
     ALTER TABLE clusters ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
     "#,
+    // 4 → 5: split "dismissed" into ignore vs reject.
+    //
+    // Discriminant 2 used to mean both "not a person" and "don't care".
+    // The review UI now has two actions: Ignore (a real face, passer-by /
+    // poster) and Not a Person / Not a Face (rejected detection). Rejected
+    // takes discriminant 3. Every row that was already 2 was created by the
+    // old unified dismiss, whose confirmation said "not a person" — move
+    // those to 3 so a sidecar backfill writes `rejected`, not `ignored`.
+    r#"
+    UPDATE clusters SET state = 3 WHERE state = 2;
+    "#,
 ];
 
 /// One of the two work queues. See the module docs.
@@ -313,9 +325,12 @@ pub enum ClusterState {
     /// A person's name is attached; new faces joining it are auto-tagged. The
     /// full pass never touches these.
     Named = 1,
-    /// The user said "not a person" (or "don't care"). Kept so the faces do not
-    /// come back as a new cluster on every pass.
+    /// A real face the user does not want to name (passer-by, poster).
+    /// Kept so those faces do not come back as a new cluster on every pass.
     Ignored = 2,
+    /// The user said "not a person" / "not a face". Kept so the detection
+    /// is not offered again.
+    Rejected = 3,
 }
 
 impl ClusterState {
@@ -330,6 +345,7 @@ impl ClusterState {
         match v {
             1 => ClusterState::Named,
             2 => ClusterState::Ignored,
+            3 => ClusterState::Rejected,
             _ => ClusterState::Unlabeled,
         }
     }
@@ -362,8 +378,10 @@ pub struct FaceLibraryStats {
     pub unlabeled_clusters: u64,
     /// Clusters a person's name is attached to.
     pub named_clusters: u64,
-    /// Clusters the user dismissed.
+    /// Clusters the user ignored (passer-by).
     pub ignored_clusters: u64,
+    /// Clusters the user rejected (not a person / not a face).
+    pub rejected_clusters: u64,
     /// Outstanding merge proposals.
     pub merge_proposals: u64,
 }
@@ -438,6 +456,16 @@ pub struct NamedFace {
     pub person: String,
     /// The cluster it came from.
     pub cluster_id: i64,
+    /// Geometry, quality and embedding.
+    pub face: StoredFace,
+}
+
+/// A stored face the user dismissed — ignored (passer-by) or rejected
+/// (not a person). The sidecar writer turns these into `CoreFaceDecisions`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DismissedFace {
+    /// [`ClusterState::Ignored`] or [`ClusterState::Rejected`].
+    pub kind: ClusterState,
     /// Geometry, quality and embedding.
     pub face: StoredFace,
 }
@@ -1333,8 +1361,9 @@ impl CacheDb {
     /// plus faces belonging to no cluster at all — the input to the full
     /// re-cluster pass.
     ///
-    /// Named and ignored clusters are excluded by construction: "never touches
-    /// named clusters except to propose merges" (Phase 2 plan). Pinned ones are
+    /// Named, ignored and rejected clusters are excluded by construction:
+    /// "never touches named clusters except to propose merges" (Phase 2 plan).
+    /// Pinned ones are
     /// excluded for the same reason one step further on: the user merged or
     /// split them deliberately, and a pass that re-partitioned their faces
     /// would undo that without saying so.
@@ -1442,9 +1471,23 @@ impl CacheDb {
     /// there is nothing to reconcile — the rows simply change which cluster
     /// they name.
     pub fn move_cluster_members(&self, from: i64, into: i64) -> MlResult<usize> {
+        self.move_cluster_members_many(&[from], into)
+    }
+
+    /// [`CacheDb::move_cluster_members`] for several sources in one statement.
+    pub fn move_cluster_members_many(&self, from: &[i64], into: i64) -> MlResult<usize> {
+        if from.is_empty() {
+            return Ok(0);
+        }
+        let placeholders = vec!["?"; from.len()].join(", ");
+        let mut values: Vec<i64> = Vec::with_capacity(from.len() + 1);
+        values.push(into);
+        values.extend_from_slice(from);
         Ok(self.lock().execute(
-            "UPDATE cluster_members SET cluster_id = ?1 WHERE cluster_id = ?2",
-            params![into, from],
+            &format!(
+                "UPDATE cluster_members SET cluster_id = ? WHERE cluster_id IN ({placeholders})"
+            ),
+            params_from_iter(values.iter()),
         )?)
     }
 
@@ -1457,6 +1500,21 @@ impl CacheDb {
             params![hash.as_slice(), i64::from(face_idx), id],
         )?;
         Ok(())
+    }
+
+    /// How many faces several clusters hold, in one statement.
+    pub fn cluster_member_count_for(&self, ids: &[i64]) -> MlResult<u32> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let placeholders = vec!["?"; ids.len()].join(", ");
+        let conn = self.lock();
+        let count: i64 = conn.query_row(
+            &format!("SELECT COUNT(*) FROM cluster_members WHERE cluster_id IN ({placeholders})"),
+            params_from_iter(ids.iter()),
+            |r| r.get(0),
+        )?;
+        Ok(count.max(0) as u32)
     }
 
     /// The `(content_hash, face_idx)` pairs of one cluster, in stable order.
@@ -1479,37 +1537,72 @@ impl CacheDb {
 
     /// The best-looking faces of one cluster, highest quality first.
     ///
-    /// The read behind a review UI, and deliberately **not**
-    /// [`crate::face::FaceEngine::cluster_faces`]: that one hands back whole
-    /// [`StoredFace`]s, and a grid that shows four crops per cluster across a
-    /// library's worth of clusters would drag a 512-float embedding across the
-    /// boundary for every face it never looks at. This selects only what a crop
-    /// needs, ranks in SQL, and stops at `limit` (`0` means everything).
-    ///
-    /// The ordering tiebreak is `(content_hash, face_idx)` so equal-quality
-    /// faces come back in the same order on every device. A face whose photo
-    /// has no queue row left — the file was removed from the library — is
-    /// dropped: there is no path to render a crop from.
+    /// See [`CacheDb::cluster_face_thumbs_for`]: this is that query for a
+    /// single id. `limit` `0` means everything.
     pub fn cluster_face_thumbs(&self, id: i64, limit: usize) -> MlResult<Vec<FaceThumb>> {
-        let conn = self.lock();
-        let mut stmt = conn.prepare(
-            "SELECT (SELECT w.path FROM face_work w
-                      WHERE w.content_hash = f.content_hash ORDER BY w.path LIMIT 1),
-                    f.bbox, f.quality, f.image_w, f.image_h, f.content_hash, f.face_idx
-             FROM faces f
-             JOIN cluster_members m
-               ON m.content_hash = f.content_hash AND m.face_idx = f.face_idx
-             WHERE m.cluster_id = ?1
-             ORDER BY f.quality DESC, f.content_hash, f.face_idx
-             LIMIT ?2",
-        )?;
-        // SQLite reads a negative LIMIT as "no limit", which is what `0` means
-        // here — spelling it as a huge number would be a second magic value.
+        Ok(self
+            .cluster_face_thumbs_for(&[id], limit)?
+            .remove(&id)
+            .unwrap_or_default())
+    }
+
+    /// Best-looking faces of many clusters, in one statement.
+    ///
+    /// The review list asks for a handful of crops per cluster. Doing that as
+    /// one query per cluster is an N+1 against `cluster_members` every time
+    /// the list is re-read — a merge, a name, a launch. Ranking in SQL with
+    /// `ROW_NUMBER` keeps the cap per cluster and the path lookup only runs
+    /// for the rows that survive it.
+    ///
+    /// A face whose photo has no queue row left is dropped: there is no path
+    /// to render a crop from. `limit` `0` means everything, matching
+    /// [`CacheDb::cluster_face_thumbs`].
+    pub fn cluster_face_thumbs_for(
+        &self,
+        ids: &[i64],
+        limit: usize,
+    ) -> MlResult<BTreeMap<i64, Vec<FaceThumb>>> {
+        if ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let placeholders = vec!["?"; ids.len()].join(", ");
+        // Rank first, then resolve a path: the correlated `face_work` lookup
+        // should not run for every member of a 2 000-face cluster when the
+        // card only shows four crops.
+        let sql = format!(
+            "SELECT ranked.cluster_id,
+                    (SELECT w.path FROM face_work w
+                      WHERE w.content_hash = ranked.content_hash
+                      ORDER BY w.path LIMIT 1),
+                    ranked.bbox, ranked.quality, ranked.image_w, ranked.image_h,
+                    ranked.content_hash, ranked.face_idx
+             FROM (
+               SELECT m.cluster_id, f.bbox, f.quality, f.image_w, f.image_h,
+                      f.content_hash, f.face_idx,
+                      ROW_NUMBER() OVER (
+                        PARTITION BY m.cluster_id
+                        ORDER BY f.quality DESC, f.content_hash, f.face_idx
+                      ) AS rn
+               FROM faces f
+               JOIN cluster_members m
+                 ON m.content_hash = f.content_hash AND m.face_idx = f.face_idx
+               WHERE m.cluster_id IN ({placeholders})
+             ) ranked
+             WHERE ? < 0 OR ranked.rn <= ?
+             ORDER BY ranked.cluster_id, ranked.rn"
+        );
+        // SQLite reads a negative bound as "no cap", which is what `0` means.
         let cap: i64 = if limit == 0 { -1 } else { limit as i64 };
-        let rows = stmt.query_map(params![id, cap], |r| {
-            let path: Option<String> = r.get(0)?;
-            let bbox_bytes: Vec<u8> = r.get(1)?;
-            let hash_bytes: Vec<u8> = r.get(5)?;
+        let mut values: Vec<i64> = ids.to_vec();
+        values.push(cap);
+        values.push(cap);
+        let conn = self.lock();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(values.iter()), |r| {
+            let cluster_id: i64 = r.get(0)?;
+            let path: Option<String> = r.get(1)?;
+            let bbox_bytes: Vec<u8> = r.get(2)?;
+            let hash_bytes: Vec<u8> = r.get(6)?;
             let (Some(path), Some(bbox), Ok(content_hash)) = (
                 path,
                 decode_vec(4, &bbox_bytes),
@@ -1517,21 +1610,26 @@ impl CacheDb {
             ) else {
                 return Ok(None);
             };
-            Ok(Some(FaceThumb {
-                path,
-                content_hash,
-                face_idx: r.get::<_, i64>(6)?.max(0) as u32,
-                bbox: [bbox[0], bbox[1], bbox[2], bbox[3]],
-                quality: r.get::<_, f64>(2)? as f32,
-                image_w: r.get::<_, i64>(3)?.max(0) as u32,
-                image_h: r.get::<_, i64>(4)?.max(0) as u32,
-            }))
+            Ok(Some((
+                cluster_id,
+                FaceThumb {
+                    path,
+                    content_hash,
+                    face_idx: r.get::<_, i64>(7)?.max(0) as u32,
+                    bbox: [bbox[0], bbox[1], bbox[2], bbox[3]],
+                    quality: r.get::<_, f64>(3)? as f32,
+                    image_w: r.get::<_, i64>(4)?.max(0) as u32,
+                    image_h: r.get::<_, i64>(5)?.max(0) as u32,
+                },
+            )))
         })?;
-        Ok(rows
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .flatten()
-            .collect())
+        let mut out: BTreeMap<i64, Vec<FaceThumb>> = BTreeMap::new();
+        for row in rows {
+            if let Some((id, thumb)) = row? {
+                out.entry(id).or_default().push(thumb);
+            }
+        }
+        Ok(out)
     }
 
     /// The member embeddings of one cluster, in stable order.
@@ -1541,8 +1639,20 @@ impl CacheDb {
     /// its mean, and recovering the mean from a unit-length centroid plus a
     /// count is not possible.
     pub fn cluster_member_embeddings(&self, id: i64) -> MlResult<Vec<Vec<f32>>> {
+        self.cluster_member_embeddings_for(&[id])
+    }
+
+    /// Member embeddings of several clusters, in one statement.
+    ///
+    /// A merge recomputes the survivor's centroid from the union. Loading
+    /// each cluster on its own would re-read the growing survivor on every
+    /// pairwise step; one `IN` list is the whole union.
+    pub fn cluster_member_embeddings_for(&self, ids: &[i64]) -> MlResult<Vec<Vec<f32>>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
         Ok(self
-            .cluster_member_embeddings_by_key(id)?
+            .cluster_member_embeddings_by_key_for(ids)?
             .into_iter()
             .map(|(_, vec)| vec)
             .collect())
@@ -1555,14 +1665,26 @@ impl CacheDb {
     /// blob is dropped rather than returned, so the two lists can differ in
     /// length and every vector after the gap would belong to the wrong face.
     pub fn cluster_member_embeddings_by_key(&self, id: i64) -> MlResult<Vec<(FaceKey, Vec<f32>)>> {
+        self.cluster_member_embeddings_by_key_for(&[id])
+    }
+
+    /// [`CacheDb::cluster_member_embeddings_by_key`] across several clusters.
+    pub fn cluster_member_embeddings_by_key_for(
+        &self,
+        ids: &[i64],
+    ) -> MlResult<Vec<(FaceKey, Vec<f32>)>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = vec!["?"; ids.len()].join(", ");
         let conn = self.lock();
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT f.dim, f.embedding, m.content_hash, m.face_idx FROM cluster_members m
              JOIN faces f ON f.content_hash = m.content_hash AND f.face_idx = m.face_idx
-             WHERE m.cluster_id = ?1
-             ORDER BY m.content_hash, m.face_idx",
-        )?;
-        let rows = stmt.query_map(params![id], |r| {
+             WHERE m.cluster_id IN ({placeholders})
+             ORDER BY m.content_hash, m.face_idx"
+        ))?;
+        let rows = stmt.query_map(params_from_iter(ids.iter()), |r| {
             let dim: i64 = r.get(0)?;
             let bytes: Vec<u8> = r.get(1)?;
             let hash: Vec<u8> = r.get(2)?;
@@ -1711,6 +1833,7 @@ impl CacheDb {
                 ClusterState::Unlabeled => stats.unlabeled_clusters = count,
                 ClusterState::Named => stats.named_clusters = count,
                 ClusterState::Ignored => stats.ignored_clusters = count,
+                ClusterState::Rejected => stats.rejected_clusters = count,
             }
         }
         stats.merge_proposals = count("SELECT COUNT(*) FROM cluster_merge_proposals")?;
@@ -1734,8 +1857,8 @@ impl CacheDb {
     /// Every face in one photo that belongs to a **named** cluster, ordered by
     /// `face_idx`.
     ///
-    /// Faces in unlabeled or ignored clusters are absent by construction: only
-    /// a named cluster travels to a sidecar (standing decision 4).
+    /// Faces in unlabeled, ignored or rejected clusters are absent: only a
+    /// named cluster writes `People/<Name>` and an MWG region.
     pub fn named_faces_for_hash(&self, hash: &[u8; 32]) -> MlResult<Vec<NamedFace>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(&format!(
@@ -1771,15 +1894,83 @@ impl CacheDb {
             .collect())
     }
 
+    /// Every face in one photo that belongs to an ignored or rejected cluster.
+    pub fn dismissed_faces_for_hash(&self, hash: &[u8; 32]) -> MlResult<Vec<DismissedFace>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT c.state, {}
+             FROM faces f
+             JOIN cluster_members m
+               ON m.content_hash = f.content_hash AND m.face_idx = f.face_idx
+             JOIN clusters c ON c.cluster_id = m.cluster_id
+             WHERE f.content_hash = ?1 AND c.state IN (?2, ?3)
+             ORDER BY f.face_idx",
+            FACE_COLUMNS
+                .split(", ")
+                .map(|c| format!("f.{c}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))?;
+        let rows = stmt.query_map(
+            params![
+                hash.as_slice(),
+                ClusterState::Ignored.as_i64(),
+                ClusterState::Rejected.as_i64()
+            ],
+            |r| {
+                let kind = ClusterState::from_i64(r.get(0)?);
+                Ok(row_to_face_at(r, 1)?.map(|face| DismissedFace { kind, face }))
+            },
+        )?;
+        Ok(rows
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect())
+    }
+
+    /// Content hashes of every ignored or rejected cluster, for the one-shot
+    /// sidecar backfill.
+    pub fn dismissed_cluster_hashes(&self) -> MlResult<Vec<[u8; 32]>> {
+        let mut hashes = Vec::new();
+        for cluster in self.clusters()? {
+            if matches!(
+                cluster.state,
+                ClusterState::Ignored | ClusterState::Rejected
+            ) {
+                hashes.extend(self.cluster_hashes(cluster.id)?);
+            }
+        }
+        hashes.sort_unstable();
+        hashes.dedup();
+        Ok(hashes)
+    }
+
     /// Content hashes of one cluster's members, deduplicated, in hash order.
     pub fn cluster_hashes(&self, id: i64) -> MlResult<Vec<[u8; 32]>> {
-        let mut out: Vec<[u8; 32]> = self
-            .cluster_members(id)?
+        self.cluster_hashes_for(&[id])
+    }
+
+    /// Distinct content hashes across several clusters, in hash order.
+    pub fn cluster_hashes_for(&self, ids: &[i64]) -> MlResult<Vec<[u8; 32]>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = vec!["?"; ids.len()].join(", ");
+        let conn = self.lock();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT DISTINCT content_hash FROM cluster_members
+             WHERE cluster_id IN ({placeholders})
+             ORDER BY content_hash"
+        ))?;
+        let rows = stmt.query_map(params_from_iter(ids.iter()), |r| {
+            r.get::<_, Vec<u8>>(0)
+        })?;
+        Ok(rows
+            .collect::<Result<Vec<_>, _>>()?
             .into_iter()
-            .map(|(hash, _)| hash)
-            .collect();
-        out.dedup();
-        Ok(out)
+            .filter_map(|h| <[u8; 32]>::try_from(h.as_slice()).ok())
+            .collect())
     }
 
     /// Ids of the named clusters carrying `person_name`, in id order.
@@ -2114,6 +2305,39 @@ mod tests {
         assert_eq!(row.state, ClusterState::Named);
         assert_eq!(row.size, 3);
         assert!(!row.pinned);
+    }
+
+    /// Pre-split dismissals (state = 2) become Rejected so a sidecar backfill
+    /// writes `rejected`, not the new passer-by `ignored`.
+    #[test]
+    fn a_v4_dismissed_cluster_becomes_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.sqlite");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            for sql in &MIGRATIONS[..4] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?1, '4')",
+                params![META_SCHEMA_VERSION],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO clusters (cluster_id, centroid, dim, size, state, person_name,
+                                       updated_at, pinned)
+                 VALUES (3, X'0000803F', 1, 1, 2, NULL, 0, 0)",
+                [],
+            )
+            .unwrap();
+        }
+        let db = CacheDb::open(&path).unwrap();
+        let row = db.cluster(3).unwrap().unwrap();
+        assert_eq!(row.state, ClusterState::Rejected);
+        assert_eq!(
+            db.meta(META_SCHEMA_VERSION).unwrap().as_deref(),
+            Some("5")
+        );
     }
 
     #[test]
@@ -2473,6 +2697,7 @@ mod tests {
             ClusterState::Unlabeled,
             ClusterState::Named,
             ClusterState::Ignored,
+            ClusterState::Rejected,
         ] {
             assert_eq!(ClusterState::from_i64(s.as_i64()), s);
         }
@@ -2607,20 +2832,24 @@ mod tests {
     #[test]
     fn unlabeled_faces_exclude_named_and_ignored_clusters() {
         let db = db();
-        for i in 0..3u8 {
+        for i in 0..4u8 {
             db.put_faces(&h(i), "m", 1, 1, &[face(h(i), 0, vec![1.0])])
                 .unwrap();
         }
         let named = db.create_cluster(&[1.0]).unwrap();
         let ignored = db.create_cluster(&[1.0]).unwrap();
+        let rejected = db.create_cluster(&[1.0]).unwrap();
         let plain = db.create_cluster(&[1.0]).unwrap();
         db.set_cluster_state(named, ClusterState::Named, Some("Alice"))
             .unwrap();
         db.set_cluster_state(ignored, ClusterState::Ignored, None)
             .unwrap();
+        db.set_cluster_state(rejected, ClusterState::Rejected, None)
+            .unwrap();
         db.set_cluster_member(named, &h(0), 0).unwrap();
         db.set_cluster_member(ignored, &h(1), 0).unwrap();
-        db.set_cluster_member(plain, &h(2), 0).unwrap();
+        db.set_cluster_member(rejected, &h(2), 0).unwrap();
+        db.set_cluster_member(plain, &h(3), 0).unwrap();
 
         let hashes: Vec<u8> = db
             .unlabeled_faces()
@@ -2628,7 +2857,7 @@ mod tests {
             .iter()
             .map(|f| f.content_hash[0])
             .collect();
-        assert_eq!(hashes, vec![2]);
+        assert_eq!(hashes, vec![3]);
     }
 
     #[test]
@@ -2806,10 +3035,13 @@ mod tests {
         }
         let named = db.create_cluster(&[1.0]).unwrap();
         let ignored = db.create_cluster(&[1.0]).unwrap();
+        let rejected = db.create_cluster(&[1.0]).unwrap();
         db.create_cluster(&[1.0]).unwrap();
         db.set_cluster_state(named, ClusterState::Named, Some("A"))
             .unwrap();
         db.set_cluster_state(ignored, ClusterState::Ignored, None)
+            .unwrap();
+        db.set_cluster_state(rejected, ClusterState::Rejected, None)
             .unwrap();
         db.set_cluster_member(named, &h(0), 0).unwrap();
 
@@ -2818,6 +3050,7 @@ mod tests {
         assert_eq!(s.assigned, 1);
         assert_eq!(s.named_clusters, 1);
         assert_eq!(s.ignored_clusters, 1);
+        assert_eq!(s.rejected_clusters, 1);
         assert_eq!(s.unlabeled_clusters, 1);
     }
 
@@ -2851,6 +3084,41 @@ mod tests {
         let capped = db.cluster_face_thumbs(cluster, 2).unwrap();
         assert_eq!(capped.len(), 2);
         assert_eq!(capped[0].path, "/lib/1.jpg");
+    }
+
+    /// The review list used to issue this query once per cluster. The batched
+    /// form has to return the same ranking, the same cap, and keep the
+    /// clusters apart.
+    #[test]
+    fn cluster_thumbs_for_several_clusters_match_the_per_cluster_read() {
+        let db = db();
+        let a = db.create_cluster(&[1.0]).unwrap();
+        let b = db.create_cluster(&[1.0]).unwrap();
+        for (cluster, i, quality) in [(a, 0u8, 0.2f32), (a, 1, 0.9), (b, 2, 0.4), (b, 3, 0.8)] {
+            let mut f = face(h(i), 0, vec![1.0]);
+            f.quality = quality;
+            db.put_faces(&h(i), "m", 100, 200, &[f]).unwrap();
+            let path = format!("/lib/{i}.jpg");
+            db.face_enqueue(std::slice::from_ref(&path)).unwrap();
+            assert!(db.face_begin(&path).unwrap());
+            assert!(db.face_set_content_hash(&path, &h(i)).unwrap());
+            db.set_cluster_member(cluster, &h(i), 0).unwrap();
+        }
+
+        let batched = db.cluster_face_thumbs_for(&[a, b], 1).unwrap();
+        assert_eq!(
+            batched.get(&a).map(|t| t[0].path.as_str()),
+            Some("/lib/1.jpg")
+        );
+        assert_eq!(
+            batched.get(&b).map(|t| t[0].path.as_str()),
+            Some("/lib/3.jpg")
+        );
+        assert_eq!(
+            db.cluster_face_thumbs(a, 1).unwrap()[0].path,
+            batched[&a][0].path
+        );
+        assert!(db.cluster_face_thumbs_for(&[], 4).unwrap().is_empty());
     }
 
     /// A face whose photo has left the library has nothing to crop from. It

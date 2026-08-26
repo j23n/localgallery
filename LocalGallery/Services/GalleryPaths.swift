@@ -33,6 +33,10 @@ struct GalleryPaths: Sendable {
     /// `nil` when the build carries no pack, which `prepare_pack.sh` exists to
     /// prevent — a build error, not a state the app is designed around.
     let bundledModelPackURL: URL?
+    /// Reverse-geocode cache (`lat/lon` → Places path). Application Support
+    /// because it is derived but slow to rebuild (network), and Caches may
+    /// evict it mid-library.
+    let geocodeCacheURL: URL
     let bookmarkKey: String
 
     static var production: GalleryPaths {
@@ -47,6 +51,7 @@ struct GalleryPaths: Sendable {
             mlCacheDatabaseURL: support.appendingPathComponent("gallery-cache.sqlite"),
             modelPacksDirectoryURL: support.appendingPathComponent("ModelPacks", isDirectory: true),
             bundledModelPackURL: Bundle.main.url(forResource: "pack", withExtension: nil),
+            geocodeCacheURL: support.appendingPathComponent("geocode-cache.json"),
             bookmarkKey: "rootFolderBookmark"
         )
     }

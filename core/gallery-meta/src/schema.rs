@@ -56,6 +56,18 @@ pub const PREFIX_ST_DIM: &str = "stDim";
 /// exiftool writes `Iptc4xmpExt` (not `iptcExt`, which is how the schema doc
 /// spells the *group*), and that is what the fixtures contain.
 pub const PREFIX_IPTC_EXT: &str = "Iptc4xmpExt";
+/// Prefix used when this crate creates a `photoshop:` property.
+pub const PREFIX_PHOTOSHOP: &str = "photoshop";
+/// Prefix used when this crate creates an `Iptc4xmpCore:` property.
+pub const PREFIX_IPTC_CORE: &str = "Iptc4xmpCore";
+/// `photoshop:City` — IPTC city (§1.3).
+pub const PROP_CITY: &str = "City";
+/// `photoshop:State` — IPTC province/state (§1.3).
+pub const PROP_STATE: &str = "State";
+/// `photoshop:Country` — IPTC country name (§1.3).
+pub const PROP_COUNTRY: &str = "Country";
+/// `Iptc4xmpCore:Location` — IPTC sublocation (§1.3).
+pub const PROP_LOCATION: &str = "Location";
 
 /// `dc:subject` — leaf keyword names, an `rdf:Bag`.
 pub const PROP_SUBJECT: &str = "subject";
@@ -94,10 +106,10 @@ pub const AREA_UNIT_NORMALIZED: &str = "normalized";
 /// The `stDim:unit` this crate writes.
 pub const DIM_UNIT_PIXEL: &str = "pixel";
 
-/// photo-tools sentinel — **never written by this crate.** Writing it would
-/// make photo-tools skip files it has not actually tagged (schema §1.6).
+/// Shared skip key for Objects/Scenes (+ CLIP). Written as the pack version.
+/// A sidecar whose value equals the running pack is left alone.
 pub const PROP_TAGGER_VERSION: &str = "TaggerVersion";
-/// photo-tools' own last-tagged timestamp. Read only.
+/// When Objects/Scenes were last written. Same stamp as [`PROP_CORE_TAGGED_AT`].
 pub const PROP_TAGGED_AT: &str = "TaggedAt";
 /// Geocoded country code (§1.2). Read only.
 pub const PROP_COUNTRY_CODE: &str = "CountryCode";
@@ -105,6 +117,20 @@ pub const PROP_COUNTRY_CODE: &str = "CountryCode";
 pub const PROP_OCR_TEXT: &str = "OCRText";
 /// OCR provenance marker (§1.2). Read only.
 pub const PROP_OCR_RAN: &str = "OCRRan";
+/// Cached CLIP image embedding, base64 of little-endian `f32` (§1.2).
+///
+/// Written by the tagging pass so photo-tools (and this app's info panel)
+/// can reuse the vector without another encode. Last writer wins — the
+/// `CLIPModel` field is what tells a reader the bytes belong to it.
+pub const PROP_CLIP_EMBEDDING: &str = "CLIPEmbedding";
+/// Identifier of the encoder that produced [`PROP_CLIP_EMBEDDING`] (§1.2).
+pub const PROP_CLIP_MODEL: &str = "CLIPModel";
+/// ISO 8601 UTC timestamp for when [`PROP_CLIP_EMBEDDING`] was written.
+///
+/// photo-tools' schema does not name this field; the info panel already
+/// reads it, and a vector without a time is indistinguishable from one
+/// written years ago under the same model id.
+pub const PROP_CLIP_TIMESTAMP: &str = "CLIPTimestamp";
 
 /// Sentinel: which agent wrote the tags recorded in [`PROP_CORE_TAGS`].
 ///
@@ -142,6 +168,12 @@ pub const PROP_CORE_HIERARCHICAL: &str = "CoreHierarchical";
 /// one field would make each pass see the other's value as a mismatch and
 /// rewrite the file, forever.
 pub const PROP_CORE_FACE_PACK: &str = "CoreFacePack";
+/// Sentinel: ISO 8601 UTC timestamp of the last face write.
+///
+/// Separate from [`PROP_CORE_TAGGED_AT`]: that stamp is shared with the
+/// tagging pass, so a later Objects/Scenes write would look like a new
+/// face scan in the info panel.
+pub const PROP_CORE_FACE_TAGGED_AT: &str = "CoreFaceTaggedAt";
 /// Sentinel: the exact `People/<Name>` paths this agent added to
 /// `digiKam:TagsList`, an `rdf:Bag`.
 ///
@@ -169,6 +201,17 @@ pub const PROP_CORE_PEOPLE_HIERARCHICAL: &str = "CorePeopleHierarchical";
 /// legible in a sidecar and so a rename can find its regions without
 /// re-deriving them from the cluster database.
 pub const PROP_CORE_REGIONS: &str = "CoreRegions";
+/// Sentinel: per-face judgments that are not MWG regions, an `rdf:Bag`.
+///
+/// One entry per face this agent has judged, `"<x>,<y>,<w>,<h> <kind> …"` —
+/// the same six-place centre rectangle as [`PROP_CORE_REGIONS`], a space, a
+/// kind (`named` / `ignored` / `rejected`), and for `named` the person name.
+///
+/// [`PROP_CORE_REGIONS`] stays the ownership list for public MWG boxes.
+/// This bag is the portable identity: a below-quality named face (keyword,
+/// no MWG box), a passer-by the user ignored, or a detection they marked
+/// not-a-person. Bind on geometry at [`crate::regions::REGION_MATCH_IOU`].
+pub const PROP_CORE_FACE_DECISIONS: &str = "CoreFaceDecisions";
 
 /// The agent name this crate stamps into [`PROP_CORE_AGENT`].
 pub const CORE_AGENT: &str = "localgallery-core";

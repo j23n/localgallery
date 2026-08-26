@@ -79,6 +79,7 @@ enum ContactsService {
             let keys: [CNKeyDescriptor] = [
                 CNContactGivenNameKey as CNKeyDescriptor,
                 CNContactFamilyNameKey as CNKeyDescriptor,
+                CNContactNicknameKey as CNKeyDescriptor,
                 CNContactBirthdayKey as CNKeyDescriptor,
             ]
             let request = CNContactFetchRequest(keysToFetch: keys)
@@ -90,6 +91,7 @@ enum ContactsService {
                         id: contact.identifier,
                         givenName: contact.givenName,
                         familyName: contact.familyName,
+                        nickname: contact.nickname,
                         birthday: contact.birthday
                     ))
                 }

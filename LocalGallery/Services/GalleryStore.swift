@@ -39,6 +39,77 @@ struct ScanProgress: Sendable, Equatable {
         case .enriching: return "Reading metadata…"
         }
     }
+
+    /// One word for the shared progress chip.
+    var shortLabel: String {
+        switch phase {
+        case .scanning: return "Scanning"
+        case .enriching: return "Metadata"
+        }
+    }
+
+    /// Shared count/ETA text: "X found" while scanning, "X / Y · ~M:SS"
+    /// while enriching (ETA from observed throughput since `startedAt`).
+    /// Used by the toolbar banner and the Settings progress row — callers
+    /// add their own phase prefix.
+    var countText: String {
+        switch phase {
+        case .scanning:
+            return "\(processed.formatted()) found"
+        case .enriching:
+            guard let total else {
+                return processed.formatted()
+            }
+            return ProgressETA.countText(
+                processed: processed,
+                total: total,
+                startedAt: startedAt
+            )
+        }
+    }
+}
+
+/// Rough remaining-time text for a known-total queue: "X / Y" until a
+/// second of throughput has been observed, then "X / Y · ~M:SS".
+///
+/// Library enrichment, tagging, and face scanning all share this so the
+/// three progress rows read the same way. `now` is injectable for tests.
+enum ProgressETA {
+    static func countText(
+        processed: Int,
+        total: Int,
+        startedAt: Date,
+        now: Date = Date()
+    ) -> String {
+        guard total > 0 else {
+            return processed.formatted()
+        }
+        let elapsed = now.timeIntervalSince(startedAt)
+        if processed > 0, elapsed > 1 {
+            let throughput = Double(processed) / elapsed
+            let remaining = max(0, total - processed)
+            let secs = Int((Double(remaining) / max(throughput, 0.001)).rounded())
+            if secs > 0 {
+                return "\(processed.formatted()) / \(total.formatted()) · \(formatRemaining(secs))"
+            }
+        }
+        return "\(processed.formatted()) / \(total.formatted())"
+    }
+
+    /// ~45s below a minute, ~3:20 below an hour, ~1h 12m after that.
+    static func formatRemaining(_ seconds: Int) -> String {
+        if seconds >= 3600 {
+            let hours = seconds / 3600
+            let minutes = (seconds % 3600) / 60
+            return minutes > 0
+                ? String(format: "~%dh %dm", hours, minutes)
+                : String(format: "~%dh", hours)
+        }
+        if seconds >= 60 {
+            return String(format: "~%d:%02d", seconds / 60, seconds % 60)
+        }
+        return "~\(seconds)s"
+    }
 }
 
 /// Whether the selected library folder currently has photos the Store can show.
@@ -114,6 +185,12 @@ final class GalleryStore {
     /// Scan-pipeline state (GalleryStore+Scanning) — internal because the
     /// pipeline lives in a separate file; not meant for use elsewhere.
     @ObservationIgnored var isEnriching = false
+    /// True for the length of a user-initiated delete or move so our own
+    /// `removeItem` / `moveItem` calls cannot wake `LibraryRootMonitor`.
+    @ObservationIgnored var isMutatingDisk = false
+    /// Bumped when photos are deleted or moved. The grid's `FilterKey`
+    /// includes this so a same-size, same-date move still refreshes cells.
+    @ObservationIgnored var libraryEpoch: Int = 0
     /// In-flight scan, keyed by URL + resolved kind. Concurrent callers for
     /// the same URL await the existing task instead of starting a second
     /// traversal (app launch + willEnterForeground + pull-to-refresh can
@@ -171,6 +248,11 @@ final class GalleryStore {
     /// the two runs are independently resumable. Named results reach the app
     /// through the same sidecar pipeline, so `people` needs no new read path.
     let faces: FaceService
+    /// Reverse-geocode GPS into `Places/*` tags. Driven by `analysis`, not a
+    /// Settings button of its own.
+    let geocoding: GeocodingService
+    /// The single "Scan Photos" run: tagging, then faces, then places.
+    let analysis: LibraryAnalysis
     /// Watches the library folder while the app is foregrounded. Directory
     /// vnode events and NSFilePresenter callbacks coalesce into a light
     /// silent rescan — Syncthing / Files deletions otherwise never update
@@ -191,6 +273,11 @@ final class GalleryStore {
     /// `Any?` isn't `Sendable`, hence the `(unsafe)`.
     @ObservationIgnored private nonisolated(unsafe) var foregroundObserver: Any?
     @ObservationIgnored private nonisolated(unsafe) var backgroundObserver: Any?
+    /// `willEnterForeground` is also posted on cold launch, where
+    /// `restoreFolder` already owns the scan. Arm this only from
+    /// `didEnterBackground` so the two launch kickoffs cannot overlap
+    /// and then re-walk via `scanFolder`'s `tooEarly` rule.
+    @ObservationIgnored var shouldScanOnForeground = false
     @ObservationIgnored private nonisolated(unsafe) var significantTimeChangeObserver: Any?
     @ObservationIgnored private nonisolated(unsafe) var contactStoreObserver: Any?
 
@@ -243,6 +330,12 @@ final class GalleryStore {
             cacheDatabaseURL: paths.mlCacheDatabaseURL,
             refresh: sidecarRefresh
         )
+        self.geocoding = GeocodingService(cacheURL: paths.geocodeCacheURL)
+        self.analysis = LibraryAnalysis(
+            tagging: self.tagging,
+            faces: self.faces,
+            places: self.geocoding
+        )
         self.sidecarSync.onFinished = { @MainActor [weak self] in
             self?.reapplySidecarMerges()
         }
@@ -269,6 +362,16 @@ final class GalleryStore {
         // its own 1.5 s coalescer for that reason; `scanFolder` already
         // dedupes if a tagging refresh is in flight.
         let monitor = self.libraryMonitor
+        // Our own sidecar writers already refresh through the 30 s
+        // coalescer. Letting this 1.5 s watcher see those writes is what
+        // turned an analysis run into a continuous light rescan.
+        monitor.shouldIgnoreEvents = { [weak self] in
+            (self?.analysis.isRunning ?? false)
+                || (self?.tagging.isRunning ?? false)
+                || (self?.faces.isRunning ?? false)
+                || (self?.geocoding.isRunning ?? false)
+                || (self?.isMutatingDisk ?? false)
+        }
         monitor.coalescer.onRefresh = { [weak self] in
             await self?.rescan(kind: .light, silent: true)
         }
@@ -285,10 +388,25 @@ final class GalleryStore {
             await self?.tagging.refreshAvailability()
         }
         // The two engines share a cache file and a sidecar per photo, and each
-        // core session only guards its own run. This is the other half.
-        self.faces.otherEngineIsRunning = { [weak self] in self?.tagging.isRunning ?? false }
+        // core session only guards its own run. Analysis covers the places
+        // phase too — naming mid-geocode would collide on the same `.xmp`.
+        // `startScan` itself does not consult this flag (analysis calls it
+        // while the flag is already true).
+        self.faces.otherEngineIsRunning = { [weak self] in
+            (self?.tagging.isRunning ?? false) || (self?.analysis.isRunning ?? false)
+        }
         self.faces.eligiblePhotos = { [weak self] in self?.allPhotos ?? [] }
         self.faces.libraryRoot = { [weak self] in self?.bookmarks.activeURL }
+        self.analysis.photos = { [weak self] in self?.allPhotos ?? [] }
+        self.analysis.onSidecarsWritten = { [weak self] in
+            await self?.rescan(kind: .light, silent: true)
+        }
+        self.analysis.onSidecarPaths = { [weak self] paths in
+            self?.applyParsedSidecars(paths: paths)
+        }
+        self.analysis.onPlaceWritten = { [weak sidecarRefresh] in
+            sidecarRefresh?.note()
+        }
         // The core renames a *person*; the app keys five persisted things by
         // their tag path. See `migratePersonState`.
         self.faces.onPersonRenamed = { [weak self] old, new in
@@ -370,15 +488,7 @@ final class GalleryStore {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self else { return }
-                await self.loadContacts()
-                if let url = self.bookmarks.activeURL {
-                    await self.scanFolder(at: url, kind: .auto, silent: true)
-                }
-                // Day rolled over while the app was backgrounded? Re-export so
-                // the Memories widget gets fresh "On this day" content even if
-                // no scan happened.
-                self.refreshWidgetIfDayChanged()
+                await self?.handleWillEnterForeground()
             }
         }
 
@@ -391,7 +501,7 @@ final class GalleryStore {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.libraryMonitor.stop()
+                self?.handleDidEnterBackground()
             }
         }
 
@@ -428,6 +538,26 @@ final class GalleryStore {
     /// foreground entry of a new day rebuilds the snapshot — without
     /// pessimistically forcing a regeneration on every cold launch.
     @ObservationIgnored private var lastWidgetExportDay: Date?
+
+    /// Launch posts `willEnterForeground` too; `restoreFolder` is the scan
+    /// for that. Only a real background arms the next foreground walk.
+    func handleDidEnterBackground() {
+        shouldScanOnForeground = true
+        libraryMonitor.stop()
+    }
+
+    func handleWillEnterForeground() async {
+        let scan = shouldScanOnForeground
+        shouldScanOnForeground = false
+        await loadContacts()
+        if scan, let url = bookmarks.activeURL {
+            await scanFolder(at: url, kind: .auto, silent: true)
+        }
+        // Day rolled over while the app was backgrounded? Re-export so
+        // the Memories widget gets fresh "On this day" content even if
+        // no scan happened.
+        refreshWidgetIfDayChanged()
+    }
 
     private func refreshWidgetIfDayChanged() {
         let today = Calendar.current.startOfDay(for: clock.now())
@@ -595,6 +725,15 @@ final class GalleryStore {
         contactLinker.effectiveContact(forPersonPath: path, displayName: displayName, links: personContactLinks)
     }
 
+    /// Contacts already tied to a library person (manual link or auto-match).
+    /// Name suggestions skip these so a tag and its linked address-book entry
+    /// are not two chips for the same person.
+    var linkedContactIDs: Set<String> {
+        Set(people.peopleTags.compactMap {
+            effectiveContact(forPersonPath: $0.fullPath, displayName: $0.displayName)?.id
+        })
+    }
+
     @discardableResult
     internal func loadCache() -> Bool {
         guard let cached = libraryCache.load() else {
@@ -636,6 +775,12 @@ final class GalleryStore {
     ///     snapshot is not replaced by an empty library (`saveCache()` also
     ///     no-ops when `rootFolder` is nil). A completed empty walk persists.
     ///   - `.sidecarsMerged` rebuilds indexes and persists.
+    ///   - `.photosRemoved` rebuilds indexes and updates availability.
+    ///     Persistence is the caller's job (`deletePhotos` trims the sidecar
+    ///     manifest first so one cache write covers both).
+    ///   - `.photosRelocated` drops the old ids, inserts the moved
+    ///     `PhotoFile`s (new path, new stable id) into `destFolderID`, and
+    ///     rebuilds indexes. Persistence is `movePhotos`'s job.
     ///   - `.photoLocalityChanged`, `.allDownloadsCleared`, and
     ///     `.sidecarCacheCleared` only update in-memory locality / sidecar
     ///     status — no rebuild, no save. The next scan repopulates from
@@ -648,6 +793,8 @@ final class GalleryStore {
     enum PhotoLibraryMutation {
         case scanResult(photos: [PhotoFile], root: PhotoFolder?, persistCache: Bool)
         case sidecarsMerged(photos: [PhotoFile])
+        case photosRemoved(Set<UUID>)
+        case photosRelocated(from: Set<UUID>, to: [PhotoFile], destFolderID: UUID)
         case photoLocalityChanged(id: UUID, locality: PhotoLocality)
         case allDownloadsCleared
         case sidecarCacheCleared
@@ -664,6 +811,17 @@ final class GalleryStore {
             self.allPhotos = photos
             rebuildSortAndIndex()
             saveCache()
+        case let .photosRemoved(ids):
+            allPhotos.removeAll { ids.contains($0.id) }
+            if let root = rootFolder {
+                rootFolder = root.removingPhotos(ids)
+            }
+            rebuildSortAndIndex()
+            if allPhotos.isEmpty {
+                libraryAvailability = rootFolder == nil ? .noneSelected : .empty
+            } else {
+                libraryAvailability = .ready
+            }
         case let .photoLocalityChanged(id, locality):
             guard let idx = allPhotos.firstIndex(where: { $0.id == id }) else { return }
             // Placeholder → downloaded: the first enrichment ran against a
@@ -710,6 +868,132 @@ final class GalleryStore {
     /// O(1) photo lookup by ID. The id → `PhotoFile` table is the app's own —
     /// the core answers in ids and the app holds the structs.
     func photo(byID id: UUID) -> PhotoFile? { index.photo(byID: id) }
+
+    /// Resolve a face crop back to the library photo it was cut from.
+    ///
+    /// Face refs used to be wrapped with `URL(fileURLWithPath:)`, which
+    /// decomposes Unicode; the library indexes `CoreScanner.fileURL` paths.
+    /// Scan Activity hashes `standardizedFileURL.path` the core just
+    /// reported — that spelling often differs from the indexed one
+    /// (`/var` vs `/private/var`, NFC vs NFD), so the id miss and a
+    /// path walk have to agree on more than one form.
+    func photo(at url: URL) -> PhotoFile? {
+        if let photo = photo(byID: PhotoFile.stableID(for: url)) {
+            return photo
+        }
+        let preserved = CoreScanner.fileURL(url.path)
+        if let photo = photo(byID: PhotoFile.stableID(for: preserved)) {
+            return photo
+        }
+        let wanted = Self.pathKeys(for: url)
+        return allPhotos.first { !wanted.isDisjoint(with: Self.pathKeys(for: $0.url)) }
+    }
+
+    /// Path spellings that should identify the same file. Used when the
+    /// stable id derived from one constructor misses the id the scanner
+    /// stored from another.
+    static func pathKeys(for url: URL) -> Set<String> {
+        var keys = Set<String>()
+        func insert(_ path: String) {
+            guard !path.isEmpty else { return }
+            keys.insert(path)
+            keys.insert((path as NSString).standardizingPath)
+            keys.insert(path.precomposedStringWithCanonicalMapping)
+            keys.insert(path.decomposedStringWithCanonicalMapping)
+        }
+        insert(url.path)
+        insert(url.standardized.path)
+        insert(url.standardizedFileURL.path)
+        insert(url.resolvingSymlinksInPath().path)
+        return keys
+    }
+
+    /// Library photo for a Scan Activity row. Id-first misses when the
+    /// journal hashed a different path spelling than the index; the URL
+    /// walk is what finds the real `PhotoFile` (size, tags, EXIF).
+    func photo(forActivity url: URL, photoID: UUID) -> PhotoFile? {
+        photo(at: url) ?? photo(byID: photoID)
+    }
+
+    /// Union sidecar tags / regions into the live library rows. A face
+    /// or tagging write changes the `.xmp`, not the image; both light
+    /// and full scans treat an unchanged image as "keep cached tags",
+    /// so without this the person Scan Activity just read never lands
+    /// on the PhotoFile the info sheet uses — even after Reload Library.
+    func applyParsedSidecars(paths: [String]) {
+        guard !paths.isEmpty else { return }
+        var photos = allPhotos
+        var changed = false
+        for path in paths {
+            let url = CoreScanner.fileURL(path)
+            guard let found = photo(at: url) ?? photo(at: URL(fileURLWithPath: path)),
+                  let idx = photos.firstIndex(where: { $0.id == found.id }) else { continue }
+            let sidecar = URL(fileURLWithPath: path + ".xmp")
+            guard let data = try? Data(contentsOf: sidecar) else { continue }
+            let parsed = parseXmpBytes(bytes: data)
+            let merged = Self.merging(parsed, into: photos[idx])
+            if merged.hierarchicalTags == photos[idx].hierarchicalTags,
+               merged.faceRegions == photos[idx].faceRegions,
+               merged.countryCode == photos[idx].countryCode {
+                continue
+            }
+            photos[idx] = merged
+            changed = true
+        }
+        if changed {
+            apply(.sidecarsMerged(photos: photos))
+        }
+    }
+
+    static func merging(_ parsed: SidecarParseRecord, into photo: PhotoFile) -> PhotoFile {
+        var photo = photo
+        var seen = Set(photo.hierarchicalTags.map { $0.fullPath.lowercased() })
+        for raw in parsed.rawTags {
+            if seen.insert(raw.lowercased()).inserted {
+                photo.hierarchicalTags.append(HierarchicalTag(raw: raw))
+            }
+        }
+        if !parsed.faceRegions.isEmpty {
+            photo.faceRegions = parsed.faceRegions.map {
+                FaceRegion(
+                    name: $0.name,
+                    centerX: $0.centerX,
+                    centerY: $0.centerY,
+                    width: $0.width,
+                    height: $0.height
+                )
+            }
+        }
+        if photo.countryCode == nil {
+            photo.countryCode = parsed.countryCode
+        }
+        return photo
+    }
+
+    /// Library photo for a face crop, or a stand-in from the crop's path so
+    /// the viewer can still open the file when the index missed it.
+    func photo(forFace face: FaceService.Face) -> PhotoFile {
+        if let photo = photo(at: face.url) { return photo }
+        return PhotoFile(
+            id: PhotoFile.stableID(for: face.url),
+            url: face.url,
+            filename: face.url.lastPathComponent,
+            fileSize: 0,
+            dateTaken: nil
+        )
+    }
+
+    /// Unique photos for these face crops, in crop order.
+    func photos(forFaces faces: [FaceService.Face]) -> [PhotoFile] {
+        var seen = Set<UUID>()
+        var photos: [PhotoFile] = []
+        for face in faces {
+            let photo = photo(forFace: face)
+            guard seen.insert(photo.id).inserted else { continue }
+            photos.append(photo)
+        }
+        return photos
+    }
 
     /// Photos for a given tag, from the core's buckets (prefix expansion
     /// included), memoised per tag between rebuilds.
@@ -912,6 +1196,10 @@ final class GalleryStore {
 
     func thumbnail(for url: URL, size: CGSize, isVideo: Bool = false, useQuickLook: Bool = false) async -> UIImage? {
         await thumbnailService.thumbnail(for: url, size: size, isVideo: isVideo, useQuickLook: useQuickLook)
+    }
+
+    func faceCrop(for url: URL, region: FaceRegion, cellSize: CGFloat) async -> UIImage? {
+        await thumbnailService.faceCrop(for: url, region: region, cellSize: cellSize)
     }
 
     func clearThumbnailCache() {

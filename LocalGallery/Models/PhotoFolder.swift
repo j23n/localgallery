@@ -33,4 +33,50 @@ struct PhotoFolder: Identifiable, Codable, Sendable, Hashable {
     func directoryURLs() -> [URL] {
         [url] + subfolders.flatMap { $0.directoryURLs() }
     }
+
+    /// Drop photos whose ids are in `ids` and recompute counts / cover.
+    /// Empty folders stay — the user deleted files, not directories.
+    func removingPhotos(_ ids: Set<UUID>) -> PhotoFolder {
+        var folder = self
+        folder.photos.removeAll { ids.contains($0.id) }
+        folder.subfolders = folder.subfolders.map { $0.removingPhotos(ids) }
+        folder.totalPhotoCount = folder.photos.count
+            + folder.subfolders.reduce(0) { $0 + $1.totalPhotoCount }
+        if let cover = folder.coverPhotoURL,
+           !folder.photos.contains(where: { $0.url == cover }) {
+            folder.coverPhotoURL = folder.photos.first?.url
+                ?? folder.subfolders.first(where: { $0.coverPhotoURL != nil })?.coverPhotoURL
+        }
+        return folder
+    }
+
+    /// Append `photos` to the node with `id` and recompute counts / cover
+    /// up the tree. No-op if that id is not in this subtree.
+    func addingPhotos(_ photos: [PhotoFile], toFolderID id: UUID) -> PhotoFolder {
+        var folder = self
+        if folder.id == id {
+            folder.photos.append(contentsOf: photos)
+            if folder.coverPhotoURL == nil {
+                folder.coverPhotoURL = photos.first?.url
+            }
+        } else {
+            folder.subfolders = folder.subfolders.map { $0.addingPhotos(photos, toFolderID: id) }
+        }
+        folder.totalPhotoCount = folder.photos.count
+            + folder.subfolders.reduce(0) { $0 + $1.totalPhotoCount }
+        return folder
+    }
+
+    /// Insert `child` under the node with `parentID`.
+    func inserting(_ child: PhotoFolder, inParent parentID: UUID) -> PhotoFolder {
+        var folder = self
+        if folder.id == parentID {
+            if !folder.subfolders.contains(where: { $0.id == child.id }) {
+                folder.subfolders.append(child)
+            }
+        } else {
+            folder.subfolders = folder.subfolders.map { $0.inserting(child, inParent: parentID) }
+        }
+        return folder
+    }
 }

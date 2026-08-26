@@ -1,6 +1,10 @@
 # Xcode
 DerivedData/
 build/
+# UniFFI Swift — written by scripts/build_core.sh. A checked-in or
+# hand-copied LocalGallery/GalleryCore.swift will not match a newly
+# built xcframework (checksum mismatch at launch).
+LocalGallery/GalleryCore.swift
 *.xcuserdata
 *.xcworkspace
 

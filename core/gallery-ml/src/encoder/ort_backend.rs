@@ -6,9 +6,11 @@
 //! takes `&self` and is called from every worker at once. Rather than put one
 //! session behind a mutex — which would serialize inference and defeat the
 //! engine's whole parallelism story — this holds `slots` independent sessions
-//! and hands each caller the first one it can lock. Sessions are cheap to keep
-//! and expensive to build, so they are all built up front, at
-//! [`OrtEncoder::new`], where a failure is a clean run-level error.
+//! and hands each caller the first one it can lock. Sessions are expensive
+//! to keep (each one owns a copy of the weights) and expensive to build, so
+//! the pool is sized to [`crate::INFERENCE_SESSIONS`] — one on device — and
+//! built up front at [`OrtEncoder::new`], where a failure is a clean
+//! run-level error.
 //!
 //! Each session is single-threaded internally (`with_intra_threads(1)`,
 //! `with_parallel_execution(false)`), so `slots` really is the total inference

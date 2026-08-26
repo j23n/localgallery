@@ -62,6 +62,14 @@ final class SidecarCacheStore {
         scheduleSave()
     }
 
+    /// Re-key a cached sidecar after an on-disk move. The bytes did not
+    /// change; only the photo's stable id did.
+    func relocate(from old: UUID, to new: UUID) {
+        guard old != new, let entry = entries.removeValue(forKey: old) else { return }
+        entries[new] = entry
+        scheduleSave()
+    }
+
     /// Drop entries for photo IDs not present in `keeping`. Called after a
     /// scan to garbage-collect orphans (deleted photos, renamed files).
     func gc(keeping: Set<UUID>) {

@@ -50,6 +50,17 @@ struct RenamePersonSheet: View {
             && !isSaving && !store.faces.isCoreBusy
     }
 
+    private var suggestions: [PersonNameSuggestions.Item] {
+        PersonNameSuggestions.matching(
+            typed: name,
+            libraryNames: store.people.peopleTags
+                .map(\.displayName)
+                .filter { $0.localizedCaseInsensitiveCompare(person.displayName) != .orderedSame },
+            contacts: store.contacts,
+            linkedContactIDs: store.linkedContactIDs
+        )
+    }
+
     var body: some View {
         NavigationStack {
             Form {
@@ -60,6 +71,11 @@ struct RenamePersonSheet: View {
                         .focused($focused)
                         .submitLabel(.done)
                         .onSubmit { attemptSave() }
+
+                    if !suggestions.isEmpty {
+                        NameSuggestionChips(items: suggestions) { name = $0 }
+                            .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 0))
+                    }
 
                     if let problem = nameProblem {
                         Text(problem)
@@ -110,6 +126,7 @@ struct RenamePersonSheet: View {
             .task {
                 name = person.displayName
                 focused = true
+                await store.loadContacts()
             }
         }
     }

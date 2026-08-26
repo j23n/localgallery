@@ -4,12 +4,13 @@ SwiftUI iOS photo gallery app that browses user-selected folders without importi
 
 ## Build & test
 
-Four commands from a clean checkout — stage the model pack, build the Rust
-core, generate the Xcode project, test:
+Three commands from a clean checkout — stage the model pack, generate the
+Xcode project, test. The Rust core is compiled by Xcode's **Build Rust Core**
+pre-build phase (`scripts/build_core.sh`), so a change under `core/` is just
+another `xcodebuild`.
 
 ```
 ./scripts/prepare_pack.sh        # newest build/model_packs/<version> → build/pack/<version> (bundled resource)
-./scripts/build_core.sh          # cargo → UniFFI → build/core/{GalleryCore.xcframework,Generated}
 xcodegen                         # generates LocalGallery.xcodeproj
 xcodebuild test -project LocalGallery.xcodeproj -scheme LocalGallery -destination "platform=iOS Simulator,name=iPhone 17 Pro" -testLanguage en -testRegion US
 ```
@@ -34,11 +35,14 @@ missing pack surfaces as a code-signing error at the end of it.
 `buffalo_sc` models in the full pack are research / non-commercial licensed, so
 anything distributed ships the tagging variant (see README).
 
-Swap `test` for `build` to just compile. `build_core.sh` must run before
-`xcodegen` (the project references generated paths) and again after any change
-under `core/`. Cargo is deliberately not an Xcode script phase — script
-sandboxing fights it. Pass `--release` for an optimized core. Rust-only work:
-`cd core && cargo test` (host).
+Swap `test` for `build` to just compile. `xcodegen` needs
+`build/core/GalleryCore.xcframework` to exist as a path; on a machine that
+has never built the core, run `./scripts/build_core.sh` once first. After
+that the Xcode phase keeps it current. Inside Xcode the script follows
+`CONFIGURATION` and `PLATFORM_NAME` (a Debug simulator build does not also
+compile the device slice). Pass `--release` / `--sdk` on the CLI. User Script
+Sandboxing is off because cargo needs `~/.cargo`, rustup, `core/target`, and
+the ORT cache. Rust-only work: `cd core && cargo test` (host).
 
 **The first `build_core.sh` on a machine needs network access**: `gallery-ml`
 links ONNX Runtime through the `ort` crate, whose build script downloads pyke's
@@ -51,9 +55,14 @@ the two link requirements an archive can't express (`-lc++`,
 `-framework CoreML`) live in `project.yml`'s `OTHER_LDFLAGS`.
 
 Device builds need a signing team in Xcode (or `DEVELOPMENT_TEAM` in
-`project.yml`). `build_core.sh` produces both `ios-arm64` and
-`ios-arm64-simulator` slices; after a core change, re-run it before building
-for a physical device.
+`project.yml`). A device (or Archive) build compiles the `ios-arm64` slice;
+a simulator build compiles `ios-arm64-simulator`. From the CLI with no
+`--sdk`, both slices are produced.
+
+`CFBundleVersion` is `git rev-list --count HEAD`, stamped onto the built
+app and widget by `scripts/set_build_number.sh` (same rule as
+j23n/localcontacts). Settings shows it as `1.0.0 (N)`. Source Info.plists
+keep `$(CURRENT_PROJECT_VERSION)`.
 
 ## Structure
 

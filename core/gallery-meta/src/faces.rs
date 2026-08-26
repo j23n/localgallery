@@ -10,7 +10,7 @@
 //! | `lr:hierarchicalSubject` | the `People\|<Name>` entries **we** added |
 //! | `Iptc4xmpExt:PersonInImage` | the projection of the file's `People/*` leaves |
 //! | `mwg-rs:RegionInfo` | the regions **we** authored ([`crate::regions`]) |
-//! | `photo-tools:CorePeople*` / `CoreRegions` / `CoreFacePack` | the sentinel |
+//! | `photo-tools:CorePeople*` / `CoreRegions` / `CoreFaceDecisions` / `CoreFacePack` / `CoreFaceTaggedAt` | the sentinel |
 //!
 //! Phase 1's [`crate::write`] deliberately refuses all of these; this module is
 //! the door the schema doc opens for a face-detector agent (§1.5, §2.1), and it
@@ -57,7 +57,7 @@ use crate::edit::{self, NodePath};
 use crate::error::{MetaError, MetaResult};
 use crate::model::SidecarView;
 use crate::read::view_of;
-use crate::regions::{self, Area, FaceRegionWrite, RegionClaim};
+use crate::regions::{self, parse_decision, Area, FaceDecision, FaceRegionWrite, RegionClaim};
 use crate::schema::*;
 use crate::sidecar::{alt_sidecar_path, sidecar_path};
 use crate::tags::{leaf_of, nfc, nfc_lower, normalize_person, person_tag, to_lr_path};
@@ -129,6 +129,14 @@ pub struct FaceWriteRequest {
     pub tagged_at: String,
     /// Which of this crate's own claims the request is entitled to retract.
     pub authority: Authority,
+    /// Portable per-face judgments, or `None` to leave [`crate::schema::PROP_CORE_FACE_DECISIONS`]
+    /// exactly as it is.
+    ///
+    /// `None` is the scan-stamp path: we are recording `CoreFacePack` and must
+    /// not strip names or dismissals another write already put here.
+    /// `Some` merges: entries this request speaks for are replaced by the
+    /// list; entries for people (or dismissed boxes) it cannot see stay.
+    pub decisions: Option<Vec<FaceDecision>>,
 }
 
 impl FaceWriteRequest {
@@ -146,7 +154,14 @@ impl FaceWriteRequest {
             face_pack: face_pack.into(),
             tagged_at: tagged_at.into(),
             authority: Authority::Complete,
+            decisions: None,
         }
+    }
+
+    /// Set the portable face-judgment bag. See [`FaceWriteRequest::decisions`].
+    pub fn with_decisions(mut self, decisions: impl IntoIterator<Item = FaceDecision>) -> Self {
+        self.decisions = Some(decisions.into_iter().collect());
+        self
     }
 
     /// Speak only for the people named here plus `retracting` — see
@@ -304,6 +319,8 @@ struct NormalizedRequest {
     /// Names the request may retract *besides* the ones it holds, and whether
     /// that list is the only limit. `None` = [`Authority::Complete`].
     retracting: Option<BTreeSet<String>>,
+    /// `None` leaves the decision bag untouched.
+    decisions: Option<Vec<FaceDecision>>,
 }
 
 impl NormalizedRequest {
@@ -331,6 +348,21 @@ impl NormalizedRequest {
         people.sort();
         people.dedup();
 
+        let decisions = match &request.decisions {
+            None => None,
+            Some(raw) => {
+                let mut out = Vec::with_capacity(raw.len());
+                for decision in raw {
+                    out.push(normalize_decision(decision)?);
+                }
+                out.sort_by(|a, b| {
+                    a.to_claim().cmp(&b.to_claim())
+                });
+                out.dedup_by(|a, b| a == b);
+                Some(out)
+            }
+        };
+
         let retracting = match &request.authority {
             Authority::Complete => None,
             Authority::Partial { retracting } => Some(
@@ -344,6 +376,7 @@ impl NormalizedRequest {
             regions,
             people,
             retracting,
+            decisions,
         })
     }
 
@@ -361,6 +394,17 @@ impl NormalizedRequest {
         let name = nfc(name);
         retracting.contains(&name) || self.people.contains(&name)
     }
+}
+
+fn normalize_decision(decision: &FaceDecision) -> MetaResult<FaceDecision> {
+    Ok(match decision {
+        FaceDecision::Named { area, name } => FaceDecision::Named {
+            area: *area,
+            name: normalize_person(name)?,
+        },
+        FaceDecision::Ignored { area } => FaceDecision::Ignored { area: *area },
+        FaceDecision::Rejected { area } => FaceDecision::Rejected { area: *area },
+    })
 }
 
 /// The add/remove/own triple one list property needs.
@@ -389,6 +433,8 @@ struct FacePlan {
     regions_to_remove: Vec<Area>,
     regions_deferred: usize,
     owned_regions: Vec<String>,
+    owned_decisions: Vec<String>,
+    decisions_changed: bool,
     agent: String,
     face_pack: String,
     tagged_at: String,
@@ -402,13 +448,16 @@ impl FacePlan {
         let (regions_to_add, regions_to_remove, regions_deferred, owned_regions) =
             plan_regions(view, req);
         let (person_in_image, person_in_image_remove) = plan_person_in_image(view, &people);
+        let owned_decisions = plan_decisions(view, req);
+        let decisions_changed = owned_decisions != view.core.decisions;
 
         let sentinel_is_current = view.core.agent.as_deref() == Some(raw.agent.as_str())
             && view.core.face_pack.as_deref() == Some(raw.face_pack.as_str())
             && view.core.people == people.owned
             && view.core.people_subjects == subjects.owned
             && view.core.people_hierarchical == hierarchical.owned
-            && view.core.regions == owned_regions;
+            && view.core.regions == owned_regions
+            && view.core.decisions == owned_decisions;
 
         FacePlan {
             people,
@@ -420,6 +469,8 @@ impl FacePlan {
             regions_to_remove,
             regions_deferred,
             owned_regions,
+            owned_decisions,
+            decisions_changed,
             agent: raw.agent.clone(),
             face_pack: raw.face_pack.clone(),
             tagged_at: raw.tagged_at.clone(),
@@ -435,6 +486,7 @@ impl FacePlan {
             || !self.regions_to_remove.is_empty()
             || self.person_in_image.is_some()
             || !self.person_in_image_remove.is_empty()
+            || self.decisions_changed
     }
 }
 
@@ -801,6 +853,56 @@ fn plan_regions(
     (to_add, doomed, deferred, owned_claims)
 }
 
+/// Merge the request's decision list with what the file already claims.
+///
+/// `None` on the request means leave the bag as it is (the scan stamp).
+/// `Some` replaces entries this request speaks for and keeps the rest:
+/// a named decision for a person we cannot see, or a dismissed box that
+/// does not overlap anything we are restating.
+fn plan_decisions(view: &SidecarView, req: &NormalizedRequest) -> Vec<String> {
+    let Some(wanted) = &req.decisions else {
+        return view.core.decisions.clone();
+    };
+
+    let mut owned: Vec<String> = Vec::new();
+    for entry in &view.core.decisions {
+        let Some(existing) = parse_decision(entry) else {
+            // Unreadable claim: leave it standing rather than delete it.
+            owned.push(entry.clone());
+            continue;
+        };
+        if decision_is_superseded(&existing, wanted, req) {
+            continue;
+        }
+        owned.push(entry.clone());
+    }
+    for decision in wanted {
+        owned.push(decision.to_claim());
+    }
+    owned.sort();
+    owned.dedup();
+    owned
+}
+
+fn decision_is_superseded(
+    existing: &FaceDecision,
+    wanted: &[FaceDecision],
+    req: &NormalizedRequest,
+) -> bool {
+    if wanted.iter().any(|w| w.area().matches(&existing.area())) {
+        return true;
+    }
+    match existing {
+        FaceDecision::Named { name, .. } => req.speaks_for(name),
+        FaceDecision::Ignored { .. } | FaceDecision::Rejected { .. } => {
+            // Complete is allowed to drop dismissals it did not restate.
+            // Partial cannot see every dismissed face on the photo, so it
+            // keeps unmatched ones.
+            req.retracting.is_none()
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Applying
 // ---------------------------------------------------------------------------
@@ -873,12 +975,14 @@ fn apply_plan(doc: &mut Document, root: &NodePath, plan: &FacePlan, size: Option
     };
     scalar(doc, PROP_CORE_AGENT, &plan.agent);
     scalar(doc, PROP_CORE_FACE_PACK, &plan.face_pack);
+    scalar(doc, PROP_CORE_FACE_TAGGED_AT, &plan.tagged_at);
     scalar(doc, PROP_CORE_TAGGED_AT, &plan.tagged_at);
     for (local, values) in [
         (PROP_CORE_PEOPLE, &plan.people.owned),
         (PROP_CORE_PEOPLE_SUBJECTS, &plan.subjects.owned),
         (PROP_CORE_PEOPLE_HIERARCHICAL, &plan.hierarchical.owned),
         (PROP_CORE_REGIONS, &plan.owned_regions),
+        (PROP_CORE_FACE_DECISIONS, &plan.owned_decisions),
     ] {
         edit::set_list(doc, root, NS_PHOTO_TOOLS, pt, local, "Bag", values);
     }
@@ -947,6 +1051,7 @@ mod tests {
         assert_eq!(view.regions[0].kind.as_deref(), Some("Face"));
         assert_eq!(view.core.people, vec!["People/Alice"]);
         assert_eq!(view.core.face_pack.as_deref(), Some("buffalo_sc-2026.1"));
+        assert_eq!(view.core.face_tagged_at.as_deref(), Some("2026-08-03T10:00:00Z"));
         assert_eq!(view.core.regions.len(), 1);
         assert!(out.created && out.changed);
     }
@@ -1405,5 +1510,128 @@ mod tests {
         let after = read_view(&cleared).unwrap();
         assert_eq!(after.subject, vec!["Alice"], "the human's keyword survived");
         assert!(after.tags_list.is_empty());
+    }
+
+    fn ignored_box(x: f64, y: f64, w: f64, h: f64) -> FaceDecision {
+        FaceDecision::Ignored {
+            area: Area::new(x, y, w, h),
+        }
+    }
+
+    fn rejected_box(x: f64, y: f64, w: f64, h: f64) -> FaceDecision {
+        FaceDecision::Rejected {
+            area: Area::new(x, y, w, h),
+        }
+    }
+
+    #[test]
+    fn a_rejected_decision_does_not_create_a_person() {
+        let out = apply_faces(
+            None,
+            &request(Vec::new()).with_decisions([rejected_box(0.4, 0.35, 0.12, 0.16)]),
+        )
+        .unwrap();
+        let view = read_view(&out.bytes).unwrap();
+        assert!(view.tags_list.is_empty());
+        assert!(view.subject.is_empty());
+        assert!(view.person_in_image.is_empty());
+        assert!(view.regions.is_empty());
+        assert!(view.core.people.is_empty());
+        assert!(view.core.regions.is_empty());
+        assert_eq!(view.core.decisions.len(), 1);
+        assert!(
+            matches!(
+                parse_decision(&view.core.decisions[0]),
+                Some(FaceDecision::Rejected { .. })
+            ),
+            "{:?}",
+            view.core.decisions
+        );
+        assert!(view.core.has_faces());
+    }
+
+    #[test]
+    fn an_ignored_decision_does_not_create_a_person() {
+        let out = apply_faces(
+            None,
+            &request(Vec::new()).with_decisions([ignored_box(0.2, 0.2, 0.1, 0.1)]),
+        )
+        .unwrap();
+        let view = read_view(&out.bytes).unwrap();
+        assert!(view.tags_list.is_empty());
+        assert!(view.regions.is_empty());
+        assert_eq!(
+            parse_decision(&view.core.decisions[0]),
+            Some(ignored_box(0.2, 0.2, 0.1, 0.1))
+        );
+    }
+
+    #[test]
+    fn a_named_decision_without_a_region_is_bag_only() {
+        // Below-quality confirm: keyword via extra_people, box only in the
+        // decision bag so a later machine can still bind the detection.
+        let mut req = request(Vec::new());
+        req.extra_people = vec!["Alice".into()];
+        let req = req.with_decisions([FaceDecision::Named {
+            area: Area::new(0.4, 0.35, 0.12, 0.16),
+            name: "Alice".into(),
+        }]);
+        let out = apply_faces(None, &req).unwrap();
+        let view = read_view(&out.bytes).unwrap();
+        assert_eq!(view.tags_list, vec!["People/Alice"]);
+        assert!(view.regions.is_empty(), "no public MWG box");
+        assert!(view.core.regions.is_empty());
+        assert_eq!(
+            parse_decision(&view.core.decisions[0]),
+            Some(FaceDecision::Named {
+                area: Area::new(0.4, 0.35, 0.12, 0.16),
+                name: "Alice".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_scan_stamp_does_not_strip_decisions() {
+        let first = apply_faces(
+            None,
+            &request(Vec::new()).with_decisions([rejected_box(0.4, 0.35, 0.12, 0.16)]),
+        )
+        .unwrap()
+        .bytes;
+        let stamped = apply_faces(
+            Some(&first),
+            &request(Vec::new()).speaking_partially(Vec::<String>::new()),
+        )
+        .unwrap();
+        assert!(!stamped.changed, "empty Partial must be a no-op");
+        let view = read_view(&stamped.bytes).unwrap();
+        assert_eq!(view.core.decisions.len(), 1);
+    }
+
+    #[test]
+    fn partial_authority_leaves_a_name_it_does_not_speak_for() {
+        let alice = apply_faces(
+            None,
+            &request(vec![region("Alice", 0.4, 0.35, 0.12, 0.16)]).with_decisions(
+                [FaceDecision::Named {
+                    area: Area::new(0.4, 0.35, 0.12, 0.16),
+                    name: "Alice".into(),
+                }],
+            ),
+        )
+        .unwrap()
+        .bytes;
+        let bob_only = apply_faces(
+            Some(&alice),
+            &request(Vec::new())
+                .speaking_partially(Vec::<String>::new())
+                .with_decisions([rejected_box(0.1, 0.1, 0.05, 0.05)]),
+        )
+        .unwrap();
+        let view = read_view(&bob_only.bytes).unwrap();
+        assert_eq!(view.tags_list, vec!["People/Alice"]);
+        assert_eq!(view.core.decisions.len(), 2, "{:?}", view.core.decisions);
+        assert!(view.core.decisions.iter().any(|e| e.contains("named Alice")));
+        assert!(view.core.decisions.iter().any(|e| e.ends_with(" rejected")));
     }
 }

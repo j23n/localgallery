@@ -42,10 +42,14 @@
 use fast_image_resize::images::{Image as FirImage, ImageRef};
 use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
 use image::metadata::Orientation;
-use image::{DynamicImage, ImageFormat, RgbImage};
+use image::{DynamicImage, ImageFormat};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{ErrorCode, MlError, MlResult};
+
+/// Packed RGB8 image buffer. Re-exported so `gallery-ffi` can name the
+/// [`HostHeicDecoder`] return type without taking a direct `image` dependency.
+pub use image::RgbImage;
 
 /// Bumped whenever a change in this module moves pixels.
 ///
@@ -93,8 +97,9 @@ pub const DECODER_VERSION: u32 = 2;
 ///
 /// 120 MP is comfortably above any phone camera and any stitched panorama a
 /// phone produces, and well below the point where a malformed header can talk
-/// us into a multi-gigabyte allocation. Four workers each holding a 120 MP RGB
-/// buffer is already 1.4 GB, which is why this is not larger.
+/// us into a multi-gigabyte allocation. Two workers each holding a 120 MP RGB
+/// buffer is already 0.7 GB — analysis then downscales to
+/// [`ANALYSIS_MAX_LONG_SIDE`] so the working set is not that.
 pub(crate) const MAX_PIXELS: u64 = 120_000_000;
 
 /// The *resize destination* is refused past this many pixels.
@@ -221,14 +226,115 @@ pub const SUPPORTED_EXTENSIONS: &[&str] = &["jpg", "jpeg", "jpe", "png", "heic",
 
 /// Whether `path`'s extension is one this crate will attempt.
 pub fn extension_supported(path: &str) -> bool {
+    matches!(extension(path), Some(ext) if SUPPORTED_EXTENSIONS.contains(&ext.as_str()))
+}
+
+/// Whether `path` names a HEIC/HEIF file, by extension.
+///
+/// Used to decide whether a [`HostHeicDecoder`] is worth asking. The sniffer
+/// still has the last word on a file whose bytes disagree with its name.
+pub fn extension_is_heic(path: &str) -> bool {
+    matches!(extension(path).as_deref(), Some("heic") | Some("heif"))
+}
+
+fn extension(path: &str) -> Option<String> {
     let name = path.rsplit('/').next().unwrap_or(path);
-    match name.rsplit_once('.') {
-        Some((_, ext)) => {
-            let ext = ext.to_ascii_lowercase();
-            SUPPORTED_EXTENSIONS.contains(&ext.as_str())
-        }
-        None => false,
+    name.rsplit_once('.')
+        .map(|(_, ext)| ext.to_ascii_lowercase())
+}
+
+/// Long-side cap after a host (or software) decode used for analysis.
+///
+/// Tagging resizes to ~256 and the face detector letterboxes to 640. ImageIO
+/// already thumbs to this size. Applying the same cap on the software path
+/// (and as a backstop on a host that ignored its thumbnail size) is what
+/// stops two workers each holding a 48 MP RGB buffer.
+pub const ANALYSIS_MAX_LONG_SIDE: u32 = 2048;
+
+/// Optional platform HEIC decoder.
+///
+/// The in-crate [`crate::heif::HeifDecoder`] is a software HEVC decode. On a
+/// phone that is several seconds per 12 MP photo and the reason a first-run
+/// scan feels stuck. iOS already has a hardware decoder (ImageIO); this trait
+/// is the door the FFI opens for it. When it is absent the software path is
+/// used unchanged — tests and the host `cargo test` never install one.
+/// When it **is** installed, a failure is the photo's result: falling through
+/// to software HEVC of a 48 MP iPhone frame is what jetsams the process.
+///
+/// Returned pixels are **already oriented** (ImageIO applies `irot` / EXIF
+/// as part of producing a coherent CGImage), matching
+/// [`ImageDecoder::output_is_oriented`] for the in-crate HEIF backend.
+pub trait HostHeicDecoder: Send + Sync {
+    /// Decode `path` to oriented RGB. `path` is a real filesystem path the
+    /// platform decoder opens itself — the core does not hand it bytes.
+    fn decode(&self, path: &str) -> MlResult<RgbImage>;
+}
+
+/// Ask `host` to decode `path` when both a host decoder and a HEIC extension
+/// are present.
+///
+/// * `Ok(None)` — no host, or not a HEIC path: caller uses the pinned path.
+/// * `Ok(Some(rgb))` — host produced pixels.
+/// * `Err(_)` — host was asked and failed. Callers must **not** fall through
+///   to software HEVC; that is the 48 MP allocation this gate exists to
+///   prevent.
+pub fn host_heic_decode(
+    host: Option<&dyn HostHeicDecoder>,
+    path: &str,
+) -> MlResult<Option<RgbImage>> {
+    let Some(host) = host else {
+        return Ok(None);
+    };
+    if !extension_is_heic(path) {
+        return Ok(None);
     }
+    host.decode(path).map(Some)
+}
+
+/// Downscale so the long side is at most `max_long`. No-op when already
+/// smaller (or `max_long` is 0). Sidecar face boxes are normalized against
+/// the stored `image_w`/`image_h`, so a smaller canvas stays consistent.
+pub fn limit_long_side(rgb: RgbImage, max_long: u32) -> RgbImage {
+    let (w, h) = (rgb.width(), rgb.height());
+    let long = w.max(h);
+    if max_long == 0 || long <= max_long {
+        return rgb;
+    }
+    let scale = f64::from(max_long) / f64::from(long);
+    let nw = ((f64::from(w) * scale).round() as u32).max(1);
+    let nh = ((f64::from(h) * scale).round() as u32).max(1);
+    image::imageops::resize(&rgb, nw, nh, image::imageops::FilterType::Triangle)
+}
+
+/// Pack a host decoder's `width × height × 3` buffer into an [`RgbImage`].
+pub fn rgb_from_packed(width: u32, height: u32, data: Vec<u8>) -> MlResult<RgbImage> {
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|n| n.checked_mul(3));
+    if expected != Some(data.len()) {
+        return Err(MlError::Preprocess {
+            path: String::new(),
+            code: ErrorCode::BadImage,
+            detail: format!(
+                "{width}×{height} packed RGB is {} bytes, got {}",
+                expected.unwrap_or(0),
+                data.len()
+            ),
+        });
+    }
+    let pixels = u64::from(width) * u64::from(height);
+    if pixels == 0 || pixels > MAX_PIXELS {
+        return Err(MlError::Preprocess {
+            path: String::new(),
+            code: ErrorCode::BadImage,
+            detail: format!("{width}×{height} is not a usable size"),
+        });
+    }
+    RgbImage::from_raw(width, height, data).ok_or_else(|| MlError::Preprocess {
+        path: String::new(),
+        code: ErrorCode::BadImage,
+        detail: format!("{width}×{height} packed RGB was rejected"),
+    })
 }
 
 /// Identify `bytes` by magic number.
@@ -646,6 +752,87 @@ mod tests {
         assert!(!extension_supported("/a/b/noextension"));
         // A dot in a directory name must not be mistaken for the extension.
         assert!(!extension_supported("/a.jpg/b"));
+    }
+
+    #[test]
+    fn heic_extensions_are_the_host_decoder_gate() {
+        assert!(extension_is_heic("/a/IMG_1.HEIC"));
+        assert!(extension_is_heic("/a/x.heif"));
+        assert!(!extension_is_heic("/a/x.jpg"));
+        assert!(!extension_is_heic("/a.heic/x.jpg"));
+    }
+
+    #[test]
+    fn packed_rgb_round_trips() {
+        let data = vec![1, 2, 3, 4, 5, 6];
+        let img = rgb_from_packed(2, 1, data.clone()).unwrap();
+        assert_eq!(img.width(), 2);
+        assert_eq!(img.height(), 1);
+        assert_eq!(img.into_raw(), data);
+        assert!(rgb_from_packed(2, 1, vec![1, 2, 3]).is_err());
+    }
+
+    struct OkHost;
+    impl HostHeicDecoder for OkHost {
+        fn decode(&self, _path: &str) -> MlResult<RgbImage> {
+            Ok(solid(4, 2, [1, 2, 3]))
+        }
+    }
+
+    struct FailHost;
+    impl HostHeicDecoder for FailHost {
+        fn decode(&self, path: &str) -> MlResult<RgbImage> {
+            Err(MlError::Preprocess {
+                path: path.to_string(),
+                code: ErrorCode::Decode,
+                detail: "refused".into(),
+            })
+        }
+    }
+
+    #[test]
+    fn host_heic_is_skipped_when_absent_or_not_heic() {
+        assert!(host_heic_decode(None, "/a/x.heic").unwrap().is_none());
+        assert!(host_heic_decode(Some(&OkHost), "/a/x.jpg")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn host_heic_success_is_some() {
+        let rgb = host_heic_decode(Some(&OkHost), "/a/x.heic")
+            .unwrap()
+            .expect("host should decode");
+        assert_eq!((rgb.width(), rgb.height()), (4, 2));
+    }
+
+    #[test]
+    fn host_heic_failure_does_not_look_like_absence() {
+        let err = host_heic_decode(Some(&FailHost), "/a/x.heic").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                MlError::Preprocess {
+                    code: ErrorCode::Decode,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn limit_long_side_is_a_noop_when_already_small() {
+        let rgb = solid(100, 50, [9, 8, 7]);
+        let out = limit_long_side(rgb, 100);
+        assert_eq!((out.width(), out.height()), (100, 50));
+        assert_eq!(out.get_pixel(0, 0).0, [9, 8, 7]);
+    }
+
+    #[test]
+    fn limit_long_side_scales_the_long_edge() {
+        let out = limit_long_side(solid(400, 200, [1, 2, 3]), 100);
+        assert_eq!((out.width(), out.height()), (100, 50));
     }
 
     #[test]

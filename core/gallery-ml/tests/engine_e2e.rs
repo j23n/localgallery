@@ -76,9 +76,8 @@ impl Fixture {
                     // a single worker makes counts like "cancelled after 1
                     // item" exact rather than racy.
                     workers: Some(1),
-                    limit: None,
                     tagged_at: Some(TAGGED_AT.to_string()),
-                    root_prefix: None,
+                    ..RunOptions::default()
                 },
             )
             .unwrap()
@@ -209,6 +208,22 @@ fn the_sentinel_records_this_agent_and_pack() {
     );
     assert_eq!(view.core.tagged_at.as_deref(), Some(TAGGED_AT));
     assert_eq!(view.core.tags, expected_tags()["gradient.jpg"]);
+    assert_eq!(
+        view.photo_tools.clip_model.as_deref(),
+        Some("gallery-ml-testpack-1")
+    );
+    assert_eq!(view.photo_tools.clip_timestamp.as_deref(), Some(TAGGED_AT));
+    assert_eq!(
+        view.photo_tools.tagger_version.as_deref(),
+        Some("gallery-ml-testpack-1")
+    );
+    assert!(
+        view.photo_tools
+            .clip_embedding
+            .as_deref()
+            .is_some_and(|s| !s.is_empty()),
+        "CLIPEmbedding missing"
+    );
     // dc:subject carries the leaves, not the paths.
     assert!(
         view.subject.contains(&"Car".to_string()),
@@ -216,6 +231,67 @@ fn the_sentinel_records_this_agent_and_pack() {
         view.subject
     );
     assert!(!view.subject.contains(&"Objects/Vehicle/Car".to_string()));
+}
+
+#[test]
+fn a_sidecar_already_stamped_with_this_pack_is_skipped() {
+    let f = Fixture::with_files(&["gradient.jpg"]);
+    f.enqueue_all(&["gradient.jpg"]);
+    f.run();
+    std::fs::write(f.dir.path().join("other.jpg"), fixture("gradient.jpg")).unwrap();
+    std::fs::copy(
+        f.dir.path().join("gradient.jpg.xmp"),
+        f.dir.path().join("other.jpg.xmp"),
+    )
+    .unwrap();
+    f.engine.enqueue(&[f.path("other.jpg")]).unwrap();
+    let summary = f.run();
+    assert_eq!(summary.processed, 1);
+    assert_eq!(summary.sidecars_written, 0);
+    assert_eq!(summary.cache_hits, 1);
+}
+
+#[test]
+fn progress_total_is_photos_that_still_need_tags() {
+    #[derive(Default)]
+    struct Recorder {
+        progress: Mutex<Vec<(usize, usize)>>,
+    }
+    impl TaggingProgress for Recorder {
+        fn on_progress(&self, done: usize, total: usize) {
+            self.progress.lock().unwrap().push((done, total));
+        }
+        fn on_photos_tagged(&self, _paths: &[String]) {}
+        fn on_finished(&self, _summary: &RunSummary) {}
+    }
+
+    let f = Fixture::with_files(&["gradient.jpg"]);
+    f.enqueue_all(&["gradient.jpg"]);
+    f.run();
+    // Different bytes so the untagged photo is not an embedding-cache hit
+    // of gradient.jpg — that would look like a second "already done".
+    std::fs::write(f.dir.path().join("fresh.jpg"), fixture("stripes.jpg")).unwrap();
+    std::fs::write(f.dir.path().join("stamped.jpg"), fixture("gradient.jpg")).unwrap();
+    std::fs::copy(
+        f.dir.path().join("gradient.jpg.xmp"),
+        f.dir.path().join("stamped.jpg.xmp"),
+    )
+    .unwrap();
+    f.engine
+        .enqueue(&[f.path("fresh.jpg"), f.path("stamped.jpg")])
+        .unwrap();
+
+    let recorder = Recorder::default();
+    let summary = f.run_with(&recorder, &AtomicBool::new(false));
+    let progress = recorder.progress.lock().unwrap().clone();
+    assert!(
+        progress.iter().all(|(_, total)| *total == 1),
+        "stamped sidecar must not inflate the bar: {progress:?}"
+    );
+    assert_eq!(progress.last().map(|(done, _)| *done), Some(1));
+    assert_eq!(summary.processed, 2, "the stamped photo is still settled");
+    assert_eq!(summary.cache_hits, 1);
+    assert_eq!(summary.sidecars_written, 1);
 }
 
 #[test]
@@ -346,16 +422,13 @@ fn cancellation_stops_promptly_and_releases_the_in_flight_row() {
 }
 
 #[test]
-fn hysteresis_retains_a_tag_that_drifts_just_below_its_threshold() {
-    // Raise every threshold by a hair less than epsilon, so each tag now
-    // *fails* its bar but is still inside the retention band. A first run
-    // under the shipped pack claims the tags; a second run under the tightened
-    // pack must keep them.
+fn a_pack_bump_replaces_objects_and_scenes() {
+    // Raise every threshold by a hair. Without hysteresis the second pack
+    // writes whatever it scores now — including nothing.
     let f = Fixture::new();
     f.enqueue_all(&["gradient.jpg"]);
     f.run();
-    let claimed = f.tags("gradient.jpg");
-    assert!(!claimed.is_empty());
+    assert!(!f.tags("gradient.jpg").is_empty());
 
     let tightened = tightened_pack(0.04);
     let engine = TaggingEngine::open(
@@ -369,21 +442,16 @@ fn hysteresis_retains_a_tag_that_drifts_just_below_its_threshold() {
         .run_with_options(
             &NoProgress,
             &AtomicBool::new(false),
-            &RunOptions {
-                workers: Some(1),
-                limit: None,
-                tagged_at: Some(TAGGED_AT.to_string()),
-                root_prefix: None,
-            },
+            &run_options(),
         )
         .unwrap();
+    let view = gallery_meta::read_view(&f.sidecar_bytes("gradient.jpg")).unwrap();
     assert_eq!(
-        f.tags("gradient.jpg"),
-        claimed,
-        "hysteresis failed to retain tags inside the epsilon band"
+        view.photo_tools.tagger_version.as_deref(),
+        Some("tightened-0.04")
     );
 
-    // Push past the band and the same tags are retracted.
+    // Push past every bar and Objects/Scenes come out.
     let far = tightened_pack(0.30);
     let engine = TaggingEngine::open(
         f.dir.path().join("cache3.sqlite"),
@@ -396,12 +464,7 @@ fn hysteresis_retains_a_tag_that_drifts_just_below_its_threshold() {
         .run_with_options(
             &NoProgress,
             &AtomicBool::new(false),
-            &RunOptions {
-                workers: Some(1),
-                limit: None,
-                tagged_at: Some(TAGGED_AT.to_string()),
-                root_prefix: None,
-            },
+            &run_options(),
         )
         .unwrap();
     assert!(
@@ -453,10 +516,9 @@ fn tightened_pack(bump: f32) -> tempfile::TempDir {
 }
 
 #[test]
-fn a_photo_with_no_tags_gets_no_sidecar() {
-    // With every threshold pushed out of reach, nothing scores. The run must
-    // still succeed — and must not litter the library with sentinel-only
-    // sidecars, one per untagged photo.
+fn a_photo_with_no_tags_still_gets_a_version_stamp() {
+    // Nothing scores, but the sidecar is written so the next run (and
+    // photo-tools) can skip from `TaggerVersion`.
     let f = Fixture::new();
     let unreachable = tightened_pack(2.0);
     let engine = TaggingEngine::open(
@@ -470,23 +532,23 @@ fn a_photo_with_no_tags_gets_no_sidecar() {
         .run_with_options(
             &NoProgress,
             &AtomicBool::new(false),
-            &RunOptions {
-                workers: Some(1),
-                limit: None,
-                tagged_at: Some(TAGGED_AT.to_string()),
-                root_prefix: None,
-            },
+            &run_options(),
         )
         .unwrap();
 
     assert_eq!(summary.processed, PHOTOS.len());
     assert_eq!(summary.failed, 0);
     assert_eq!(summary.tagged, 0);
-    assert_eq!(summary.sidecars_written, 0);
+    assert_eq!(summary.sidecars_written, PHOTOS.len());
     for name in PHOTOS {
+        let view = gallery_meta::read_view(&f.sidecar_bytes(name)).unwrap();
+        assert_eq!(
+            view.photo_tools.tagger_version.as_deref(),
+            Some(engine.pack().version())
+        );
         assert!(
-            !f.dir.path().join(format!("{name}.xmp")).exists(),
-            "{name} got an empty sidecar"
+            view.tags_list.iter().all(|t| !gallery_meta::is_content_tag(t)),
+            "{name}: {view:?}"
         );
     }
 }
@@ -510,12 +572,7 @@ fn an_empty_result_still_retracts_tags_from_an_existing_sidecar() {
         .run_with_options(
             &NoProgress,
             &AtomicBool::new(false),
-            &RunOptions {
-                workers: Some(1),
-                limit: None,
-                tagged_at: Some(TAGGED_AT.to_string()),
-                root_prefix: None,
-            },
+            &run_options(),
         )
         .unwrap();
 
@@ -653,9 +710,8 @@ fn parallel_workers_produce_the_same_sidecars_as_one() {
             &AtomicBool::new(false),
             &RunOptions {
                 workers: Some(gallery_ml::MAX_WORKERS),
-                limit: None,
                 tagged_at: Some(TAGGED_AT.to_string()),
-                root_prefix: None,
+                ..RunOptions::default()
             },
         )
         .unwrap();
@@ -792,9 +848,8 @@ fn the_whole_pipeline_runs_against_an_in_memory_filesystem() {
             &AtomicBool::new(false),
             &RunOptions {
                 workers: Some(2),
-                limit: None,
                 tagged_at: Some(TAGGED_AT.to_string()),
-                root_prefix: None,
+                ..RunOptions::default()
             },
         )
         .unwrap();
@@ -1061,9 +1116,8 @@ impl FinishRecorder {
 fn run_options() -> RunOptions {
     RunOptions {
         workers: Some(1),
-        limit: None,
         tagged_at: Some(TAGGED_AT.to_string()),
-        root_prefix: None,
+        ..RunOptions::default()
     }
 }
 
@@ -1297,15 +1351,12 @@ fn a_photo_edited_in_place_is_re_tagged_without_a_reset() {
     let summary = f.run();
     assert_eq!(summary.processed, 1, "the edit was never noticed");
     assert_eq!(summary.sidecars_written, 1);
-    // The new content's tag arrives. The old ones are *retained*, not stale —
-    // hysteresis holds tags this agent already published while they sit inside
-    // the epsilon band, which is orthogonal to noticing the edit at all.
     let after = f.tags("gradient.jpg");
-    assert!(
-        after.contains(&expected_tags()["stripes.jpg"][0]),
-        "the re-tag did not pick up the new content: {after:?}"
+    assert_eq!(
+        after,
+        expected_tags()["stripes.jpg"],
+        "the re-tag did not replace Objects/Scenes: {after:?}"
     );
-    assert_ne!(after, expected_tags()["gradient.jpg"]);
 
     // And an unchanged file does not get re-tagged on every run after that.
     assert_eq!(f.run().processed, 0);
@@ -1344,8 +1395,7 @@ fn a_labels_only_pack_bump_re_scores_from_cached_embeddings() {
     assert_eq!(first.calls.load(Ordering::SeqCst), PHOTOS.len());
 
     // A new pack: same `encoder.onnx`, different `pack_version`, different
-    // `labels.json`. Every threshold moves by 0.04 — inside the hysteresis
-    // band, so the tags are retained and comparable.
+    // `labels.json`. Re-score from the cached vectors; do not re-infer.
     let rebuilt = tightened_pack(0.04);
     let second = encoders::CountingEncoder::new(&ModelPack::load(rebuilt.path()).unwrap());
     let engine = TaggingEngine::with_encoder(

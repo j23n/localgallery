@@ -1,10 +1,10 @@
 //! Turning a named cluster into sidecars.
 //!
 //! Everything above this module stops at the cache DB, which is derived data:
-//! delete it and a re-run rebuilds it. Naming is the one thing that is *not*
-//! derived — it is a human decision — so this is where it leaves the database
-//! and becomes durable, as `People/<Name>` keywords and MWG-RS regions in the
-//! photo's `.xmp` (overview standing decision 4: only named results travel).
+//! delete it and a re-run rebuilds it. Naming (and ignore / reject) is the
+//! one thing that is *not* derived — it is a human decision — so this is
+//! where it leaves the database and becomes durable, as `People/<Name>`
+//! keywords, MWG-RS regions, and `CoreFaceDecisions` in the photo's `.xmp`.
 //!
 //! # One rule, three entry points
 //!
@@ -47,23 +47,22 @@
 //! (enforced in [`crate::face::assign`], which holds named clusters to a higher
 //! bar than unlabeled ones), and the face's quality must clear
 //! [`ClusteringConfig::min_quality`]. A join that clears the first but not the
-//! second stays in the cache and shows up in the UI; it does not edit a file.
+//! second stays in the cache and shows up in the UI; it does not start a write.
 //! Getting this wrong writes a stranger's name into somebody's photo, so the
 //! bar for touching disk is deliberately higher than the bar for grouping.
 //!
-//! # The quality floor is applied where disk is touched, not where a face joins
+//! # The quality floor gates the box and auto-tag, not a confirmed name
 //!
-//! [`FaceEngine::build_request`] drops every face below
-//! [`ClusteringConfig::min_quality`], on **all** paths — the auto pass and a
-//! user's `name_cluster` alike. Gating only the auto pass looks more
-//! permissive-to-the-user, and is wrong: the request is per *photo*, not per
-//! face, so a below-floor face would reach disk the moment any other face in
-//! the same photo triggered a write. Worse, the two paths would then disagree
-//! about what that photo should say, and each would undo the other's answer —
-//! the fixed point the whole sentinel design exists to reach would never
-//! arrive. One rule, one answer: the floor is what it takes to be written into
-//! somebody's file, whoever started the write. A face under it still shows in
-//! the cluster, and raising its quality is a matter of the pack, not of the UI.
+//! Confirming a cluster is "this person is in these photos". The keyword must
+//! land on every member photo. A junk rectangle is a different question: a
+//! below-floor face still contributes its name (via `extra_people`, the same
+//! path degenerate geometry already used) and never a region.
+//!
+//! Auto-tag is unattended, so it still refuses to *start* a write for a
+//! below-floor join. Cover-crop selection uses the same floor. The request
+//! itself is per photo and shared by every path, so a later auto write on a
+//! file the user already named keeps that keyword — Partial authority would
+//! leave it standing anyway, and including it keeps the replace set honest.
 //!
 //! # Retraction needs a reason
 //!
@@ -93,12 +92,12 @@
 
 use std::collections::BTreeSet;
 
-use gallery_meta::{write_faces, Area, FaceRegionWrite, FaceWriteRequest};
+use gallery_meta::{write_faces, Area, FaceDecision, FaceRegionWrite, FaceWriteRequest};
 
 use super::cluster;
 use super::engine::normalize_root_prefix;
 
-use crate::cache::{ClusterState, NamedFace};
+use crate::cache::{ClusterState, DismissedFace, NamedFace};
 use crate::engine::iso8601_utc_now;
 use crate::error::{ErrorCode, MlError, MlResult};
 
@@ -187,6 +186,12 @@ impl SyncScope {
     /// The same scope, taking back `name` if there is one to take back.
     fn retracting(mut self, name: Option<String>) -> SyncScope {
         self.retracting.extend(name);
+        self
+    }
+
+    /// The same scope, taking back every name in `names`.
+    fn retracting_all(mut self, names: impl IntoIterator<Item = String>) -> SyncScope {
+        self.retracting.extend(names);
         self
     }
 
@@ -284,10 +289,12 @@ impl FaceEngine {
         Ok(plan)
     }
 
-    /// Dismiss a cluster ("not a person") and retract anything it had written.
+    /// Ignore a cluster (passer-by / poster) and retract anything it had written.
     ///
-    /// [`ClusterState::Ignored`] rather than deleted, so the faces do not come
-    /// back as a fresh cluster on every subsequent pass.
+    /// [`ClusterState::Ignored`] rather than deleted, so those faces do not
+    /// come back as a fresh cluster on every subsequent pass. Distinct from
+    /// [`FaceEngine::reject_cluster`]: these are faces, just not someone this
+    /// library is naming.
     pub fn ignore_cluster(
         &self,
         cluster_id: i64,
@@ -295,6 +302,20 @@ impl FaceEngine {
         root_prefix: Option<&str>,
     ) -> MlResult<SidecarWritePlan> {
         self.clear_cluster(cluster_id, ClusterState::Ignored, tagged_at, root_prefix)
+    }
+
+    /// Reject a cluster ("not a person" / "not a face") and retract anything
+    /// it had written.
+    ///
+    /// [`ClusterState::Rejected`] rather than deleted, so the detections do
+    /// not come back as a fresh cluster on every subsequent pass.
+    pub fn reject_cluster(
+        &self,
+        cluster_id: i64,
+        tagged_at: Option<&str>,
+        root_prefix: Option<&str>,
+    ) -> MlResult<SidecarWritePlan> {
+        self.clear_cluster(cluster_id, ClusterState::Rejected, tagged_at, root_prefix)
     }
 
     fn clear_cluster(
@@ -387,57 +408,109 @@ impl FaceEngine {
         tagged_at: Option<&str>,
         root_prefix: Option<&str>,
     ) -> MlResult<SidecarWritePlan> {
-        if into == from {
+        self.merge_clusters_many(into, &[from], tagged_at, root_prefix)
+    }
+
+    /// Fold every cluster in `from` into `into` in one pass: one membership
+    /// move, one centroid, one sidecar rewrite.
+    ///
+    /// Pairwise [`FaceEngine::merge_clusters`] is this with a single source.
+    /// An n-way merge that called that in a loop would re-derive the growing
+    /// union's sidecars on every step — quadratic I/O for a 12-group
+    /// suggestion. The name policy is the same fold: the survivor's name
+    /// wins when it has one; otherwise the first named absorbed cluster
+    /// donates its name; every other absorbed name is retracted.
+    ///
+    /// Sidecar I/O is skipped when no cluster in the set is named and
+    /// nothing is being retracted — membership-only, nothing for a photo
+    /// to say.
+    pub fn merge_clusters_many(
+        &self,
+        into: i64,
+        from: &[i64],
+        tagged_at: Option<&str>,
+        root_prefix: Option<&str>,
+    ) -> MlResult<SidecarWritePlan> {
+        if from.is_empty() {
+            return Ok(SidecarWritePlan::default());
+        }
+        if from.iter().any(|&id| id == into) {
             return Err(MlError::InvalidMerge {
                 detail: format!("cluster {into} cannot absorb itself"),
             });
         }
+        let mut absorbed: Vec<i64> = Vec::with_capacity(from.len());
+        for id in from {
+            if !absorbed.contains(id) {
+                absorbed.push(*id);
+            }
+        }
+
+        // Every read first, so a failure part way through leaves the
+        // clusters as they were rather than half-merged.
         let target = self
             .cache()
             .cluster(into)?
             .ok_or(MlError::ClusterNotFound { id: into })?;
-        let source = self
-            .cache()
-            .cluster(from)?
-            .ok_or(MlError::ClusterNotFound { id: from })?;
+        let mut sources = Vec::with_capacity(absorbed.len());
+        for id in &absorbed {
+            sources.push(
+                self.cache()
+                    .cluster(*id)?
+                    .ok_or(MlError::ClusterNotFound { id: *id })?,
+            );
+        }
 
-        // Every read first, so a failure part way through leaves both clusters
-        // as they were rather than half-merged.
-        let mut hashes = self.cache().cluster_hashes(into)?;
-        hashes.extend(self.cache().cluster_hashes(from)?);
-        let mut embeddings = self.cache().cluster_member_embeddings(into)?;
-        embeddings.extend(self.cache().cluster_member_embeddings(from)?);
-        let size =
-            self.cache().cluster_members(into)?.len() + self.cache().cluster_members(from)?.len();
+        let mut all_ids = Vec::with_capacity(absorbed.len() + 1);
+        all_ids.push(into);
+        all_ids.extend_from_slice(&absorbed);
+        let hashes = self.cache().cluster_hashes_for(&all_ids)?;
+        let embeddings = self.cache().cluster_member_embeddings_for(&all_ids)?;
+        let size = self.cache().cluster_member_count_for(&all_ids)?;
 
-        self.cache().move_cluster_members(from, into)?;
+        self.cache().move_cluster_members_many(&absorbed, into)?;
         // A union with no usable embedding leaves the old centroid standing:
         // an empty one would make the cluster match nothing at all, which is a
         // worse answer than a slightly stale mean.
         let centroid = cluster::centroid(embeddings.iter().map(Vec::as_slice))
             .unwrap_or_else(|| target.centroid.clone());
         if !centroid.is_empty() {
-            self.cache()
-                .set_cluster_centroid(into, &centroid, size as u32)?;
+            self.cache().set_cluster_centroid(into, &centroid, size)?;
         }
-        if target.person_name.is_none() {
-            if let Some(name) = &source.person_name {
+
+        let mut kept_name = target.person_name.clone();
+        let mut retracting: Vec<String> = Vec::new();
+        for source in &sources {
+            match (&kept_name, &source.person_name) {
+                (None, Some(name)) => kept_name = Some(name.clone()),
+                (Some(kept), Some(dropped)) if kept != dropped => {
+                    if !retracting.contains(dropped) {
+                        retracting.push(dropped.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        if target.person_name.as_deref() != kept_name.as_deref() {
+            if let Some(name) = &kept_name {
                 self.cache()
                     .set_cluster_state(into, ClusterState::Named, Some(name))?;
             }
         }
         self.cache().set_cluster_pinned(into, true)?;
-        self.cache().delete_clusters(&[from])?;
-        self.cache().delete_merge_proposals_for(&[into, from])?;
+        self.cache().delete_clusters(&absorbed)?;
+        self.cache().delete_merge_proposals_for(&all_ids)?;
 
-        let retracting = match (&target.person_name, &source.person_name) {
-            (Some(kept), Some(dropped)) if kept != dropped => Some(dropped.clone()),
-            _ => None,
-        };
+        // No name on any side, nothing to take back: the cache is the
+        // whole story. Opening every sidecar to confirm that would be the
+        // quadratic tax an n-way unnamed merge used to pay.
+        if kept_name.is_none() && retracting.is_empty() {
+            return Ok(SidecarWritePlan::default());
+        }
         self.sync_sidecars(
             &hashes,
             tagged_at,
-            &SyncScope::under(root_prefix).retracting(retracting),
+            &SyncScope::under(root_prefix).retracting_all(retracting),
         )
     }
 
@@ -576,13 +649,16 @@ impl FaceEngine {
         scope: &SyncScope,
     ) -> MlResult<SidecarWritePlan> {
         let named = self.cache().named_faces_for_hash(hash)?;
+        let dismissed = self.cache().dismissed_faces_for_hash(hash)?;
         let paths = self.cache().face_paths_for_hash(hash)?;
         let mut plan = SidecarWritePlan::default();
         if paths.is_empty() {
             return Ok(plan);
         }
-        let request = self.build_request(&named, tagged_at, scope);
-        let has_content = !request.regions.is_empty() || !request.extra_people.is_empty();
+        let request = self.build_request(&named, &dismissed, tagged_at, scope);
+        let has_content = !request.regions.is_empty()
+            || !request.extra_people.is_empty()
+            || request.decisions.as_ref().is_some_and(|d| !d.is_empty());
 
         for path in paths {
             if !scope.covers(&path) {
@@ -615,18 +691,20 @@ impl FaceEngine {
     /// One photo's replace set.
     ///
     /// A face whose stored geometry is degenerate — a zero-area box, or a row
-    /// written before the image dimensions were known — contributes its *name*
-    /// but no region: the person really is in the photo, and dropping the
-    /// keyword because the rectangle is unusable would lose the more valuable
-    /// half of the answer.
-    fn build_request(
+    /// written before the image dimensions were known — or whose quality is
+    /// below the pack floor contributes its *name* but no region. The person
+    /// really is in the photo; dropping the keyword because the rectangle is
+    /// unusable would lose the more valuable half of the answer.
+    pub(crate) fn build_request(
         &self,
         named: &[NamedFace],
+        dismissed: &[DismissedFace],
         tagged_at: &str,
         scope: &SyncScope,
     ) -> FaceWriteRequest {
         let mut regions = Vec::with_capacity(named.len());
         let mut extra_people = Vec::new();
+        let mut decisions = Vec::new();
         let mut size: Option<(u32, u32)> = None;
 
         for entry in named {
@@ -637,31 +715,56 @@ impl FaceEngine {
             if size.is_none() && face.image_w > 0 && face.image_h > 0 {
                 size = Some((face.image_w, face.image_h));
             }
-            // The quality floor, applied once, where disk is touched. See the
-            // module docs for why the user-initiated path pays it too.
-            if face.quality < self.clustering().min_quality {
+            let area = Self::face_area(face);
+            // Always persist a decision box when we have one, including below
+            // the quality floor — that is what lets another machine bind the
+            // detection. The public MWG region stays gated on quality.
+            if let Some(area) = area {
+                decisions.push(FaceDecision::Named {
+                    area,
+                    name: entry.person.clone(),
+                });
+            }
+            if face.quality < self.clustering().min_quality || area.is_none() {
+                extra_people.push(entry.person.clone());
                 continue;
             }
-            let corners = [
-                f64::from(face.bbox[0]),
-                f64::from(face.bbox[1]),
-                f64::from(face.bbox[2]),
-                f64::from(face.bbox[3]),
-            ];
-            match Area::from_pixel_box(corners, f64::from(face.image_w), f64::from(face.image_h)) {
-                Some(area) => regions.push(FaceRegionWrite {
-                    name: entry.person.clone(),
-                    area,
-                }),
-                None => extra_people.push(entry.person.clone()),
+            regions.push(FaceRegionWrite {
+                name: entry.person.clone(),
+                area: area.expect("checked above"),
+            });
+        }
+
+        for entry in dismissed {
+            let face = &entry.face;
+            if size.is_none() && face.image_w > 0 && face.image_h > 0 {
+                size = Some((face.image_w, face.image_h));
             }
+            let Some(area) = Self::face_area(face) else {
+                continue;
+            };
+            decisions.push(match entry.kind {
+                ClusterState::Rejected => FaceDecision::Rejected { area },
+                _ => FaceDecision::Ignored { area },
+            });
         }
 
         let mut request = FaceWriteRequest::new(regions, self.face_pack_key(), tagged_at)
-            .speaking_partially(scope.retracting.iter().cloned());
+            .speaking_partially(scope.retracting.iter().cloned())
+            .with_decisions(decisions);
         request.extra_people = extra_people;
         request.image_size = size;
         request
+    }
+
+    fn face_area(face: &crate::cache::StoredFace) -> Option<Area> {
+        let corners = [
+            f64::from(face.bbox[0]),
+            f64::from(face.bbox[1]),
+            f64::from(face.bbox[2]),
+            f64::from(face.bbox[3]),
+        ];
+        Area::from_pixel_box(corners, f64::from(face.image_w), f64::from(face.image_h))
     }
 
     /// Whether this photo's sidecar carries a face claim of ours.
@@ -680,7 +783,7 @@ impl FaceEngine {
     }
 
     /// `Ok(true)` when bytes were written.
-    fn write_with_retry(&self, path: &str, request: &FaceWriteRequest) -> MlResult<bool> {
+    pub(crate) fn write_with_retry(&self, path: &str, request: &FaceWriteRequest) -> MlResult<bool> {
         let mut attempt = 0;
         loop {
             match write_faces(self.vfs(), path, request) {

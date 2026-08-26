@@ -56,7 +56,7 @@ pub struct ImageMetadata {
 ///
 /// | field | rule |
 /// |---|---|
-/// | tags | **union**, embedded first, case-insensitive first-wins dedup — so the *embedded* spelling of a conflicting path survives |
+/// | tags | **union**, embedded first, case-insensitive first-wins dedup — so the *embedded* spelling of a conflicting path survives. Exception: when the sidecar has `TaggerVersion`, its `Objects/*` and `Scenes/*` replace the embedded ones |
 /// | `country_code` | **embedded wins**; the sidecar only fills a gap |
 /// | `face_regions` | **sidecar wins outright** when it has any; embedded survive only when the sidecar has none |
 /// | dates, GPS | **embedded only** — a sidecar's `exif:DateTimeOriginal` and `exif:GPS*` are read by nobody |
@@ -94,6 +94,9 @@ fn read_sidecar(vfs: &dyn Vfs, path: &str) -> SwiftXmpParse {
 /// Apply the precedence table. Split out so it can be tested without a VFS.
 fn merge(exif: ExifFacts, embedded: EmbeddedXmp, sidecar: SwiftXmpParse) -> ImageMetadata {
     let mut raw_tags = embedded.raw_tags;
+    if sidecar.tagger_version.is_some() {
+        raw_tags.retain(|t| !crate::tags::is_content_tag(t));
+    }
     raw_tags.extend(sidecar.raw_tags);
 
     let country_code = embedded.country_code.or(sidecar.country_code);
@@ -175,6 +178,32 @@ mod tests {
                 .map(|t| t.full_path.as_str())
                 .collect::<Vec<_>>(),
             vec!["People/Alice", "Objects/Car", "Scenes/Beach"]
+        );
+    }
+
+    #[test]
+    fn a_stamped_sidecar_replaces_embedded_objects_and_scenes() {
+        let out = merged(
+            EmbeddedXmp {
+                raw_tags: vec![
+                    "People/Alice".into(),
+                    "Objects/Car".into(),
+                    "Scenes/Indoor".into(),
+                ],
+                ..Default::default()
+            },
+            SwiftXmpParse {
+                raw_tags: vec!["people/alice".into(), "Scenes/Beach".into()],
+                tagger_version: Some("mobileclip-s2-2026.1".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            out.hierarchical_tags
+                .iter()
+                .map(|t| t.full_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["People/Alice", "Scenes/Beach"]
         );
     }
 

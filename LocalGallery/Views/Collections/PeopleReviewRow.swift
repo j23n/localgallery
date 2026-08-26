@@ -5,7 +5,7 @@ import SwiftUI
 /// Shown only when there is something to review, so its presence is the whole
 /// message — no empty "0 new people" row to explain away.
 struct PeopleReviewRow: View {
-    /// Unlabeled clusters over `FaceService.reviewMinimumFaces`.
+    /// Unlabeled clusters waiting for a name or Ignore.
     let count: Int
 
     var body: some View {
@@ -31,5 +31,37 @@ struct PeopleReviewRow: View {
             Spacer(minLength: 0)
         }
         .padding(.vertical, 4)
+    }
+}
+
+/// Shown on the People rail while a scan is running and nobody is named yet,
+/// so the section isn't an empty header waiting for clusters to land.
+struct PeopleScanningCard: View {
+    var body: some View {
+        ZStack(alignment: .bottomLeading) {
+            Design.bgGrouped
+            VStack {
+                Spacer()
+                ProgressView()
+                    .controlSize(.regular)
+                Spacer()
+            }
+            .frame(maxWidth: .infinity)
+
+            LinearGradient(
+                colors: [.clear, .black.opacity(0.45)],
+                startPoint: UnitPoint(x: 0.5, y: 0.45),
+                endPoint: .bottom
+            )
+
+            Text("Finding people…")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 9)
+                .padding(.bottom, 7)
+        }
+        .frame(width: 128, height: 128)
+        .clipShape(RoundedRectangle(cornerRadius: Design.cardRadius))
+        .shadow(color: .black.opacity(0.06), radius: 4, y: 2)
     }
 }

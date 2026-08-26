@@ -61,6 +61,18 @@ extension GalleryStore {
         await scanFolder(at: url, kind: kind, silent: silent)
     }
 
+    /// Stop an in-flight library walk. No-op when idle.
+    ///
+    /// Cancels the Store's scan task; `CoreScanner.scan` already forwards
+    /// that into the core, so a Settings "Cancel" is the same path a
+    /// cancelled Swift `Task` takes. A pass that does not finish leaves
+    /// `allPhotos` / the tree / the sidecar manifest alone — see
+    /// `runScanPass`.
+    func cancelScan() {
+        activeScanTask?.task.cancel()
+        coreScanner.cancel()
+    }
+
 
     // MARK: - Folder Scanning (Iterative)
 

@@ -71,10 +71,17 @@ enum PhotoChrome {
 extension View {
     /// Background for chrome drawn over photos (pills, circular buttons):
     /// Liquid Glass on iOS 26+, the legacy translucent white fill earlier.
+    ///
+    /// Forced into the dark color scheme so the material uses its dark
+    /// variant — regular glass in a light-only app otherwise bakes a white
+    /// plate, and the white labels on top of it disappear. The dark variant
+    /// still refracts the photo underneath (the HIG recipe for chrome over
+    /// media).
     @ViewBuilder
     func chromeGlass(in shape: some Shape, legacyOpacity: Double) -> some View {
         if #available(iOS 26.0, *) {
             self.glassEffect(.regular, in: shape)
+                .environment(\.colorScheme, .dark)
         } else {
             self.background(.white.opacity(legacyOpacity), in: shape)
         }
@@ -83,16 +90,20 @@ extension View {
 
 /// Groups sibling glass elements into one `GlassEffectContainer` on iOS 26+
 /// so nearby glass shapes blend correctly (per the Liquid Glass HIG);
-/// passes content through unchanged on earlier systems.
+/// passes content through unchanged on earlier systems. Dark-scheme so
+/// labels and glass agree with `chromeGlass`.
 struct ChromeGlassGroup<Content: View>: View {
     @ViewBuilder var content: Content
 
     var body: some View {
-        if #available(iOS 26.0, *) {
-            GlassEffectContainer { content }
-        } else {
-            content
+        Group {
+            if #available(iOS 26.0, *) {
+                GlassEffectContainer { content }
+            } else {
+                content
+            }
         }
+        .environment(\.colorScheme, .dark)
     }
 }
 
@@ -131,6 +142,24 @@ struct ViewerDismissButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: "xmark")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 36, height: 36)
+                .chromeGlass(in: Circle(), legacyOpacity: 0.16)
+        }
+    }
+}
+
+/// Circular hamburger that hosts a `Menu` — used next to the viewer's
+/// date/place pill so destructive actions are not a lone chrome button.
+struct ViewerMenuButton<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        Menu {
+            content
+        } label: {
+            Image(systemName: "line.3.horizontal")
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(.white)
                 .frame(width: 36, height: 36)

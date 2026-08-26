@@ -77,11 +77,10 @@ final class FaceServiceTests: XCTestCase {
     /// Wait for an in-flight run to settle. `startScan` returns as soon as the
     /// core-owned thread is spawned; the finish arrives through `onFinished`.
     ///
-    /// The final `refreshClusters()` is not redundant: `finish()` clears
-    /// `isRunning` *before* it re-reads the cluster list (the flag is what the
-    /// UI gates its buttons on, and holding it through a rescan would be
-    /// wrong), so this loop can return while that read is still in flight.
-    /// Re-reading is idempotent and is exactly the call the run itself makes.
+    /// The final `refreshClusters()` is not redundant: `finish()` drops the
+    /// ONNX session after it re-reads the cluster list, so this loop can
+    /// return with `allClusters` already populated but no session. Re-reading
+    /// is idempotent and is exactly the call the run itself makes.
     private func waitForRun(_ service: FaceService) async throws {
         var waited = 0
         while service.isRunning && waited < 6_000 {
@@ -159,6 +158,40 @@ final class FaceServiceTests: XCTestCase {
         XCTAssertNil(service.lastError)
     }
 
+    /// Clusters already in the cache must reach the UI even when a scan has
+    /// nothing new to enqueue. Settings "Scan Photos" reporting "Nothing to
+    /// do" used to return before `refreshClusters()`, so Review New People
+    /// stayed empty until a later run that actually started.
+    func testANoOpScanStillPublishesExistingClusters() async throws {
+        let temp = makeTemp()
+        let photos = try stageLibrary(in: temp)
+        let pack = try facePack()
+        let service = makeService(temp, pack: pack)
+        service.eligiblePhotos = { photos }
+        service.libraryRoot = { temp.url }
+
+        await service.startScan()
+        try await waitForRun(service)
+        XCTAssertFalse(service.allClusters.isEmpty, "the fixtures produced no clusters")
+
+        // What a cancelled Collections `.task` leaves behind: sqlite is full,
+        // the published list is empty.
+        service.installedPack = { nil }
+        await service.refreshClusters()
+        XCTAssertTrue(service.allClusters.isEmpty)
+
+        service.installedPack = { pack }
+        service.eligiblePhotos = {
+            [PhotoFile.fixture(url: temp.appending("clip.mov"), isVideo: true)]
+        }
+        await service.startScan()
+        XCTAssertEqual(service.lastSummary, FaceService.Summary())
+        XCTAssertFalse(
+            service.allClusters.isEmpty,
+            "a no-op scan left existing groups unpublished"
+        )
+    }
+
     // MARK: - A full cycle
 
     /// Scan → clusters appear → name one → the sidecar refresh fires.
@@ -224,8 +257,7 @@ final class FaceServiceTests: XCTestCase {
         XCTAssertFalse(xmp.faceRegions.isEmpty)
     }
 
-    /// The review threshold: a group of one or two faces is the tail of any
-    /// clustering pass and would drown the screen.
+    /// Review offers every unlabeled cluster, including a single face.
     func testOnlyClustersOverTheThresholdAreOfferedForReview() async throws {
         let temp = makeTemp()
         let photos = try stageLibrary(in: temp)
@@ -379,10 +411,83 @@ final class FaceServiceTests: XCTestCase {
             service.allClusters.first { $0.id != cluster.id && $0.size == 1 && $0.state == .unlabeled }
         )
 
+        var rescans = 0
+        service.onSidecarsWritten = { rescans += 1 }
+
         let didMerge = await service.merge(into: cluster.id, from: fresh.id)
         XCTAssertTrue(didMerge)
         XCTAssertNil(service.allClusters.first { $0.id == fresh.id }, "the absorbed group survived")
         XCTAssertEqual(service.allClusters.first { $0.id == cluster.id }?.size, cluster.size)
+        XCTAssertNil(service.lastError)
+        XCTAssertEqual(rescans, 0, "an unnamed merge walked the library")
+    }
+
+    /// Three unlabeled groups in one call: the pairwise loop this replaces
+    /// would have refreshed and rescanned after every absorbed id.
+    func testMergingSeveralUnnamedGroupsIsOnePassAndDoesNotRescan() async throws {
+        let temp = makeTemp()
+        let photos = try stageLibrary(in: temp)
+        let service = makeService(temp, pack: try facePack())
+        service.eligiblePhotos = { photos }
+        service.libraryRoot = { temp.url }
+
+        await service.startScan()
+        try await waitForRun(service)
+        let cluster = try XCTUnwrap(
+            service.allClusters.filter { $0.state == .unlabeled }.max { $0.size < $1.size }
+        )
+        let faces = await service.faces(inCluster: cluster.id)
+        XCTAssertGreaterThanOrEqual(faces.count, 3, "need two faces to split off")
+
+        XCTAssertTrue(await service.split(cluster: cluster.id, faces: [faces[0].key]))
+        XCTAssertTrue(await service.split(cluster: cluster.id, faces: [faces[1].key]))
+        let absorbed = service.allClusters
+            .filter { $0.id != cluster.id && $0.state == .unlabeled && $0.size == 1 }
+            .map(\.id)
+        XCTAssertEqual(absorbed.count, 2, "\(service.allClusters.map { ($0.id, $0.size) })")
+
+        var rescans = 0
+        service.onSidecarsWritten = { rescans += 1 }
+        XCTAssertTrue(await service.merge(into: cluster.id, absorbing: absorbed))
+        XCTAssertEqual(service.allClusters.first { $0.id == cluster.id }?.size, cluster.size)
+        XCTAssertTrue(
+            absorbed.allSatisfy { id in service.allClusters.contains { $0.id == id } == false },
+            "an absorbed group survived"
+        )
+        XCTAssertEqual(rescans, 0, "an unnamed n-way merge walked the library")
+        XCTAssertNil(service.lastError)
+    }
+
+    /// Merging into a named person still owes one library walk — the absorbed
+    /// photos just gained the tag — but only one, not one per absorbed group.
+    func testMergingIntoANamedPersonRescansOnce() async throws {
+        let temp = makeTemp()
+        let photos = try stageLibrary(in: temp)
+        let service = makeService(temp, pack: try facePack())
+        service.eligiblePhotos = { photos }
+        service.libraryRoot = { temp.url }
+
+        await service.startScan()
+        try await waitForRun(service)
+        let cluster = try XCTUnwrap(
+            service.allClusters.filter { $0.state == .unlabeled }.max { $0.size < $1.size }
+        )
+        let faces = await service.faces(inCluster: cluster.id)
+        XCTAssertGreaterThanOrEqual(faces.count, 3)
+        XCTAssertTrue(await service.split(cluster: cluster.id, faces: [faces[0].key]))
+        XCTAssertTrue(await service.split(cluster: cluster.id, faces: [faces[1].key]))
+        XCTAssertTrue(await service.name(cluster: cluster.id, as: "Ada"))
+
+        let absorbed = service.allClusters
+            .filter { $0.id != cluster.id && $0.state == .unlabeled && $0.size == 1 }
+            .map(\.id)
+        XCTAssertEqual(absorbed.count, 2)
+
+        var rescans = 0
+        service.onSidecarsWritten = { rescans += 1 }
+        XCTAssertTrue(await service.merge(into: cluster.id, absorbing: absorbed))
+        XCTAssertEqual(rescans, 1, "named n-way merge should rescan once, not per group")
+        XCTAssertEqual(service.allClusters.first { $0.id == cluster.id }?.name, "Ada")
         XCTAssertNil(service.lastError)
     }
 
@@ -646,6 +751,19 @@ final class FaceServiceTests: XCTestCase {
 
     /// The coalescer is shared with tagging; this pins that faces actually use
     /// it rather than refreshing per batch.
+    func testAScannedBatchJournalsWithoutRefreshing() {
+        let temp = makeTemp()
+        let service = makeService(temp, pack: nil)
+        var recorded: [String] = []
+        var refreshes = 0
+        service.onPhotosRecorded = { recorded.append(contentsOf: $0) }
+        service.onSidecarsWritten = { refreshes += 1 }
+
+        service.notePhotosScanned(["/lib/a.jpg", "/lib/b.jpg"])
+        XCTAssertEqual(recorded, ["/lib/a.jpg", "/lib/b.jpg"])
+        XCTAssertEqual(refreshes, 0, "a scan batch is not a disk write")
+    }
+
     func testASuppressedBatchDoesNotPushTheRefreshWindowOut() async {
         let temp = makeTemp()
         let service = makeService(temp, pack: nil)

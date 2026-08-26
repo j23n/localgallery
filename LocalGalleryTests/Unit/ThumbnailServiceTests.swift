@@ -98,6 +98,21 @@ final class ThumbnailServiceTests: XCTestCase {
         )
     }
 
+    /// Face crops go through the decode limiter and keep only the small
+    /// bitmap — a second call is a cache hit, not another full-photo decode.
+    func testFaceCropReturnsABitmapAndCachesIt() async throws {
+        let temp = makeTemp()
+        let service = ThumbnailService(thumbnailDir: temp.appending("thumbs", isDirectory: true))
+        let source = temp.appending("photo.jpg")
+        try writeTinyJPEG(to: source)
+        let region = FaceRegion(name: nil, centerX: 0.5, centerY: 0.5, width: 0.5, height: 0.5)
+
+        let first = await service.faceCrop(for: source, region: region, cellSize: 76)
+        XCTAssertNotNil(first)
+        let second = await service.faceCrop(for: source, region: region, cellSize: 76)
+        XCTAssertNotNil(second)
+    }
+
     // MARK: - Fixture
 
     /// 8×8 sRGB JPEG so ImageIO has real bytes to decode and cache.

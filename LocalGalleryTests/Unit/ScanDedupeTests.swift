@@ -102,4 +102,24 @@ final class ScanDedupeTests: XCTestCase {
 
         XCTAssertEqual(h.store.allPhotos.count, 1)
     }
+
+    /// Cold launch posts `willEnterForeground` with the flag still false.
+    /// That notification must not walk — `restoreFolder` is the launch scan.
+    func testLaunchForegroundDoesNotWalkTheLibrary() async {
+        let h = makeHarness()
+        XCTAssertFalse(h.store.shouldScanOnForeground)
+        await h.store.handleWillEnterForeground()
+        XCTAssertTrue(
+            h.store.allPhotos.isEmpty,
+            "the launch foreground notification started a scan"
+        )
+        XCTAssertFalse(h.store.shouldScanOnForeground)
+    }
+
+    /// Returning from the background is the one case that should scan.
+    func testARealBackgroundArmsTheNextForegroundScan() {
+        let h = makeHarness()
+        h.store.handleDidEnterBackground()
+        XCTAssertTrue(h.store.shouldScanOnForeground)
+    }
 }

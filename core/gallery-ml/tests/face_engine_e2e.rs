@@ -88,6 +88,8 @@ fn options() -> FaceRunOptions {
         full_recluster: false,
         tagged_at: Some("2026-08-03T10:00:00Z".to_string()),
         skip_auto_tagging: false,
+        force: false,
+        only_paths: None,
     }
 }
 
@@ -586,9 +588,9 @@ fn progress_reports_every_photo_and_finishes_once() {
 
     let mut reported = recorder.with_faces.lock().unwrap().clone();
     reported.sort();
-    let mut expected = f.paths(&[BRIGHT, MID]);
+    let mut expected = f.paths(PHOTOS);
     expected.sort();
-    assert_eq!(reported, expected, "only photos with faces are reported");
+    assert_eq!(reported, expected, "every finished photo is reported");
 }
 
 /// An error before any worker starts still owes the caller an `on_finished` —

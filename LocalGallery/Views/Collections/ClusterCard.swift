@@ -8,6 +8,8 @@ import SwiftUI
 /// existing cover-crop path takes it (`FaceService.Face`).
 struct ClusterCard: View {
     let cluster: FaceService.Cluster
+    var isDimmed: Bool = false
+    var isChecked: Bool? = nil
 
     private static let side: CGFloat = 108
 
@@ -61,9 +63,20 @@ struct ClusterCard: View {
             .padding(.bottom, 7)
         }
         .frame(width: Self.side, height: Self.side)
+        .overlay(alignment: .topTrailing) {
+            if let isChecked {
+                Image(systemName: isChecked ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 20))
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(.white, isChecked ? Design.accentColor : .black.opacity(0.35))
+                    .padding(6)
+            }
+        }
+        .opacity(isDimmed ? 0.5 : 1)
         .clipShape(RoundedRectangle(cornerRadius: Design.cardRadius))
         .shadow(color: .black.opacity(0.06), radius: 4, y: 2)
         .accessibilityLabel("Unnamed person, \(faceCountLabel)")
+        .accessibilityAddTraits(isChecked == true ? [.isSelected] : [])
     }
 
     private var faceCountLabel: String {

@@ -15,8 +15,8 @@ import XCTest
 /// what stops an arm64-simulator drift from being quietly fixed up in
 /// whichever copy someone noticed first.
 ///
-/// If these fail, suspect the build chain first:
-/// `./scripts/build_core.sh && xcodegen`.
+/// If these fail, suspect the build chain first: Xcode's **Build Rust Core**
+/// phase (`scripts/build_core.sh`).
 final class TaggingSessionTests: XCTestCase {
     private var temp: TempDir!
 

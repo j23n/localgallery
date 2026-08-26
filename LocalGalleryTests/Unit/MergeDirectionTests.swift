@@ -5,9 +5,10 @@ import XCTest
 /// Which of two face groups survives a merge.
 ///
 /// The core is deliberately directionless about this, so the policy lives in
-/// one place in the UI — and both entry points (the suggested-merge row and the
-/// "Merge with…" picker) go through it, because the same pair merging
-/// differently depending on where the user tapped would be indefensible.
+/// one place in the UI — and every entry point (the suggested-merge select
+/// screen and naming onto an existing person) goes through it, because the
+/// same pair merging differently depending on where the user tapped would
+/// be indefensible.
 final class MergeDirectionTests: XCTestCase {
     private func cluster(
         _ id: Int64, size: Int, name: String? = nil
@@ -90,5 +91,26 @@ final class MergeDirectionTests: XCTestCase {
         XCTAssertTrue(direction?.confirmation.contains("still unnamed") ?? false)
         XCTAssertTrue(direction?.confirmation.contains("11 faces") ?? false,
                       "\(direction?.confirmation ?? "")")
+    }
+
+    func testTypingAnExistingNameTargetsThatGroup() {
+        let ada = cluster(2, size: 8, name: "Ada")
+        let match = FaceClusterNaming.mergeTarget(
+            typed: "ada",
+            clusterID: 1,
+            currentName: nil,
+            named: [ada]
+        )
+        XCTAssertEqual(match?.id, 2)
+    }
+
+    func testReTypingThisGroupsOwnNameIsNotAMerge() {
+        let ada = cluster(1, size: 4, name: "Ada")
+        XCTAssertNil(FaceClusterNaming.mergeTarget(
+            typed: "Ada",
+            clusterID: 1,
+            currentName: "Ada",
+            named: [ada]
+        ))
     }
 }

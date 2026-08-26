@@ -61,6 +61,14 @@ fn photo_tools_fixture_reads_back_the_documented_fields() {
     assert_eq!(view.photo_tools.country_code.as_deref(), Some("IT"));
     assert_eq!(view.photo_tools.ocr_text, vec!["Way Out", "Pizza Roma"]);
     assert!(view.photo_tools.ocr_ran.is_some());
+    assert_eq!(
+        view.photo_tools.clip_model.as_deref(),
+        Some("ViT-B-32/laion2b_s34b_b79k")
+    );
+    assert_eq!(
+        view.photo_tools.clip_embedding.as_deref(),
+        Some("AAAAPwAAAD8AAIA/")
+    );
     assert!(!view.core.is_present());
 }
 
@@ -104,10 +112,13 @@ fn an_empty_packet_reads_as_empty_rather_than_failing() {
 
 /// The fields the core must never touch, before and after a write.
 fn untouched_projection(view: &SidecarView) -> impl std::fmt::Debug + PartialEq + '_ {
+    let mut photo_tools = view.photo_tools.clone();
+    photo_tools.tagger_version = None;
+    photo_tools.tagged_at = None;
     (
         view.person_in_image.clone(),
         view.regions.clone(),
-        view.photo_tools.clone(),
+        photo_tools,
         view.people_tags()
             .into_iter()
             .map(str::to_string)
@@ -131,21 +142,34 @@ fn writing_tags_leaves_every_foreign_field_alone() {
 }
 
 #[test]
-fn every_pre_existing_tag_survives_a_write() {
+fn people_places_and_landmarks_survive_a_write() {
     for name in FIXTURES {
         let original = fixture(name);
         let before = read_view(&original).unwrap();
         let after = read_view(&apply(&original, &["Objects/Animal/Dog"])).unwrap();
         for tag in &before.tags_list {
+            if gallery_meta::is_content_tag(tag) {
+                continue;
+            }
             assert!(after.tags_list.contains(tag), "{name}: lost tag {tag}");
         }
         for subject in &before.subject {
+            let from_machine = before
+                .tags_list
+                .iter()
+                .any(|t| gallery_meta::is_content_tag(t) && t.ends_with(subject));
+            if from_machine {
+                continue;
+            }
             assert!(
                 after.subject.contains(subject),
                 "{name}: lost subject {subject}"
             );
         }
         for lr in &before.hierarchical_subject {
+            if gallery_meta::is_content_tag(lr) {
+                continue;
+            }
             assert!(
                 after.hierarchical_subject.contains(lr),
                 "{name}: lost hierarchicalSubject {lr}"
@@ -185,23 +209,61 @@ fn structural_blocks_the_core_ignores_come_through_verbatim() {
 }
 
 #[test]
-fn the_photo_tools_sentinel_is_never_written() {
-    // Stamping TaggerVersion would make photo-tools skip files it never tagged
-    // (schema §1.6).
+fn tagger_version_is_the_pack_version() {
     let out = apply_tags(None, &request(&["Objects/Animal/Dog"]))
         .unwrap()
         .bytes;
-    let text = String::from_utf8(out).unwrap();
-    assert!(!text.contains("TaggerVersion"), "{text}");
-    assert!(!text.contains("TaggedAt<"), "{text}");
+    let view = read_view(&out).unwrap();
+    assert_eq!(
+        view.photo_tools.tagger_version.as_deref(),
+        Some("mobileclip-s2-2026.1")
+    );
+    assert_eq!(
+        view.photo_tools.tagged_at.as_deref(),
+        Some("2026-08-03T10:00:00Z")
+    );
 
-    // And an existing one is left at its old value.
     let after = read_view(&apply(
         &fixture("phototools.jpg.xmp"),
         &["Objects/Animal/Dog"],
     ))
     .unwrap();
-    assert_eq!(after.photo_tools.tagger_version.as_deref(), Some("2026.4"));
+    assert_eq!(
+        after.photo_tools.tagger_version.as_deref(),
+        Some("mobileclip-s2-2026.1")
+    );
+}
+
+#[test]
+fn clip_fields_are_written_when_the_request_carries_them() {
+    let request = request(&["Objects/Animal/Dog"]).with_clip(
+        "AAAAPwAAAD8AAIA/",
+        "mobileclip-s2-2026.1",
+        "2026-08-03T10:00:00Z",
+    );
+    let out = apply_tags(None, &request).unwrap().bytes;
+    let view = read_view(&out).unwrap();
+    assert_eq!(
+        view.photo_tools.clip_embedding.as_deref(),
+        Some("AAAAPwAAAD8AAIA/")
+    );
+    assert_eq!(
+        view.photo_tools.clip_model.as_deref(),
+        Some("mobileclip-s2-2026.1")
+    );
+    assert_eq!(
+        view.photo_tools.clip_timestamp.as_deref(),
+        Some("2026-08-03T10:00:00Z")
+    );
+    // A re-run with the same vector must not churn the sidecar — even
+    // when the caller stamps a later `CLIPTimestamp`.
+    let later = request.clone().with_clip(
+        "AAAAPwAAAD8AAIA/",
+        "mobileclip-s2-2026.1",
+        "2026-08-04T00:00:00Z",
+    );
+    let again = apply_tags(Some(&out), &later).unwrap();
+    assert!(!again.changed, "an unchanged CLIP write rewrote the file");
 }
 
 #[test]
@@ -284,20 +346,32 @@ fn a_retracted_tag_is_removed_from_all_three_fields() {
 }
 
 #[test]
-fn a_tag_the_core_did_not_add_is_never_claimed_and_never_retracted() {
-    // photo-tools already wrote Objects/Structure/Balustrade. The core asks for
-    // the same tag, then stops asking. It must survive.
+fn objects_and_scenes_are_replaced_including_photo_tools() {
     let base = fixture("phototools.jpg.xmp");
-    let first = apply_tags(Some(&base), &request(&["Objects/Structure/Balustrade"])).unwrap();
-    assert!(first.added.is_empty(), "{:?}", first.added);
-    assert!(first.owned.is_empty(), "{:?}", first.owned);
+    let first = apply_tags(Some(&base), &request(&["Objects/Animal/Dog"])).unwrap();
+    let view = read_view(&first.bytes).unwrap();
+    assert_eq!(
+        view.tags_list
+            .iter()
+            .filter(|t| gallery_meta::is_content_tag(t))
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec!["Objects/Animal/Dog"]
+    );
+    assert!(view
+        .tags_list
+        .contains(&"Places/Italy/Lazio/Rome/Municipio Roma I".to_string()));
+    assert!(view.tags_list.contains(&"Landmarks/Colosseum".to_string()));
 
     let second = apply(&first.bytes, &[]);
     let view = read_view(&second).unwrap();
+    assert!(!view
+        .tags_list
+        .iter()
+        .any(|t| gallery_meta::is_content_tag(t)));
     assert!(view
         .tags_list
-        .contains(&"Objects/Structure/Balustrade".to_string()));
-    assert!(view.subject.contains(&"Balustrade".to_string()));
+        .contains(&"Places/Italy/Lazio/Rome/Municipio Roma I".to_string()));
 }
 
 #[test]
@@ -329,26 +403,41 @@ fn a_human_keyword_that_shares_a_leaf_is_not_collateral_damage() {
 #[test]
 fn a_leaf_shared_by_two_owned_tags_survives_retracting_only_one() {
     let base = fixture("minimal.jpg.xmp");
-    let first = apply(&base, &["Objects/Animal/Dog", "Toys/Plush/Dog"]);
+    let first = apply(&base, &["Objects/Animal/Dog", "Scenes/Urban/Dog"]);
     let view = read_view(&first).unwrap();
     assert_eq!(view.subject, vec!["Dog"], "leaf written once");
 
-    let second = apply(&first, &["Toys/Plush/Dog"]);
+    let second = apply(&first, &["Scenes/Urban/Dog"]);
     let view = read_view(&second).unwrap();
-    assert_eq!(view.tags_list, vec!["Toys/Plush/Dog"]);
+    assert_eq!(view.tags_list, vec!["Scenes/Urban/Dog"]);
     assert_eq!(view.subject, vec!["Dog"], "leaf still needed");
 }
 
 #[test]
-fn retracting_everything_empties_only_the_core_owned_entries() {
+fn retracting_everything_keeps_non_machine_tags() {
     let base = fixture("phototools.jpg.xmp");
     let before = read_view(&base).unwrap();
     let tagged = apply(&base, &["Objects/Animal/Dog"]);
     let cleared = apply(&tagged, &[]);
     let view = read_view(&cleared).unwrap();
-    assert_eq!(view.tags_list, before.tags_list);
-    assert_eq!(view.subject, before.subject);
-    assert_eq!(view.hierarchical_subject, before.hierarchical_subject);
+    let kept: Vec<_> = before
+        .tags_list
+        .iter()
+        .filter(|t| !gallery_meta::is_content_tag(t))
+        .cloned()
+        .collect();
+    assert_eq!(
+        view.tags_list
+            .iter()
+            .filter(|t| !gallery_meta::is_content_tag(t))
+            .cloned()
+            .collect::<Vec<_>>(),
+        kept
+    );
+    assert!(!view
+        .tags_list
+        .iter()
+        .any(|t| gallery_meta::is_content_tag(t)));
     assert!(view.core.tags.is_empty());
 }
 
@@ -413,6 +502,10 @@ fn a_new_model_pack_refreshes_the_sentinel_even_with_identical_tags() {
     let view = read_view(&second.bytes).unwrap();
     assert_eq!(
         view.core.model_pack.as_deref(),
+        Some("mobileclip-s2-2027.1")
+    );
+    assert_eq!(
+        view.photo_tools.tagger_version.as_deref(),
         Some("mobileclip-s2-2027.1")
     );
     assert_eq!(view.core.tagged_at.as_deref(), Some("2027-01-01T00:00:00Z"));

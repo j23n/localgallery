@@ -37,10 +37,12 @@
 //!
 //! Not for gating clustering: a blurry three-quarter face of a known person is
 //! still evidence about who is in the photo, and dropping it would shrink
-//! exactly the clusters that need members most. It gates the two places a bad
-//! face causes visible harm — auto-tagging into a named cluster (which writes
-//! a sidecar) and cover-crop selection (which puts the face on screen). Both
-//! compare against `faces.clustering.min_quality` from the pack manifest.
+//! exactly the clusters that need members most. It gates the places a bad face
+//! causes visible harm — auto-tagging into a named cluster (which starts a
+//! write), the rectangle written into a sidecar, and cover-crop selection.
+//! A user who names the cluster still gets the `People/<Name>` keyword; the
+//! floor only withholds the box. All three compare against
+//! `faces.clustering.min_quality` from the pack manifest.
 
 use crate::face::detect::Detection;
 

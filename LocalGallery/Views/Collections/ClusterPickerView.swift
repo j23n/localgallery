@@ -6,7 +6,7 @@ import SwiftUI
 /// review screen uses, and the order that matches what the user is usually
 /// after here, which is "this is that person I already named".
 ///
-/// Ignored groups are absent: the user said "not a person" about them, and
+/// Ignored and rejected groups are absent: the user already dismissed them, and
 /// offering one as a merge target would be asking them to contradict a decision
 /// they already made rather than to reverse it.
 struct ClusterPickerView: View {
@@ -17,7 +17,9 @@ struct ClusterPickerView: View {
     @Environment(\.dismiss) private var dismiss
 
     private var candidates: [FaceService.Cluster] {
-        let others = store.faces.allClusters.filter { $0.id != source.id && $0.state != .ignored }
+        let others = store.faces.allClusters.filter {
+            $0.id != source.id && $0.state != .ignored && $0.state != .rejected
+        }
         let named = others.filter { $0.state == .named }.sorted(by: FaceService.biggestFirst)
         let unlabeled = others.filter { $0.state != .named }.sorted(by: FaceService.biggestFirst)
         return named + unlabeled

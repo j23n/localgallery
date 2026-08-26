@@ -21,10 +21,12 @@
 //! multi-threaded GEMM reduces in nondeterministic order, and a thread pool
 //! per session times four workers is a thread explosion on a phone.
 //!
-//! ORT's `Session::run` takes `&mut self`, so a shared session would have to
-//! be behind a mutex — which would serialize exactly the parallelism the
-//! engine is built for. [`ort_backend::OrtEncoder`] therefore holds a small
-//! pool of sessions, one per worker.
+//! ORT's `Session::run` takes `&mut self`, so a shared session has to be
+//! behind a mutex. The engine used to keep one session per worker so
+//! inference could overlap. Each session copies the weights — 143 MB for
+//! MobileCLIP — and four of them jetsam a phone. [`crate::INFERENCE_SESSIONS`]
+//! is therefore 1: decode stays parallel, inference serializes. See
+//! [`ort_backend::OrtEncoder`].
 
 #[cfg(feature = "ort-backend")]
 pub mod ort_backend;

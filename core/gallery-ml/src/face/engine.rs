@@ -34,6 +34,10 @@
 //!        │
 //!  put_faces (one transaction)
 //!        │
+//!  write sidecar now (named faces if known, else CoreFacePack stamp)
+//!        │
+//!  report scanned (+ written if bytes changed)
+//!        │
 //!  face_work → done
 //! ```
 //!
@@ -43,7 +47,7 @@
 //! # Parallelism and cancellation
 //!
 //! Identical to the tagging engine: a scoped pool over an atomic cursor,
-//! `available_parallelism().min(4)`, panics caught so a bad model cannot unwind
+//! `available_parallelism().min(2)`, panics caught so a bad model cannot unwind
 //! through the FFI's run thread, cancellation checked between photos and inside
 //! the streamed hash, in-flight rows released rather than failed, and
 //! [`FaceProgress::on_finished`] fired exactly once on every path including the
@@ -53,11 +57,12 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use gallery_meta::{write_faces, FaceWriteRequest};
 use gallery_vfs::Vfs;
 
 use crate::cache::{CacheDb, ClusterRow, ClusterState, Stats, StoredFace, WorkItem};
 use crate::encoder::ImageEncoder;
-use crate::engine::{default_workers, PROGRESS_INTERVAL, TAGGED_BATCH};
+use crate::engine::{default_workers, iso8601_utc_now, PROGRESS_INTERVAL, TAGGED_BATCH};
 use crate::error::{MlError, MlResult};
 use crate::hash::content_hash;
 use crate::pack::{ClusteringConfig, ModelPack};
@@ -66,6 +71,7 @@ use crate::preprocess::{decode_oriented, extension_supported};
 use super::align::align_tensor;
 use super::cluster::{self, Assignment, FaceVec};
 use super::detect::FaceDetector;
+use super::naming::SyncScope;
 use super::quality::quality;
 
 /// Callbacks into the host app.
@@ -77,20 +83,18 @@ pub trait FaceProgress: Send + Sync {
     /// plus one final call at the end of the run.
     fn on_progress(&self, done: usize, total: usize);
 
-    /// Paths that turned out to contain at least one face, batched.
-    ///
-    /// Only photos whose detections *changed* appear: a cache hit re-reports
-    /// nothing, so the app's downstream refresh is not woken for a no-op.
+    /// Photos this run finished, batched — with faces or without, cache hit
+    /// or miss. The app journals these into Scan Activity as the scan goes.
     fn on_photos_with_faces(&self, paths: &[String]);
 
-    /// Photos whose sidecar the auto-tag pass rewrote, once, at the end of the
-    /// run.
+    /// Photos whose sidecar this run actually rewrote: the per-photo
+    /// `CoreFacePack` stamp, a mid-run named write, or the auto-tag pass.
     ///
-    /// Separate from [`FaceProgress::on_photos_with_faces`] because they answer
-    /// different questions: that one means "the cache changed", this one means
-    /// "a file on disk changed", and only the second obliges the app to re-read
-    /// sidecars. Defaulted to nothing so a listener that does not care about
-    /// disk writes need not implement it.
+    /// Separate from [`FaceProgress::on_photos_with_faces`] because that one
+    /// means "we scanned this file" and this one means "bytes on disk
+    /// changed". Only the second obliges a library rescan. Defaulted to
+    /// nothing so a listener that does not care about disk writes need not
+    /// implement it.
     fn on_sidecars_written(&self, _paths: &[String]) {}
 
     /// Called exactly once, whether the run finished or was cancelled.
@@ -184,6 +188,13 @@ pub struct FaceRunOptions {
     /// way to turn it off — a caller running faces purely to populate the
     /// review UI may not want disk writes at all.
     pub skip_auto_tagging: bool,
+    /// Re-detect even when `face_scans` already has a row for this pack.
+    /// [`FaceEngine::reset_queue`] sets this for the next run.
+    pub force: bool,
+    /// When set, only these absolute paths are taken off the queue. A
+    /// one-photo debug rerun uses this so `force` cannot sweep pending
+    /// neighbours.
+    pub only_paths: Option<Vec<String>>,
 }
 
 /// The face orchestrator.
@@ -195,6 +206,9 @@ pub struct FaceEngine {
     vfs: Arc<dyn Vfs>,
     face_key: String,
     clustering: ClusteringConfig,
+    heic_decoder: Option<Arc<dyn crate::HostHeicDecoder>>,
+    /// Set by [`Self::reset_queue`]; consumed by the next [`Self::run`].
+    force_next: AtomicBool,
 }
 
 impl std::fmt::Debug for FaceEngine {
@@ -232,7 +246,7 @@ impl FaceEngine {
     ) -> MlResult<FaceEngine> {
         let faces = pack.faces().ok_or(MlError::FaceModelsUnavailable)?.clone();
         let bytes = pack.load_face_models()?;
-        let slots = default_workers(None);
+        let slots = crate::INFERENCE_SESSIONS;
         let detector = crate::encoder::OrtModel::new(&bytes.detector, slots)?;
         let embedder = crate::encoder::OrtEncoder::new(
             &bytes.embedder,
@@ -295,12 +309,20 @@ impl FaceEngine {
             vfs,
             face_key,
             clustering: faces.clustering,
+            heic_decoder: None,
+            force_next: AtomicBool::new(false),
         })
     }
 
     /// The loaded pack.
     pub fn pack(&self) -> &ModelPack {
         &self.pack
+    }
+
+    /// Use `decoder` for HEIC photos. See [`crate::TaggingEngine::with_heic_decoder`].
+    pub fn with_heic_decoder(mut self, decoder: Arc<dyn crate::HostHeicDecoder>) -> Self {
+        self.heic_decoder = Some(decoder);
+        self
     }
 
     /// The identity face results are recorded under.
@@ -328,8 +350,19 @@ impl FaceEngine {
         self.cache.face_enqueue(paths)
     }
 
+    /// Re-open one path so the next forced run will take it, even if it is
+    /// already `done`. Inserts the row when the queue has never seen it.
+    pub fn reopen(&self, path: &str) -> MlResult<()> {
+        self.cache.face_enqueue(&[path.to_string()])?;
+        self.cache.face_mark_stale(path)?;
+        Ok(())
+    }
+
     /// Forget every face queue row, keeping detections and clusters.
+    ///
+    /// The next run re-detects: `force_next` ignores the `face_scans` skip.
     pub fn reset_queue(&self) -> MlResult<()> {
+        self.force_next.store(true, Ordering::Relaxed);
         self.cache.face_reset_queue()
     }
 
@@ -418,10 +451,16 @@ impl FaceEngine {
         self.restat_done_rows()?;
 
         let root_prefix = opts.root_prefix.as_deref().map(normalize_root_prefix);
-        let items = self
+        let mut items = self
             .cache
             .face_claimable(opts.limit.unwrap_or(0), root_prefix.as_deref())?;
+        if let Some(only) = &opts.only_paths {
+            items.retain(|item| only.iter().any(|p| p == &item.path));
+        }
         let total = items.len();
+        progress.on_progress(0, total);
+        let tagged_at = opts.tagged_at.clone().unwrap_or_else(iso8601_utc_now);
+        let force = opts.force || self.force_next.swap(false, Ordering::Relaxed);
         let workers = default_workers(opts.workers).min(total.max(1));
 
         let cursor = AtomicUsize::new(0);
@@ -441,7 +480,7 @@ impl FaceEngine {
                         let i = cursor.fetch_add(1, Ordering::Relaxed);
                         let Some(item) = items.get(i) else { break };
 
-                        let outcome = self.process(item, cancel);
+                        let outcome = self.process(item, &tagged_at, force, cancel);
                         if !shared.absorb(item, outcome) {
                             continue;
                         }
@@ -467,7 +506,7 @@ impl FaceEngine {
         // Clustering is single-threaded and runs after the workers, never
         // inside them. Two reasons, both load-bearing: an incremental
         // assignment reads the cluster set it is also mutating, and its result
-        // depends on the order faces arrive in — which under four workers is
+        // depends on the order faces arrive in — which under two workers is
         // whatever the scheduler felt like. Doing it here, over
         // `unassigned_faces()`'s fixed `(content_hash, face_idx)` order, makes
         // a run's partition a function of its inputs.
@@ -498,8 +537,30 @@ impl FaceEngine {
             };
             let plan =
                 self.sync_sidecars(&assignment.auto_hashes, opts.tagged_at.as_deref(), &scope)?;
-            summary.sidecars_written = plan.written.len();
-            summary.sidecars_failed = plan.failed.len();
+            summary.sidecars_written += plan.written.len();
+            summary.sidecars_failed += plan.failed.len();
+            if !plan.written.is_empty() {
+                progress.on_sidecars_written(&plan.written);
+            }
+        }
+
+        // REMOVE AFTER: named-keyword-resync. Delete this block with that module.
+        {
+            let plan = self
+                .resync_named_keywords_once(opts.tagged_at.as_deref(), root_prefix.as_deref())?;
+            summary.sidecars_written += plan.written.len();
+            summary.sidecars_failed += plan.failed.len();
+            if !plan.written.is_empty() {
+                progress.on_sidecars_written(&plan.written);
+            }
+        }
+
+        // REMOVE AFTER: face-decision-resync. Delete this block with that module.
+        {
+            let plan = self
+                .resync_face_decisions_once(opts.tagged_at.as_deref(), root_prefix.as_deref())?;
+            summary.sidecars_written += plan.written.len();
+            summary.sidecars_failed += plan.failed.len();
             if !plan.written.is_empty() {
                 progress.on_sidecars_written(&plan.written);
             }
@@ -535,7 +596,7 @@ impl FaceEngine {
 
     /// One photo, start to finish. Never panics; every failure becomes an
     /// [`Outcome`].
-    fn process(&self, item: &WorkItem, cancel: &AtomicBool) -> Outcome {
+    fn process(&self, item: &WorkItem, tagged_at: &str, force: bool, cancel: &AtomicBool) -> Outcome {
         match self.cache.face_begin(&item.path) {
             Ok(true) => {}
             Ok(false) => return Outcome::Lost,
@@ -547,7 +608,7 @@ impl FaceEngine {
                 .face_finish_skipped(&item.path, crate::preprocess::DECODER_VERSION);
             return Outcome::Skipped;
         }
-        match self.process_inner(item, cancel) {
+        match self.process_inner(item, tagged_at, force, cancel) {
             Ok(Some(result)) => {
                 let stat = self
                     .vfs
@@ -577,7 +638,13 @@ impl FaceEngine {
     }
 
     /// `Ok(None)` means "cancelled mid-photo".
-    fn process_inner(&self, item: &WorkItem, cancel: &AtomicBool) -> MlResult<Option<PhotoFaces>> {
+    fn process_inner(
+        &self,
+        item: &WorkItem,
+        tagged_at: &str,
+        force: bool,
+        cancel: &AtomicBool,
+    ) -> MlResult<Option<PhotoFaces>> {
         let cancelled = || cancel.load(Ordering::Relaxed);
         let path = item.path.as_str();
 
@@ -589,18 +656,12 @@ impl FaceEngine {
         };
 
         let (face_count, hash, cache_hit) = match self.cache.face_scan(&probe, &self.face_key)? {
-            Some((count, _, _)) => (count, probe, true),
-            None => {
+            Some((count, _, _)) if !force => (count, probe, true),
+            _ => {
                 if cancelled() {
                     return Ok(None);
                 }
-                let bytes = self.vfs.read(path)?;
-                let hash = crate::hash::hash_bytes(&bytes);
-                let rgb = decode_oriented(path, &bytes)?;
-                // The encoded bytes are dead once the pixels exist, and at
-                // four workers a 30 MB JPEG held across inference is
-                // 120 MB of avoidable resident memory.
-                drop(bytes);
+                let (rgb, hash) = self.decode_for_faces(path, &probe)?;
                 if cancelled() {
                     return Ok(None);
                 }
@@ -617,10 +678,72 @@ impl FaceEngine {
         if !self.cache.face_set_content_hash(path, &hash)? {
             return Ok(None);
         }
+        let written = self.write_scan_sidecar(path, &hash, tagged_at);
         Ok(Some(PhotoFaces {
             face_count,
             cache_hit,
+            written,
         }))
+    }
+
+    /// Write this photo's sidecar as soon as we have scanned it, the same
+    /// shape as tagging: the file records the work, and a coalesced rescan
+    /// picks it up later.
+    ///
+    /// Named faces already in the cache (a cache-hit of a person the user
+    /// confirmed) go out now. Otherwise a partial `CoreFacePack` stamp —
+    /// empty regions, names left standing. Clustering still happens after
+    /// the workers; newly joined names ride the auto-tag pass at the end.
+    fn write_scan_sidecar(&self, path: &str, hash: &[u8; 32], tagged_at: &str) -> bool {
+        let named = self.cache.named_faces_for_hash(hash).unwrap_or_default();
+        let dismissed = self.cache.dismissed_faces_for_hash(hash).unwrap_or_default();
+        if named.is_empty() && dismissed.is_empty() {
+            return self.stamp_face_pack(path, tagged_at);
+        }
+        let request = self.build_request(&named, &dismissed, tagged_at, &SyncScope::under(None));
+        self.write_with_retry(path, &request).unwrap_or(false)
+    }
+
+    /// Leave `CoreFacePack` on every scanned photo so another reader can skip
+    /// from the file. Empty + partial: names are not ours to retract.
+    fn stamp_face_pack(&self, path: &str, tagged_at: &str) -> bool {
+        let request = FaceWriteRequest::new(Vec::new(), self.face_key.clone(), tagged_at)
+            .speaking_partially(Vec::<String>::new());
+        write_faces(self.vfs.as_ref(), path, &request)
+            .map(|outcome| outcome.written)
+            .unwrap_or(false)
+    }
+
+    /// Decode one photo for detection. Same host-HEIC shortcut as tagging.
+    ///
+    /// The detector letterboxes to 640 and the embedder crops to 112, so a
+    /// 2048 long side is enough. Holding the oriented 48 MP buffer for detect
+    /// *and* every crop is what face workers used to do on a JPEG
+    /// library — hundreds of megabytes, on top of the ONNX sessions.
+    fn decode_for_faces(
+        &self,
+        path: &str,
+        probe: &[u8; 32],
+    ) -> MlResult<(image::RgbImage, [u8; 32])> {
+        if let Some(rgb) =
+            crate::preprocess::host_heic_decode(self.heic_decoder.as_deref(), path)?
+        {
+            return Ok((
+                crate::preprocess::limit_long_side(
+                    rgb,
+                    crate::preprocess::ANALYSIS_MAX_LONG_SIDE,
+                ),
+                *probe,
+            ));
+        }
+        let bytes = self.vfs.read(path)?;
+        let hash = crate::hash::hash_bytes(&bytes);
+        let rgb = decode_oriented(path, &bytes)?;
+        drop(bytes);
+        Ok((
+            crate::preprocess::limit_long_side(rgb, crate::preprocess::ANALYSIS_MAX_LONG_SIDE),
+            hash,
+        ))
     }
 
     /// Detect, align and embed every face in one decoded image.
@@ -899,6 +1022,7 @@ fn normalize_sum(sum: &[f64]) -> Option<Vec<f32>> {
 struct PhotoFaces {
     face_count: usize,
     cache_hit: bool,
+    written: bool,
 }
 
 enum Outcome {
@@ -926,12 +1050,19 @@ impl Shared {
                 totals.faces_found += result.face_count;
                 if result.face_count > 0 {
                     totals.photos_with_faces += 1;
-                    if !result.cache_hit {
-                        lock(&self.reporter).with_faces.push(item.path.clone());
-                    }
                 }
                 if result.cache_hit {
                     totals.cache_hits += 1;
+                }
+                if result.written {
+                    totals.sidecars_written += 1;
+                }
+                {
+                    let mut reporter = lock(&self.reporter);
+                    reporter.scanned.push(item.path.clone());
+                    if result.written {
+                        reporter.written.push(item.path.clone());
+                    }
                 }
                 true
             }
@@ -950,19 +1081,25 @@ impl Shared {
     }
 
     fn report(&self, progress: &dyn FaceProgress, done: usize, total: usize, force: bool) {
-        let batch = {
+        let (scanned, written) = {
             let mut reporter = lock(&self.reporter);
             let due = force || reporter.last.elapsed() >= PROGRESS_INTERVAL;
-            if !due && reporter.with_faces.len() < TAGGED_BATCH {
+            if !due && reporter.scanned.len() < TAGGED_BATCH {
                 return;
             }
             if due {
                 reporter.last = Instant::now();
             }
-            std::mem::take(&mut reporter.with_faces)
+            (
+                std::mem::take(&mut reporter.scanned),
+                std::mem::take(&mut reporter.written),
+            )
         };
-        if !batch.is_empty() {
-            progress.on_photos_with_faces(&batch);
+        if !scanned.is_empty() {
+            progress.on_photos_with_faces(&scanned);
+        }
+        if !written.is_empty() {
+            progress.on_sidecars_written(&written);
         }
         progress.on_progress(done, total);
     }
@@ -978,7 +1115,8 @@ impl Shared {
 
 struct Reporter {
     last: Instant,
-    with_faces: Vec<String>,
+    scanned: Vec<String>,
+    written: Vec<String>,
 }
 
 impl Reporter {
@@ -987,7 +1125,8 @@ impl Reporter {
             last: Instant::now()
                 .checked_sub(PROGRESS_INTERVAL)
                 .unwrap_or_else(Instant::now),
-            with_faces: Vec::new(),
+            scanned: Vec::new(),
+            written: Vec::new(),
         }
     }
 }

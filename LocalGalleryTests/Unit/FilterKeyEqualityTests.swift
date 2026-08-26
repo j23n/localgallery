@@ -12,14 +12,16 @@ final class FilterKeyEqualityTests: XCTestCase {
         firstDate: Date? = nil,
         lastDate: Date? = nil,
         query: String = "",
-        activeTagIDs: [String] = []
+        activeTagIDs: [String] = [],
+        epoch: Int = 0
     ) -> PhotoGridScreen.FilterKey {
         PhotoGridScreen.FilterKey(
             count: count,
             firstDate: firstDate,
             lastDate: lastDate,
             query: query,
-            activeTagIDs: activeTagIDs
+            activeTagIDs: activeTagIDs,
+            epoch: epoch
         )
     }
 
@@ -53,6 +55,10 @@ final class FilterKeyEqualityTests: XCTestCase {
             key(activeTagIDs: ["a", "b"]),
             key(activeTagIDs: ["b", "a"])
         )
+    }
+
+    func testDifferentEpochIsNotEqual() {
+        XCTAssertNotEqual(key(epoch: 0), key(epoch: 1))
     }
 
     func testWhitespaceOnlyDifferenceIsAStringDifference() {

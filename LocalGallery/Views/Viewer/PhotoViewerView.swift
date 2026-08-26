@@ -17,6 +17,10 @@ struct PhotoViewerView: View {
     @State private var dismissOffset: CGFloat = 0
     @State private var shareRequest: PhotoShareRequest?
     @State private var showDeleteConfirm = false
+    @State private var showMovePicker = false
+    /// Set around an in-viewer move so `onChange(of: photos)` does not
+    /// dismiss while the current id is mid-rewrite (path-derived).
+    @State private var suppressMissingDismiss = false
     /// Window-derived safe-area insets. `GeometryReader { geo in … }` paired
     /// with `.ignoresSafeArea()` — the pattern this view uses to get a
     /// full-screen canvas — reports zero insets inside a `fullScreenCover`
@@ -209,7 +213,8 @@ struct PhotoViewerView: View {
             // one runloop so an in-flight UIPageViewController transition can
             // finish before teardown — dismissing mid-transition trips its
             // visible-view assertion.
-            if !newPhotos.contains(where: { $0.id == currentPhotoID }) {
+            if !suppressMissingDismiss,
+               !newPhotos.contains(where: { $0.id == currentPhotoID }) {
                 DispatchQueue.main.async { dismiss() }
             }
         }
@@ -224,6 +229,13 @@ struct PhotoViewerView: View {
             }
         } message: {
             Text(PhotoDeletePrompt.message(for: currentPhoto.map { [$0] } ?? []))
+        }
+        .sheet(isPresented: $showMovePicker) {
+            if let photo = currentPhoto {
+                FolderMovePicker(photos: [photo]) { dest in
+                    Task { await moveCurrentPhoto(to: dest) }
+                }
+            }
         }
     }
 
@@ -246,6 +258,9 @@ struct PhotoViewerView: View {
                     Spacer()
                     if currentPhoto != nil {
                         ViewerMenuButton {
+                            Button("Move to Folder", systemImage: "folder") {
+                                showMovePicker = true
+                            }
                             Button(
                                 currentPhoto?.isVideo == true ? "Delete Video" : "Delete Photo",
                                 systemImage: "trash",
@@ -308,6 +323,19 @@ struct PhotoViewerView: View {
         guard result.deletedIDs.contains(photo.id) else { return }
         if nextID == nil {
             dismiss()
+        }
+    }
+
+    private func moveCurrentPhoto(to dest: PhotoFolder) async {
+        guard let photo = currentPhoto else { return }
+        suppressMissingDismiss = true
+        let result = await store.movePhotos([photo], to: dest)
+        if let moved = result.moved[photo.id] {
+            currentPhotoID = moved.id
+        }
+        suppressMissingDismiss = false
+        if !photos.contains(where: { $0.id == currentPhotoID }) {
+            DispatchQueue.main.async { dismiss() }
         }
     }
 

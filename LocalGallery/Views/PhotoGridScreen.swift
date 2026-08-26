@@ -77,6 +77,8 @@ struct PhotoGridScreen: View {
     /// so a selection change cannot rewrite the confirmation mid-flight.
     @State private var pendingDelete: [PhotoFile] = []
     @State private var showDeleteConfirm = false
+    @State private var pendingMove: [PhotoFile] = []
+    @State private var showMovePicker = false
 
     // Settings sheet (root only)
     @State private var showSettings = false
@@ -113,16 +115,18 @@ struct PhotoGridScreen: View {
     }
 
     // Cheap identity for the photos input: count + first/last date catches
-    // both re-scans (count changes) and enrichment (dates change). Exposed
-    // as internal so unit tests can build a FilterKey without going through
-    // the SwiftUI view — `private` would make it unreachable from the test
-    // bundle even with `@testable import`.
+    // both re-scans (count changes) and enrichment (dates change). `epoch`
+    // catches an on-disk move, which keeps count and dates the same but
+    // changes paths / ids. Exposed as internal so unit tests can build a
+    // FilterKey without going through the SwiftUI view — `private` would
+    // make it unreachable from the test bundle even with `@testable import`.
     struct FilterKey: Equatable {
         let count: Int
         let firstDate: Date?
         let lastDate: Date?
         let query: String
         let activeTagIDs: [String]
+        let epoch: Int
     }
 
     private var filterKey: FilterKey {
@@ -131,7 +135,8 @@ struct PhotoGridScreen: View {
             firstDate: photos.first?.dateTaken,
             lastDate: photos.last?.dateTaken,
             query: query.trimmingCharacters(in: .whitespaces),
-            activeTagIDs: activeTags.map(\.id)
+            activeTagIDs: activeTags.map(\.id),
+            epoch: store.libraryEpoch
         )
     }
 
@@ -390,6 +395,14 @@ struct PhotoGridScreen: View {
         } message: {
             Text(PhotoDeletePrompt.message(for: pendingDelete))
         }
+        .sheet(isPresented: $showMovePicker) {
+            FolderMovePicker(photos: pendingMove) { dest in
+                Task {
+                    await confirmMove(pendingMove, to: dest)
+                    pendingMove = []
+                }
+            }
+        }
         .navigationDestination(isPresented: $goToSlideshow) {
             if let m = playableMemory {
                 MemorySlideshowView(memory: m)
@@ -610,6 +623,16 @@ struct PhotoGridScreen: View {
         }
     }
 
+    private func confirmMove(_ photos: [PhotoFile], to dest: PhotoFolder) async {
+        let result = await store.movePhotos(photos, to: dest)
+        selected.subtract(Set(result.moved.keys))
+        if selected.isEmpty {
+            withAnimation(.easeInOut(duration: 0.25)) {
+                selectMode = false
+            }
+        }
+    }
+
     // MARK: - Toolbar
 
     @ToolbarContentBuilder
@@ -710,6 +733,16 @@ struct PhotoGridScreen: View {
                 .foregroundStyle(Design.ink2)
 
             Spacer()
+
+            Button {
+                pendingMove = selectedPhotos
+                showMovePicker = true
+            } label: {
+                Text("Move")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(selected.isEmpty ? Design.ink3 : Design.accentColor)
+            }
+            .disabled(selected.isEmpty)
 
             Button {
                 pendingDelete = selectedPhotos

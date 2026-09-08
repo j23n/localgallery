@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.j23n.LocalGallery</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <name>LocalGallery</name>
+  <summary>Browse a folder of photos — same library as the iOS app</summary>
+  <description>
+    <p>
+      LocalGallery treats a plain folder as the library. Sidecars travel with
+      the files. This Linux build is one window: a GNOME laptop layout and a
+      collapsed Mecha Comet layout (540×620 at 2×).
+    </p>
+  </description>
+  <launchable type="desktop-id">com.j23n.LocalGallery.desktop</launchable>
+  <url type="homepage">https://github.com/j23n/localgallery</url>
+  <developer_name>Johannes</developer_name>
+  <releases>
+    <release version="0.1.0" date="2026-09-08"/>
+  </releases>
+  <content_rating type="oars-1.1"/>
+</component>

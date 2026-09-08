@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=LocalGallery
+Comment=Browse a folder of photos
+Exec=localgallery
+Icon=com.j23n.LocalGallery
+Terminal=false
+Type=Application
+Categories=Graphics;Photography;GTK;
+StartupNotify=true
+# Comet / short window: localgallery --comet
+Keywords=photos;gallery;images;

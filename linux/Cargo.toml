@@ -1,0 +1,43 @@
+[package]
+name = "localgallery"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97"
+license = "MIT"
+publish = false
+description = "LocalGallery Linux UI — GNOME laptop and Mecha Comet"
+
+[features]
+default = ["ui"]
+# Crate names are `gtk` / `adw` so `use gtk::…` / `use adw::…` resolve.
+# The packages on crates.io are gtk4 and libadwaita.
+ui = ["dep:gtk", "dep:adw"]
+ml = ["gallery-session/ml", "gallery-ml/ort-backend"]
+
+[[bin]]
+name = "localgallery"
+path = "src/main.rs"
+required-features = ["ui"]
+
+[dependencies]
+gallery-model = { path = "../core/gallery-model" }
+gallery-vfs = { path = "../core/gallery-vfs" }
+gallery-scan = { path = "../core/gallery-scan" }
+gallery-index = { path = "../core/gallery-index" }
+gallery-meta = { path = "../core/gallery-meta" }
+gallery-ml = { path = "../core/gallery-ml", default-features = false }
+gallery-geo = { path = "../core/gallery-geo" }
+gallery-session = { path = "../core/gallery-session" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "5"
+libc = "0.2"
+notify = "6"
+image = { version = "=0.25.10", default-features = false, features = ["jpeg", "png"] }
+md-5 = "0.10"
+png = "0.18"
+gtk = { package = "gtk4", version = "0.8", features = ["v4_14"], optional = true }
+adw = { package = "libadwaita", version = "0.6", features = ["v1_5"], optional = true }
+
+[dev-dependencies]
+tempfile = "3"

@@ -41,6 +41,22 @@ pub struct SwiftXmpParse {
     pub face_regions: Vec<SwiftFaceRegion>,
     /// `photo-tools:TaggerVersion` or `phototools:TaggerVersion`, when present.
     pub tagger_version: Option<String>,
+    /// `photo-tools:TaggedAt` or `phototools:TaggedAt`, when present.
+    pub tagged_at: Option<String>,
+    /// `photo-tools:CoreModelPack` or `phototools:CoreModelPack`.
+    pub core_model_pack: Option<String>,
+    /// `photo-tools:CoreTaggedAt` or `phototools:CoreTaggedAt`.
+    pub core_tagged_at: Option<String>,
+    /// `photo-tools:CLIPModel` or `phototools:CLIPModel`.
+    pub clip_model: Option<String>,
+    /// `photo-tools:CLIPTimestamp` or `phototools:CLIPTimestamp`.
+    pub clip_timestamp: Option<String>,
+    /// `photo-tools:CoreFacePack` or `phototools:CoreFacePack`.
+    pub core_face_pack: Option<String>,
+    /// `photo-tools:CoreFaceTaggedAt` or `phototools:CoreFaceTaggedAt`.
+    pub core_face_tagged_at: Option<String>,
+    /// `CoreFaceDecisions` bag entries.
+    pub face_decisions: Vec<String>,
 }
 
 /// One region as the app sees it.
@@ -105,7 +121,43 @@ pub fn parse_xmp_text(xml: &str) -> SwiftXmpParse {
         country_code: parse_country_code(xml),
         face_regions: parse_mwg_regions(xml),
         tagger_version: parse_tagged_scalar(xml, "TaggerVersion"),
+        tagged_at: parse_tagged_scalar(xml, "TaggedAt"),
+        core_model_pack: parse_tagged_scalar(xml, "CoreModelPack"),
+        core_tagged_at: parse_tagged_scalar(xml, "CoreTaggedAt"),
+        clip_model: parse_tagged_scalar(xml, "CLIPModel"),
+        clip_timestamp: parse_tagged_scalar(xml, "CLIPTimestamp"),
+        core_face_pack: parse_tagged_scalar(xml, "CoreFacePack"),
+        core_face_tagged_at: parse_tagged_scalar(xml, "CoreFaceTaggedAt"),
+        face_decisions: parse_photo_tools_bag(xml, "CoreFaceDecisions"),
     }
+}
+
+/// `rdf:li` entries inside a photo-tools bag/seq property.
+fn parse_photo_tools_bag(xml: &str, local: &str) -> Vec<String> {
+    for prefix in ["photo-tools", "phototools"] {
+        let open = format!("<{prefix}:{local}");
+        let close = format!("</{prefix}:{local}>");
+        let Some(start) = xml.find(&open) else { continue };
+        let Some(end_rel) = xml[start..].find(&close) else { continue };
+        let block = &xml[start..start + end_rel];
+        let mut out = Vec::new();
+        let mut cursor = 0usize;
+        while let Some(li_rel) = block[cursor..].find("<rdf:li>") {
+            let li_start = cursor + li_rel + "<rdf:li>".len();
+            let Some(li_end_rel) = block[li_start..].find("</rdf:li>") else {
+                break;
+            };
+            let value = block[li_start..li_start + li_end_rel].trim();
+            if !value.is_empty() {
+                out.push(value.to_string());
+            }
+            cursor = li_start + li_end_rel + "</rdf:li>".len();
+        }
+        if !out.is_empty() {
+            return out;
+        }
+    }
+    Vec::new()
 }
 
 /// `<digiKam:TagsList>` … `</digiKam:TagsList>`, `<rdf:li>` entries only.
@@ -481,5 +533,43 @@ mod tests {
     fn a_non_xml_sidecar_parses_to_nothing_without_complaint() {
         let parsed = parse_xmp_bytes(b"this is not an XMP packet at all\n");
         assert_eq!(parsed, SwiftXmpParse::default());
+    }
+
+    #[test]
+    fn photo_tools_sentinels_win_over_core_fallbacks() {
+        let xml = r#"<phototools:TaggerVersion>2026.4</phototools:TaggerVersion>
+           <phototools:TaggedAt>2026-07-01T09:15:00Z</phototools:TaggedAt>
+           <phototools:CoreModelPack>mobileclip-s2-2026.1</phototools:CoreModelPack>
+           <phototools:CoreTaggedAt>2026-08-03T10:00:00Z</phototools:CoreTaggedAt>"#;
+        let parsed = parse_xmp_text(xml);
+        assert_eq!(parsed.tagger_version.as_deref(), Some("2026.4"));
+        assert_eq!(parsed.tagged_at.as_deref(), Some("2026-07-01T09:15:00Z"));
+        assert_eq!(
+            parsed.core_model_pack.as_deref(),
+            Some("mobileclip-s2-2026.1")
+        );
+        assert_eq!(
+            parsed.core_tagged_at.as_deref(),
+            Some("2026-08-03T10:00:00Z")
+        );
+    }
+
+    #[test]
+    fn face_stamps_and_decisions_are_read_from_element_form() {
+        let xml = r#"<phototools:CoreFacePack>buffalo_sc-2026.1</phototools:CoreFacePack>
+           <phototools:CoreFaceTaggedAt>2026-08-03T10:00:00Z</phototools:CoreFaceTaggedAt>
+           <phototools:CoreFaceDecisions><rdf:Bag>
+             <rdf:li>0.4,0.35,0.12,0.16 named Alice</rdf:li>
+           </rdf:Bag></phototools:CoreFaceDecisions>"#;
+        let parsed = parse_xmp_text(xml);
+        assert_eq!(parsed.core_face_pack.as_deref(), Some("buffalo_sc-2026.1"));
+        assert_eq!(
+            parsed.core_face_tagged_at.as_deref(),
+            Some("2026-08-03T10:00:00Z")
+        );
+        assert_eq!(
+            parsed.face_decisions,
+            vec!["0.4,0.35,0.12,0.16 named Alice"]
+        );
     }
 }

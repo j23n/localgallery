@@ -175,10 +175,14 @@ struct ScanActivityDetailView: View {
     @Environment(GalleryStore.self) private var store
     @State private var viewerPhoto: PhotoFile?
     @State private var viewerCurrentID: UUID = UUID()
-    @State private var photoTools = PhotoToolsMetadata()
+    @State private var sidecar = SidecarDocument.empty
 
     private var photo: PhotoFile {
         store.photo(forActivity: entry.url, photoID: entry.photoID) ?? entry.fallbackPhoto
+    }
+
+    private var tools: PhotoToolsMetadata {
+        photo.photoTools.merging(over: sidecar.tools)
     }
 
     private var relatedLogs: [LogStore.Entry] {
@@ -249,25 +253,39 @@ struct ScanActivityDetailView: View {
                 }
             }
 
-            if !photoTools.isEmpty {
-                Section("photo-tools") {
-                    if let version = photoTools.taggerVersion {
-                        LabeledContent("Tagger Version", value: version)
+            Section("Sidecar") {
+                LabeledContent("On disk", value: (entry.sidecarOnDisk || photo.sidecarOnDisk || sidecar.exists) ? "yes" : "no")
+                if let pack = entry.facePack ?? tools.facePack {
+                    LabeledContent("Face pack", value: pack)
+                }
+                if let at = entry.faceTaggedAt ?? tools.faceTaggedAt {
+                    LabeledContent("Face timestamp", value: PhotoInfoFormatting.relativeTimestamp(at))
+                }
+                if let version = tools.taggerVersion {
+                    LabeledContent("Tagger", value: version)
+                }
+            }
+
+            if !entry.faceDecisions.isEmpty {
+                Section("Decisions") {
+                    ForEach(Array(entry.faceDecisions.enumerated()), id: \.offset) { _, raw in
+                        Text(raw)
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
                     }
-                    if let tagged = photoTools.taggedAt {
-                        LabeledContent("Tagged At", value: tagged)
-                    }
-                    if let model = photoTools.clipModel {
-                        LabeledContent("CLIP Model", value: model)
-                    }
-                    if let stamp = photoTools.clipTimestamp {
-                        LabeledContent("CLIP Timestamp", value: stamp)
-                    }
-                    if let pack = photoTools.facePack {
-                        LabeledContent("Face Model", value: pack)
-                    }
-                    if let faceAt = photoTools.faceTaggedAt {
-                        LabeledContent("Face Timestamp", value: faceAt)
+                }
+            }
+
+            if !entry.diagnostics.isEmpty {
+                Section("Detections") {
+                    ForEach(Array(entry.diagnostics.enumerated()), id: \.offset) { index, face in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(face.label ?? "Face \(index + 1)")
+                                .font(.subheadline.weight(.medium))
+                            Text(detectionLine(face))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
             }
@@ -299,11 +317,25 @@ struct ScanActivityDetailView: View {
         .navigationTitle(entry.filename)
         .navigationBarTitleDisplayMode(.inline)
         .task(id: entry.id) {
-            photoTools = await store.loadPhotoToolsMetadata(for: photo)
+            sidecar = SidecarDocument.read(imageURL: photo.url)
         }
         .fullScreenCover(item: $viewerPhoto) { _ in
             PhotoViewerView(photos: album.isEmpty ? [photo] : album, currentPhotoID: $viewerCurrentID)
         }
+    }
+
+    private func detectionLine(_ face: FacePhotoDiagnostic) -> String {
+        var parts = [
+            String(format: "score %.2f", face.score),
+            String(format: "quality %.2f", face.quality),
+        ]
+        if let id = face.clusterID {
+            parts.append("cluster \(id)")
+        }
+        if let assignment = face.assignment {
+            parts.append(assignment == .seeded ? "new cluster" : "matched")
+        }
+        return parts.joined(separator: " · ")
     }
 
     private var resultLabel: String {

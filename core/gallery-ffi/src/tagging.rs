@@ -600,6 +600,39 @@ fn open_tagging_session(
     }))
 }
 
+/// Where a resolved pack directory came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum PackSource {
+    /// The copy shipped with the app.
+    Bundled,
+    /// A user-imported copy.
+    Imported,
+}
+
+/// The pack the host should load. `name` is the directory's last component.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct PackResolution {
+    /// Directory name (the version string).
+    pub name: String,
+    /// Which root it was found in.
+    pub source: PackSource,
+}
+
+/// Newest pack wins, wherever it lives. Equal versions go to imported.
+///
+/// The host enumerates the two roots and passes directory *names*. Numeric
+/// compare so `…-v1.10` beats `…-v1.9`.
+#[uniffi::export]
+pub fn resolve_model_pack(bundled: Vec<String>, imported: Vec<String>) -> Option<PackResolution> {
+    gallery_ml::resolve_model_pack(&bundled, &imported).map(|r| PackResolution {
+        name: r.name,
+        source: match r.source {
+            gallery_ml::PackSource::Bundled => PackSource::Bundled,
+            gallery_ml::PackSource::Imported => PackSource::Imported,
+        },
+    })
+}
+
 /// Verify and inspect a model pack directory without opening a session.
 ///
 /// This is what the app calls to decide whether a directory is a usable pack

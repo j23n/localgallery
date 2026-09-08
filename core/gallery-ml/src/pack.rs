@@ -139,6 +139,104 @@ pub const LABELS_SCHEMA: u32 = 1;
 /// The file every pack directory must contain.
 pub const MANIFEST_FILE: &str = "manifest.json";
 
+/// Where a resolved pack directory came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackSource {
+    /// The copy shipped with the app.
+    Bundled,
+    /// A user-imported copy under Application Support / XDG data.
+    Imported,
+}
+
+/// The pack the host should load.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackResolution {
+    /// Directory name (the version string), not a path.
+    pub name: String,
+    /// Which root it was found in.
+    pub source: PackSource,
+}
+
+/// Newest pack wins, wherever it lives. Equal versions go to the imported
+/// copy.
+///
+/// Not "imported always wins": a pack imported once would then shadow every
+/// future bundled pack, and an app update that ships a better encoder would
+/// quietly do nothing. Name order rather than mtime, and **numeric** so
+/// `…-v1.10` beats `…-v1.9`.
+///
+/// Enumeration of the two roots stays in the host — this is the rule only.
+pub fn resolve_model_pack(bundled: &[String], imported: &[String]) -> Option<PackResolution> {
+    bundled
+        .iter()
+        .map(|name| PackResolution {
+            name: name.clone(),
+            source: PackSource::Bundled,
+        })
+        .chain(imported.iter().map(|name| PackResolution {
+            name: name.clone(),
+            source: PackSource::Imported,
+        }))
+        .max_by(|a, b| match numeric_name_cmp(&a.name, &b.name) {
+            std::cmp::Ordering::Equal => match (a.source, b.source) {
+                (PackSource::Bundled, PackSource::Imported) => std::cmp::Ordering::Less,
+                (PackSource::Imported, PackSource::Bundled) => std::cmp::Ordering::Greater,
+                _ => std::cmp::Ordering::Equal,
+            },
+            other => other,
+        })
+}
+
+/// Apple `.numeric` / `strverscmp`: digit runs compare as numbers, so
+/// `v1.9` < `v1.10`.
+fn numeric_name_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    let ac: Vec<char> = a.chars().collect();
+    let bc: Vec<char> = b.chars().collect();
+    let mut i = 0;
+    let mut j = 0;
+    while i < ac.len() && j < bc.len() {
+        if ac[i].is_ascii_digit() && bc[j].is_ascii_digit() {
+            while i < ac.len() && ac[i] == '0' {
+                i += 1;
+            }
+            while j < bc.len() && bc[j] == '0' {
+                j += 1;
+            }
+            let is = i;
+            let js = j;
+            while i < ac.len() && ac[i].is_ascii_digit() {
+                i += 1;
+            }
+            while j < bc.len() && bc[j].is_ascii_digit() {
+                j += 1;
+            }
+            let ilen = i - is;
+            let jlen = j - js;
+            if ilen != jlen {
+                return ilen.cmp(&jlen);
+            }
+            let a_digits: String = ac[is..i].iter().collect();
+            let b_digits: String = bc[js..j].iter().collect();
+            match a_digits.cmp(&b_digits) {
+                std::cmp::Ordering::Equal => {}
+                other => return other,
+            }
+        } else {
+            match ac[i]
+                .to_ascii_lowercase()
+                .cmp(&bc[j].to_ascii_lowercase())
+            {
+                std::cmp::Ordering::Equal => {
+                    i += 1;
+                    j += 1;
+                }
+                other => return other,
+            }
+        }
+    }
+    ac.len().cmp(&bc.len())
+}
+
 /// A file declared by the manifest, with the hash it must have.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackFile {
@@ -1274,5 +1372,44 @@ mod tests {
     fn a_missing_pack_dir_names_the_file_it_wanted() {
         let err = ModelPack::load("/definitely/not/here").unwrap_err();
         assert!(matches!(err, MlError::PackFileMissing { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn resolve_picks_the_newest_name_and_imported_on_a_tie() {
+        assert!(resolve_model_pack(&[], &[]).is_none());
+        assert_eq!(
+            resolve_model_pack(&["mobileclip-s2-v1".into()], &[])
+                .unwrap()
+                .source,
+            PackSource::Bundled
+        );
+        let newer = resolve_model_pack(
+            &["mobileclip-s2-v1".into()],
+            &["mobileclip-s2-v2".into()],
+        )
+        .unwrap();
+        assert_eq!(newer.name, "mobileclip-s2-v2");
+        assert_eq!(newer.source, PackSource::Imported);
+
+        let bundled_newer = resolve_model_pack(
+            &["mobileclip-s2-v2".into()],
+            &["mobileclip-s2-v1".into()],
+        )
+        .unwrap();
+        assert_eq!(bundled_newer.source, PackSource::Bundled);
+
+        let tie = resolve_model_pack(
+            &["mobileclip-s2-v1".into()],
+            &["mobileclip-s2-v1".into()],
+        )
+        .unwrap();
+        assert_eq!(tie.source, PackSource::Imported);
+
+        let numeric = resolve_model_pack(
+            &[],
+            &["mobileclip-s2-v1.9".into(), "mobileclip-s2-v1.10".into()],
+        )
+        .unwrap();
+        assert_eq!(numeric.name, "mobileclip-s2-v1.10");
     }
 }

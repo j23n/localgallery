@@ -925,26 +925,36 @@ final class GalleryStore {
         photo(at: url) ?? photo(byID: photoID)
     }
 
-    /// Union sidecar tags / regions into the live library rows. A face
-    /// or tagging write changes the `.xmp`, not the image; both light
-    /// and full scans treat an unchanged image as "keep cached tags",
-    /// so without this the person Scan Activity just read never lands
-    /// on the PhotoFile the info sheet uses — even after Reload Library.
+    /// Apply a full sidecar document onto the live rows for these image
+    /// paths. Indexed by path key once so a 32-photo batch is O(library +
+    /// batch), not a walk per path.
     func applyParsedSidecars(paths: [String]) {
         guard !paths.isEmpty else { return }
         var photos = allPhotos
+        var indexByKey: [String: Int] = [:]
+        indexByKey.reserveCapacity(photos.count * 2)
+        for (idx, photo) in photos.enumerated() {
+            for key in Self.pathKeys(for: photo.url) {
+                indexByKey[key] = idx
+            }
+        }
         var changed = false
         for path in paths {
-            let url = CoreScanner.fileURL(path)
-            guard let found = photo(at: url) ?? photo(at: URL(fileURLWithPath: path)),
-                  let idx = photos.firstIndex(where: { $0.id == found.id }) else { continue }
-            let sidecar = URL(fileURLWithPath: path + ".xmp")
-            guard let data = try? Data(contentsOf: sidecar) else { continue }
-            let parsed = parseXmpBytes(bytes: data)
-            let merged = Self.merging(parsed, into: photos[idx])
+            let candidates = [CoreScanner.fileURL(path), URL(fileURLWithPath: path)]
+            let idx = candidates.lazy
+                .flatMap { Self.pathKeys(for: $0) }
+                .compactMap { indexByKey[$0] }
+                .first
+            guard let idx else { continue }
+            let doc = SidecarDocument.read(imagePath: path)
+            var merged = photos[idx]
+            merged.apply(doc)
             if merged.hierarchicalTags == photos[idx].hierarchicalTags,
                merged.faceRegions == photos[idx].faceRegions,
-               merged.countryCode == photos[idx].countryCode {
+               merged.countryCode == photos[idx].countryCode,
+               merged.photoTools == photos[idx].photoTools,
+               merged.sidecarOnDisk == photos[idx].sidecarOnDisk,
+               merged.faceDecisions == photos[idx].faceDecisions {
                 continue
             }
             photos[idx] = merged
@@ -953,31 +963,6 @@ final class GalleryStore {
         if changed {
             apply(.sidecarsMerged(photos: photos))
         }
-    }
-
-    static func merging(_ parsed: SidecarParseRecord, into photo: PhotoFile) -> PhotoFile {
-        var photo = photo
-        var seen = Set(photo.hierarchicalTags.map { $0.fullPath.lowercased() })
-        for raw in parsed.rawTags {
-            if seen.insert(raw.lowercased()).inserted {
-                photo.hierarchicalTags.append(HierarchicalTag(raw: raw))
-            }
-        }
-        if !parsed.faceRegions.isEmpty {
-            photo.faceRegions = parsed.faceRegions.map {
-                FaceRegion(
-                    name: $0.name,
-                    centerX: $0.centerX,
-                    centerY: $0.centerY,
-                    width: $0.width,
-                    height: $0.height
-                )
-            }
-        }
-        if photo.countryCode == nil {
-            photo.countryCode = parsed.countryCode
-        }
-        return photo
     }
 
     /// Library photo for a face crop, or a stand-in from the crop's path so
@@ -1220,12 +1205,6 @@ final class GalleryStore {
 
     func loadEXIF(for photo: PhotoFile) async -> EXIFData? {
         await EXIFService.loadEXIF(for: photo)
-    }
-
-    /// Reads the `photo-tools` custom XMP namespace (§1.2 of xmp-schema.md)
-    /// from embedded XMP and the optional `.xmp` sidecar.
-    func loadPhotoToolsMetadata(for photo: PhotoFile) async -> PhotoToolsMetadata {
-        await EXIFService.loadPhotoToolsMetadata(for: photo)
     }
 
     // MARK: - Full Resolution

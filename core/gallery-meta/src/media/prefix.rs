@@ -3,12 +3,11 @@
 //! [`super::read_image_metadata`] used to `read()` the whole file. Enrichment
 //! runs it eight-wide over the library, and the library contains RAW files:
 //! eight concurrent 100 MB DNGs is 800 MB of transient allocation on a phone,
-//! for two things — an EXIF IFD and an XMP packet — that live in a bounded
-//! prefix of every container this crate can parse.
+//! for EXIF (date, GPS) that lives in a bounded prefix of every container
+//! this crate can parse. Tags, country and faces come from the sidecar.
 //!
-//! So the read is bounded instead. Both consumers (`kamadak-exif` and
-//! [`super::container::extract_xmp`]) walk the container's own structure from
-//! the front, and both stop where pixel data begins; this module finds that
+//! So the read is bounded instead. The EXIF parser walks the container from
+//! the front and stops where pixel data begins; this module finds that
 //! point by walking *headers* and hands back the bytes in front of it.
 //!
 //! # What is deliberately not read

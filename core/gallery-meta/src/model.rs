@@ -176,4 +176,12 @@ impl SidecarView {
         }
         out
     }
+
+    /// Names claimed in [`CoreSentinel::decisions`] that have no MWG box.
+    pub fn named_without_box(&self) -> Vec<String> {
+        crate::regions::named_without_box(
+            self.regions.iter().filter_map(|r| r.name.as_deref()),
+            &self.core.decisions,
+        )
+    }
 }

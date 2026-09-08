@@ -1362,6 +1362,24 @@ fn a_photo_edited_in_place_is_re_tagged_without_a_reset() {
     assert_eq!(f.run().processed, 0);
 }
 
+/// Scan writes sidecars only. A `done` row whose `.xmp` is gone still needs
+/// a tag pass — deleting the file must reopen the row without a queue reset.
+#[test]
+fn a_deleted_sidecar_is_rewritten_without_a_reset() {
+    let f = Fixture::with_files(&["gradient.jpg"]);
+    f.enqueue_all(&["gradient.jpg"]);
+    assert_eq!(f.run().processed, 1);
+    assert_eq!(f.tags("gradient.jpg"), expected_tags()["gradient.jpg"]);
+
+    std::fs::remove_file(f.dir.path().join("gradient.jpg.xmp")).unwrap();
+
+    let summary = f.run();
+    assert_eq!(summary.processed, 1, "a missing sidecar must reopen the row");
+    assert_eq!(summary.sidecars_written, 1);
+    assert_eq!(f.tags("gradient.jpg"), expected_tags()["gradient.jpg"]);
+    assert_eq!(f.run().processed, 0);
+}
+
 /// R6: the embedding cache used to be keyed on `pack_version`, so shipping a
 /// pack that only changed thresholds or label text re-ran inference over the
 /// entire library for vectors it already had.

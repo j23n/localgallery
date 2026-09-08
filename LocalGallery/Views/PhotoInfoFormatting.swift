@@ -55,19 +55,24 @@ enum PhotoInfoFormatting {
         return plain.date(from: raw)
     }
 
-    /// "2 named · 1 unnamed". `scanned` is true when a face pack stamp
-    /// exists so an empty detection still reads as "none", not missing.
+    /// "2 named · 1 unnamed". Zero boxes after a scan reads "no box",
+    /// not "none" — that word was being read as a missing timestamp.
     static func facesSummary(named: Int, unnamed: Int, scanned: Bool) -> String? {
-        if named == 0 && unnamed == 0 { return scanned ? "none" : nil }
+        if named == 0 && unnamed == 0 { return scanned ? "no box" : nil }
         if unnamed == 0 { return named == 1 ? "1 named" : "\(named) named" }
         if named == 0 { return unnamed == 1 ? "1 unnamed" : "\(unnamed) unnamed" }
         return "\(named) named · \(unnamed) unnamed"
     }
 
-    static func sidecarLabel(_ status: SidecarStatus) -> String {
+    /// On-disk `.xmp`, not the provider sidecar cache.
+    static func sidecarOnDiskLabel(_ onDisk: Bool) -> String {
+        onDisk ? "on disk" : "absent"
+    }
+
+    static func sidecarCacheLabel(_ status: SidecarStatus) -> String? {
         switch status {
-        case .absent: return "none"
-        case .cached: return "present"
+        case .absent: return nil
+        case .cached: return "cache present"
         }
     }
 

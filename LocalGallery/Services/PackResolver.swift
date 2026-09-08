@@ -64,17 +64,20 @@ enum PackResolver {
     /// version it is. The comparison is `.numeric` because plain lexicographic
     /// ordering ranks `…-v1.9` above `…-v1.10`.
     nonisolated static func resolve(bundled: [URL], imported: [URL]) -> Resolution? {
-        let all = imported.filter(hasManifest).map { Resolution(directory: $0, source: .imported) }
-            + bundled.filter(hasManifest).map { Resolution(directory: $0, source: .bundled) }
-        return all.max { a, b in
-            switch a.directory.lastPathComponent.compare(
-                b.directory.lastPathComponent, options: [.numeric]
-            ) {
-            case .orderedAscending: return true
-            case .orderedDescending: return false
-            case .orderedSame: return a.source == .bundled && b.source == .imported
-            }
+        let bundledOK = bundled.filter(hasManifest)
+        let importedOK = imported.filter(hasManifest)
+        guard let picked = resolveModelPack(
+            bundled: bundledOK.map(\.lastPathComponent),
+            imported: importedOK.map(\.lastPathComponent)
+        ) else { return nil }
+        let pool = picked.source == .imported ? importedOK : bundledOK
+        guard let directory = pool.first(where: { $0.lastPathComponent == picked.name }) else {
+            return nil
         }
+        return Resolution(
+            directory: directory,
+            source: picked.source == .imported ? .imported : .bundled
+        )
     }
 
     /// A directory with no `manifest.json` is not a pack — an empty

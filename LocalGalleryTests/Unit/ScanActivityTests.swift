@@ -191,6 +191,43 @@ final class ScanActivityTests: XCTestCase {
         XCTAssertEqual(log.entries.first?.summary, "Dog")
     }
 
+    func testAttachDiagnosticsMergesBeforeAndAfterIngest() async {
+        let log = ScanActivityLog()
+        let url = URL(fileURLWithPath: "/tmp/ada.jpg")
+        let id = PhotoFile.stableID(for: url)
+        let diagnostic = FacePhotoDiagnostic(
+            score: 0.91,
+            quality: 0.42,
+            clusterID: 3,
+            assignment: .seeded,
+            label: nil
+        )
+
+        log.attachDiagnostics([url.path: [diagnostic]])
+        log.record(ScanActivityEntry(
+            id: UUID(),
+            photoID: id,
+            url: url,
+            filename: "ada.jpg",
+            at: Date(),
+            phase: .faces,
+            outcome: .written,
+            tags: [],
+            faceNames: []
+        ))
+        XCTAssertEqual(log.entries.first?.diagnostics, [diagnostic])
+
+        let joined = FacePhotoDiagnostic(
+            score: 0.80,
+            quality: 0.30,
+            clusterID: 3,
+            assignment: .joined,
+            label: "Ada"
+        )
+        log.attachDiagnostics(["/tmp/./ada.jpg": [joined]])
+        XCTAssertEqual(log.entries.first?.diagnostics, [joined])
+    }
+
     func testSidecarParseKeepsOnlyThePhaseNamespace() throws {
         let temp = TempDir.make()
         addTeardownBlock { temp.teardown() }

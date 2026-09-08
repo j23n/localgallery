@@ -192,21 +192,24 @@ fn metadata_fixture_still_records_the_known_oddities() {
         "Name-before-Area is the ordering that works"
     );
 
-    // 2. ImageIO re-serialises struct fields alphabetically, so EVERY embedded
-    //    region hits the same off-by-one regardless of how it was written.
+    // 2. Embedded XMP in the JPEG is not read for tags / country / faces.
     for path in [
         "xmp/regions_digikam_order.jpg",
         "xmp/regions_exiftool_order.jpg",
+        "xmp/full_embedded.jpg",
     ] {
         let e = entry(&dump, path);
-        assert_eq!(
-            e.face_regions.first().and_then(|r| r.name.as_deref()),
-            None,
-            "{path}: embedded regions come back with the first one unnamed"
+        assert!(
+            e.face_regions.is_empty(),
+            "{path}: embedded regions must not be read"
+        );
+        assert!(
+            e.hierarchical_tags.is_empty(),
+            "{path}: embedded tags must not be read"
         );
     }
 
-    // 3. Sidecar-vs-embedded precedence.
+    // 3. Sidecar-only tags / country / faces.
     let conflict = entry(&dump, "sidecar/conflict.jpg");
     assert_eq!(
         conflict
@@ -214,13 +217,13 @@ fn metadata_fixture_still_records_the_known_oddities() {
             .iter()
             .map(|t| t.full_path.as_str())
             .collect::<Vec<_>>(),
-        vec!["People/Alice", "Objects/Car", "Scenes/Beach"],
-        "union, embedded first, and the EMBEDDED spelling wins a case conflict"
+        vec!["people/alice", "Scenes/Beach"],
+        "sidecar tags only; embedded People/Alice and Objects/Car are ignored"
     );
     assert_eq!(
         conflict.country_code.as_deref(),
-        Some("IT"),
-        "embedded wins"
+        Some("FR"),
+        "sidecar country, not the embedded IT"
     );
     assert_eq!(
         conflict
@@ -278,16 +281,11 @@ fn metadata_fixture_still_records_the_known_oddities() {
         "a lowercase \"w\" ref does not negate"
     );
 
-    // 7. Only digiKam:TagsList feeds the tag list.
+    // 7. Embedded tag sources are ignored; no sidecar ⇒ no tags.
     let disagree = entry(&dump, "xmp/tag_sources_disagree.jpg");
-    assert_eq!(
-        disagree
-            .hierarchical_tags
-            .iter()
-            .map(|t| t.full_path.as_str())
-            .collect::<Vec<_>>(),
-        vec!["People/Alice"],
-        "lr:hierarchicalSubject and dc:subject are invisible"
+    assert!(
+        disagree.hierarchical_tags.is_empty(),
+        "embedded TagsList / lr:hierarchicalSubject / dc:subject must not be read"
     );
 
     // 8. Video dates: QuickTime only, offsets applied, zone-less read as UTC.

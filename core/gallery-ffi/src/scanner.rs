@@ -745,7 +745,7 @@ pub struct WallClock {
 pub struct ImageMetadataRecord {
     /// EXIF capture date, zone-less.
     pub capture_wall_clock: Option<WallClock>,
-    /// Deduplicated tags, embedded first.
+    /// Sidecar tags, deduplicated.
     pub hierarchical_tags: Vec<ScanTag>,
     /// Uppercase country code.
     pub country_code: Option<String>,
@@ -753,11 +753,11 @@ pub struct ImageMetadataRecord {
     pub gps_latitude: Option<f64>,
     /// Signed longitude.
     pub gps_longitude: Option<f64>,
-    /// Face regions, sidecar-preferred.
+    /// Face regions from the sidecar.
     pub face_regions: Vec<ScanRegion>,
 }
 
-/// The three things a `.xmp` contributes.
+/// The three things a `.xmp` contributes, plus photo-tools stamps.
 #[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
 pub struct SidecarParseRecord {
     /// Raw `digiKam:TagsList` entries, in packet order, undeduplicated.
@@ -766,6 +766,18 @@ pub struct SidecarParseRecord {
     pub country_code: Option<String>,
     /// MWG regions.
     pub face_regions: Vec<ScanRegion>,
+    /// `TaggerVersion`, else `CoreModelPack`.
+    pub tagger_version: Option<String>,
+    /// `TaggedAt`, else `CoreTaggedAt`.
+    pub tagged_at: Option<String>,
+    pub clip_model: Option<String>,
+    pub clip_timestamp: Option<String>,
+    pub face_pack: Option<String>,
+    pub face_tagged_at: Option<String>,
+    /// Raw `CoreFaceDecisions` bag entries.
+    pub face_decisions: Vec<String>,
+    /// People named in decisions who have no MWG box.
+    pub named_without_box: Vec<String>,
 }
 
 /// Read `path` and its `.xmp` sidecar: EXIF date, tags, country, GPS, regions.
@@ -827,11 +839,90 @@ pub fn scanner_video_extensions() -> Vec<String> {
         .collect()
 }
 
+/// One sidecar on disk, cheap-parsed. Tags, regions, and photo-tools stamps.
+#[derive(Debug, Clone, Default, PartialEq, uniffi::Record)]
+pub struct SidecarViewRecord {
+    /// A `.xmp` exists next to the image.
+    pub exists: bool,
+    /// Path that was read, when `exists`.
+    pub sidecar_path: Option<String>,
+    /// `digiKam:TagsList`.
+    pub raw_tags: Vec<String>,
+    /// Uppercase country code.
+    pub country_code: Option<String>,
+    /// MWG regions.
+    pub face_regions: Vec<ScanRegion>,
+    /// `TaggerVersion`, else `CoreModelPack`.
+    pub tagger_version: Option<String>,
+    /// `TaggedAt`, else `CoreTaggedAt`.
+    pub tagged_at: Option<String>,
+    /// `CLIPModel`.
+    pub clip_model: Option<String>,
+    /// `CLIPTimestamp`.
+    pub clip_timestamp: Option<String>,
+    /// `CoreFacePack`.
+    pub face_pack: Option<String>,
+    /// `CoreFaceTaggedAt`.
+    pub face_tagged_at: Option<String>,
+    /// `CoreFaceDecisions` bag entries.
+    pub face_decisions: Vec<String>,
+    /// People named in decisions who have no MWG box.
+    pub named_without_box: Vec<String>,
+}
+
+/// Read `{image}.xmp` (then the Lightroom alt) and project it.
+#[uniffi::export]
+pub fn read_sidecar(image_path: String) -> SidecarViewRecord {
+    let vfs = StdVfs::new();
+    let canonical = gallery_meta::sidecar_path(&image_path);
+    let chosen = if vfs.exists(&canonical) {
+        Some(canonical)
+    } else {
+        gallery_meta::alt_sidecar_path(&image_path).filter(|p| vfs.exists(p))
+    };
+    let Some(path) = chosen else {
+        return SidecarViewRecord::default();
+    };
+    let bytes = match vfs.read(&path) {
+        Ok(b) => b,
+        Err(_) => {
+            return SidecarViewRecord {
+                exists: true,
+                sidecar_path: Some(path),
+                ..SidecarViewRecord::default()
+            };
+        }
+    };
+    sidecar_view_from_parse(&path, &bytes)
+}
+
+fn sidecar_view_from_parse(path: &str, bytes: &[u8]) -> SidecarViewRecord {
+    let parsed = sidecar_parse_from(gallery_meta::media::parse_xmp_bytes(bytes));
+    SidecarViewRecord {
+        exists: true,
+        sidecar_path: Some(path.to_string()),
+        raw_tags: parsed.raw_tags,
+        country_code: parsed.country_code,
+        face_regions: parsed.face_regions,
+        tagger_version: parsed.tagger_version,
+        tagged_at: parsed.tagged_at,
+        clip_model: parsed.clip_model,
+        clip_timestamp: parsed.clip_timestamp,
+        face_pack: parsed.face_pack,
+        face_tagged_at: parsed.face_tagged_at,
+        face_decisions: parsed.face_decisions,
+        named_without_box: parsed.named_without_box,
+    }
+}
+
 /// Parse XMP bytes the caller already holds — the sidecar-sync path, which
 /// fetches `.xmp` contents from a file provider and never touches disk.
 #[uniffi::export]
 pub fn parse_xmp_bytes(bytes: Vec<u8>) -> SidecarParseRecord {
-    let parsed = gallery_meta::media::parse_xmp_bytes(&bytes);
+    sidecar_parse_from(gallery_meta::media::parse_xmp_bytes(&bytes))
+}
+
+fn sidecar_parse_from(parsed: gallery_meta::media::SwiftXmpParse) -> SidecarParseRecord {
     SidecarParseRecord {
         raw_tags: parsed.raw_tags,
         country_code: parsed.country_code,
@@ -846,7 +937,27 @@ pub fn parse_xmp_bytes(bytes: Vec<u8>) -> SidecarParseRecord {
                 height: r.height,
             })
             .collect(),
+        tagger_version: parsed.tagger_version.or(parsed.core_model_pack),
+        tagged_at: parsed.tagged_at.or(parsed.core_tagged_at),
+        clip_model: parsed.clip_model,
+        clip_timestamp: parsed.clip_timestamp,
+        face_pack: parsed.core_face_pack,
+        face_tagged_at: parsed.core_face_tagged_at,
+        face_decisions: parsed.face_decisions,
+        named_without_box: gallery_meta::named_without_box(
+            parsed.face_regions.iter().filter_map(|r| r.name.as_deref()),
+            &parsed.face_decisions,
+        ),
     }
+}
+
+/// People named in `CoreFaceDecisions` who have no matching MWG box.
+#[uniffi::export]
+pub fn named_people_without_box(
+    region_names: Vec<Option<String>>,
+    decisions: Vec<String>,
+) -> Vec<String> {
+    gallery_meta::named_without_box(region_names.into_iter().flatten(), &decisions)
 }
 
 // ---------------------------------------------------------------------------

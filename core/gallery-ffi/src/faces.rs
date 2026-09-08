@@ -46,7 +46,8 @@ use gallery_meta::MetaError;
 use gallery_ml::cache::{FaceKey, FaceThumb};
 use gallery_ml::engine::iso8601_utc_now;
 use gallery_ml::face::{
-    FaceEngine, FaceProgress, FaceRunOptions, FaceRunSummary as CoreFaceRunSummary,
+    FaceAssignmentRecord as CoreFaceAssignmentRecord, FaceEngine, FacePhotoRecord as CoreFacePhotoRecord,
+    FaceProgress, FaceRunOptions, FaceRunSummary as CoreFaceRunSummary,
     ReclusterSummary as CoreReclusterSummary, SidecarWritePlan,
 };
 use gallery_ml::{ClusterState as CoreClusterState, MlError};
@@ -471,6 +472,46 @@ pub struct ClusterSummary {
     pub exemplars: Vec<FaceRef>,
 }
 
+/// One side of a merge-direction decision. Ids and sizes only — no pixels.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FaceMergeCandidate {
+    /// Cluster id.
+    pub id: i64,
+    /// Person name when the cluster is named.
+    pub name: Option<String>,
+    /// Member count.
+    pub size: u32,
+}
+
+/// Which of two clusters survives a merge.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FaceMergeDecision {
+    /// Keeps its id and name.
+    pub survivor_id: i64,
+    /// Disappears.
+    pub absorbed_id: i64,
+}
+
+/// Named beats unnamed, then size, then the lower id. `None` for a self-merge.
+#[uniffi::export]
+pub fn face_merge_direction(
+    a: FaceMergeCandidate,
+    b: FaceMergeCandidate,
+) -> Option<FaceMergeDecision> {
+    gallery_ml::cluster_merge_direction(
+        a.id,
+        a.name.as_deref(),
+        a.size,
+        b.id,
+        b.name.as_deref(),
+        b.size,
+    )
+    .map(|d| FaceMergeDecision {
+        survivor_id: d.survivor_id,
+        absorbed_id: d.absorbed_id,
+    })
+}
+
 /// What a naming operation did to the files on disk.
 ///
 /// Photo paths throughout, not sidecar paths — the app indexes by photo. Only
@@ -556,6 +597,66 @@ impl From<CoreReclusterSummary> for ReclusterSummary {
             clusters_after: s.clusters_after as u32,
             faces: s.faces as u32,
             proposals: s.proposals as u32,
+        }
+    }
+}
+
+/// How this run placed a face into a cluster.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FaceAssignKind {
+    /// Joined an existing cluster.
+    Joined,
+    /// Created a new cluster.
+    Seeded,
+}
+
+/// One detection as the last run assigned it. SQLite, not the sidecar.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct FaceAssignmentRecord {
+    /// Detector confidence.
+    pub score: f32,
+    /// Composite quality (score × size × frontality).
+    pub quality: f32,
+    /// Cluster after the assign pass, if any.
+    pub cluster_id: Option<i64>,
+    /// `None` when the face was already clustered before this run.
+    pub assignment: Option<FaceAssignKind>,
+    /// Person name when the cluster is named.
+    pub label: Option<String>,
+}
+
+impl From<CoreFaceAssignmentRecord> for FaceAssignmentRecord {
+    fn from(f: CoreFaceAssignmentRecord) -> Self {
+        FaceAssignmentRecord {
+            score: f.score,
+            quality: f.quality,
+            cluster_id: f.cluster_id,
+            assignment: f.seeded.map(|seeded| {
+                if seeded {
+                    FaceAssignKind::Seeded
+                } else {
+                    FaceAssignKind::Joined
+                }
+            }),
+            label: f.label,
+        }
+    }
+}
+
+/// Per-photo assign result of the last finished run.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct FacePhotoRecord {
+    /// Absolute path the queue row used.
+    pub path: String,
+    /// Detections in detection order.
+    pub faces: Vec<FaceAssignmentRecord>,
+}
+
+impl From<CoreFacePhotoRecord> for FacePhotoRecord {
+    fn from(p: CoreFacePhotoRecord) -> Self {
+        FacePhotoRecord {
+            path: p.path,
+            faces: p.faces.into_iter().map(FaceAssignmentRecord::from).collect(),
         }
     }
 }
@@ -1228,6 +1329,17 @@ impl FaceSession {
     pub fn recluster(&self) -> Result<ReclusterSummary, FaceError> {
         let _guard = self.mutating()?;
         Ok(self.engine.recluster()?.into())
+    }
+
+    /// Per-photo detections of the last finished run: score, quality,
+    /// cluster, Joined vs Seeded. Consumes the journal. Not a sidecar write
+    /// and not a listener callback — pull this after `onFinished`.
+    pub fn take_last_run_photos(&self) -> Vec<FacePhotoRecord> {
+        self.engine
+            .take_last_run_photos()
+            .into_iter()
+            .map(FacePhotoRecord::from)
+            .collect()
     }
 }
 

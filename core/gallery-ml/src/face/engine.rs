@@ -111,6 +111,31 @@ impl FaceProgress for NoFaceProgress {
     fn on_finished(&self, _summary: &FaceRunSummary) {}
 }
 
+/// One face as the last run assigned it. Ephemeral journal — not a sidecar.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FaceAssignmentRecord {
+    /// Detector confidence.
+    pub score: f32,
+    /// Composite quality (score × size × frontality).
+    pub quality: f32,
+    /// Cluster this face belongs to after the assign pass, if any.
+    pub cluster_id: Option<i64>,
+    /// `Some(true)` seeded a cluster this run; `Some(false)` joined one;
+    /// `None` was already clustered before this run.
+    pub seeded: Option<bool>,
+    /// Person name when the cluster is named.
+    pub label: Option<String>,
+}
+
+/// Per-photo assign result of one [`FaceEngine::run`].
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FacePhotoRecord {
+    /// Absolute path the queue row used.
+    pub path: String,
+    /// Detections in `face_idx` order.
+    pub faces: Vec<FaceAssignmentRecord>,
+}
+
 /// What one [`FaceEngine::run`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FaceRunSummary {
@@ -209,6 +234,8 @@ pub struct FaceEngine {
     heic_decoder: Option<Arc<dyn crate::HostHeicDecoder>>,
     /// Set by [`Self::reset_queue`]; consumed by the next [`Self::run`].
     force_next: AtomicBool,
+    /// Per-photo assign result of the last finished run. Ephemeral journal.
+    last_run_photos: Mutex<Vec<FacePhotoRecord>>,
 }
 
 impl std::fmt::Debug for FaceEngine {
@@ -311,6 +338,7 @@ impl FaceEngine {
             clustering: faces.clustering,
             heic_decoder: None,
             force_next: AtomicBool::new(false),
+            last_run_photos: Mutex::new(Vec::new()),
         })
     }
 
@@ -444,11 +472,13 @@ impl FaceEngine {
         opts: &FaceRunOptions,
         partial: &mut FaceRunSummary,
     ) -> MlResult<FaceRunSummary> {
+        *lock(&self.last_run_photos) = Vec::new();
         // Between-runs housekeeping, mirroring the tagging engine's.
         self.cache.face_reclaim_abandoned()?;
         self.cache
             .face_reopen_skipped_for_decoder(crate::preprocess::DECODER_VERSION)?;
         self.restat_done_rows()?;
+        self.reopen_missing_sidecars()?;
 
         let root_prefix = opts.root_prefix.as_deref().map(normalize_root_prefix);
         let mut items = self
@@ -468,6 +498,7 @@ impl FaceEngine {
             done: AtomicUsize::new(0),
             totals: Mutex::new(FaceRunSummary::default()),
             reporter: Mutex::new(Reporter::new()),
+            scanned_photos: Mutex::new(Vec::new()),
         };
 
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -519,6 +550,7 @@ impl FaceEngine {
         summary.clusters_created = created;
         summary.faces_assigned = assigned;
         summary.faces_auto_tagged = assignment.faces_auto_tagged;
+        let _ = self.record_last_run(&shared.take_scanned(), &assignment);
 
         // Auto-tagging comes before the (expensive, advisory) proposal refresh
         // so that a cancelled-at-the-last-moment run has still published what
@@ -588,6 +620,15 @@ impl FaceEngine {
                 continue;
             };
             if stat.size != row.size || stat.modified_unix != row.modified_unix {
+                self.cache.face_mark_stale(&row.path)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn reopen_missing_sidecars(&self) -> MlResult<()> {
+        for row in self.cache.face_done_rows_with_stat()? {
+            if !gallery_meta::sidecar_exists(self.vfs.as_ref(), &row.path) {
                 self.cache.face_mark_stale(&row.path)?;
             }
         }
@@ -680,6 +721,7 @@ impl FaceEngine {
         }
         let written = self.write_scan_sidecar(path, &hash, tagged_at);
         Ok(Some(PhotoFaces {
+            hash,
             face_count,
             cache_hit,
             written,
@@ -797,6 +839,65 @@ impl FaceEngine {
         Ok(Some(out))
     }
 
+    /// Build the ephemeral last-run journal from this run's photos and the
+    /// assign pass. Failures stay off the summary — a missing cache row must
+    /// not fail a run that already wrote faces.
+    fn record_last_run(
+        &self,
+        scanned: &[(String, [u8; 32])],
+        assignment: &AssignOutcome,
+    ) -> MlResult<()> {
+        let placements: std::collections::HashMap<([u8; 32], u32), (i64, bool)> = assignment
+            .placements
+            .iter()
+            .copied()
+            .map(|(key, id, seeded)| (key, (id, seeded)))
+            .collect();
+        let names: std::collections::HashMap<i64, Option<String>> = self
+            .cache
+            .clusters()?
+            .into_iter()
+            .map(|c| (c.id, c.person_name))
+            .collect();
+        let mut records = Vec::with_capacity(scanned.len());
+        for (path, hash) in scanned {
+            let faces = self.cache.faces_for_hash(hash)?;
+            let memberships: std::collections::HashMap<u32, i64> = self
+                .cache
+                .cluster_ids_for_hash(hash)?
+                .into_iter()
+                .collect();
+            let mut rec_faces = Vec::with_capacity(faces.len());
+            for face in faces {
+                let (cluster_id, seeded) =
+                    if let Some(&(id, seeded)) = placements.get(&(face.content_hash, face.face_idx))
+                    {
+                        (Some(id), Some(seeded))
+                    } else {
+                        (memberships.get(&face.face_idx).copied(), None)
+                    };
+                rec_faces.push(FaceAssignmentRecord {
+                    score: face.score,
+                    quality: face.quality,
+                    cluster_id,
+                    seeded,
+                    label: cluster_id.and_then(|id| names.get(&id).cloned().flatten()),
+                });
+            }
+            records.push(FacePhotoRecord {
+                path: path.clone(),
+                faces: rec_faces,
+            });
+        }
+        *lock(&self.last_run_photos) = records;
+        Ok(())
+    }
+
+    /// Consume the last run's per-photo assign journal.
+    pub fn take_last_run_photos(&self) -> Vec<FacePhotoRecord> {
+        std::mem::take(&mut *lock(&self.last_run_photos))
+    }
+
     /// Place every face that no cluster claims, in a fixed order.
     fn assign_new_faces(&self) -> MlResult<AssignOutcome> {
         let mut outcome = AssignOutcome::default();
@@ -850,6 +951,9 @@ impl FaceEngine {
                         }
                     }
                     outcome.assigned += 1;
+                    outcome
+                        .placements
+                        .push(((face.content_hash, face.face_idx), id, false));
                 }
                 Assignment::Seed => {
                     let id = self.cache.create_cluster(&face.embedding)?;
@@ -869,6 +973,9 @@ impl FaceEngine {
                     });
                     outcome.created += 1;
                     outcome.assigned += 1;
+                    outcome
+                        .placements
+                        .push(((face.content_hash, face.face_idx), id, true));
                 }
             }
         }
@@ -962,6 +1069,8 @@ struct AssignOutcome {
     /// Content hashes whose photos the auto-tag pass should write, sorted and
     /// deduplicated so a photo with three newly-matched faces is one write.
     auto_hashes: Vec<[u8; 32]>,
+    /// Faces this pass placed: `((hash, idx), cluster_id, seeded)`.
+    placements: Vec<(([u8; 32], u32), i64, bool)>,
 }
 
 /// A cluster's unnormalized member sum plus its member count.
@@ -1020,6 +1129,7 @@ fn normalize_sum(sum: &[f64]) -> Option<Vec<f32>> {
 }
 
 struct PhotoFaces {
+    hash: [u8; 32],
     face_count: usize,
     cache_hit: bool,
     written: bool,
@@ -1039,6 +1149,10 @@ struct Shared {
     done: AtomicUsize,
     totals: Mutex<FaceRunSummary>,
     reporter: Mutex<Reporter>,
+    /// Every photo this run carried to `done`, with the content hash faces
+    /// were filed under. Separate from the reporter so a progress flush
+    /// cannot drop the last-run journal.
+    scanned_photos: Mutex<Vec<(String, [u8; 32])>>,
 }
 
 impl Shared {
@@ -1064,6 +1178,7 @@ impl Shared {
                         reporter.written.push(item.path.clone());
                     }
                 }
+                lock(&self.scanned_photos).push((item.path.clone(), result.hash));
                 true
             }
             Outcome::Skipped => {
@@ -1110,6 +1225,10 @@ impl Shared {
 
     fn take_totals(&self) -> FaceRunSummary {
         *lock(&self.totals)
+    }
+
+    fn take_scanned(&self) -> Vec<(String, [u8; 32])> {
+        std::mem::take(&mut *lock(&self.scanned_photos))
     }
 }
 

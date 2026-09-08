@@ -59,10 +59,13 @@
 //! and if the file was rotated since they were written the assertion would be
 //! wrong.
 
+use std::collections::BTreeSet;
+
 use crate::edit::{self, NodePath};
 use crate::model::FaceRegion;
 use crate::read::region_from_li;
 use crate::schema::*;
+use crate::tags::nfc_lower;
 use crate::xml::dom::Attr;
 use crate::xml::{Document, Element, Node};
 
@@ -323,6 +326,35 @@ pub fn parse_decision(entry: &str) -> Option<FaceDecision> {
         area,
         name: name.to_string(),
     })
+}
+
+/// People named in `CoreFaceDecisions` who have no MWG box on the public list.
+///
+/// A below-quality named face still writes the keyword (and a decision) and
+/// never a region. The library row has to surface that name or the People
+/// rail and the info panel disagree with the sidecar.
+pub fn named_without_box<S: AsRef<str>>(
+    region_names: impl IntoIterator<Item = S>,
+    decisions: &[String],
+) -> Vec<String> {
+    let boxed: BTreeSet<String> = region_names
+        .into_iter()
+        .map(|n| nfc_lower(n.as_ref()))
+        .filter(|s| !s.is_empty())
+        .collect();
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for raw in decisions {
+        let Some(FaceDecision::Named { name, .. }) = parse_decision(raw) else {
+            continue;
+        };
+        let key = nfc_lower(&name);
+        if boxed.contains(&key) || !seen.insert(key) {
+            continue;
+        }
+        out.push(name);
+    }
+    out
 }
 
 /// Bind claims to regions **one to one**, and say which claim owns each region.
@@ -653,6 +685,19 @@ mod tests {
     fn degenerate_pixel_boxes_are_refused() {
         assert!(Area::from_pixel_box([0.0, 0.0, 10.0, 10.0], 0.0, 100.0).is_none());
         assert!(Area::from_pixel_box([10.0, 10.0, 10.0, 10.0], 100.0, 100.0).is_none());
+    }
+
+    #[test]
+    fn named_without_box_skips_people_who_already_have_a_region() {
+        let names = named_without_box(
+            ["Ada", "Bob"],
+            &[
+                "0.4,0.35,0.12,0.16 named Ada".into(),
+                "0.2,0.3,0.1,0.1 named Cara".into(),
+                "0.1,0.1,0.1,0.1 ignored".into(),
+            ],
+        );
+        assert_eq!(names, vec!["Cara"]);
     }
 
     #[test]

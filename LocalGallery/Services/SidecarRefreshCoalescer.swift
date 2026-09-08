@@ -6,8 +6,11 @@ import Foundation
 /// Both core-owned writers need this and they need it identically, so it lives
 /// here rather than twice: `TaggingService` (a 20k-photo tagging run reports
 /// every 32 photos) and `FaceService` (per-photo stamps during a scan, the
-/// auto-tag pass, plus every naming action the user takes). Places writes
-/// go through the same coalescer via `LibraryAnalysis.onPlaceWritten`.
+/// auto-tag pass, plus every naming action the user takes). Places does
+/// not `note()` per write: that started a light rescan on the first
+/// sidecar (~7 s) and the geocode loop then yielded the main actor to it
+/// after every photo. Places applies sidecars at phase end; the run's
+/// final `onSidecarsWritten` rescan publishes them.
 ///
 /// Two rules, and the second is the one that is easy to get wrong:
 ///

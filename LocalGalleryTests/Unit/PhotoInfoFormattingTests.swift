@@ -39,15 +39,17 @@ final class PhotoInfoFormattingTests: XCTestCase {
 
     func testFacesSummary() {
         XCTAssertNil(PhotoInfoFormatting.facesSummary(named: 0, unnamed: 0, scanned: false))
-        XCTAssertEqual(PhotoInfoFormatting.facesSummary(named: 0, unnamed: 0, scanned: true), "none")
+        XCTAssertEqual(PhotoInfoFormatting.facesSummary(named: 0, unnamed: 0, scanned: true), "no box")
         XCTAssertEqual(PhotoInfoFormatting.facesSummary(named: 1, unnamed: 0, scanned: true), "1 named")
         XCTAssertEqual(PhotoInfoFormatting.facesSummary(named: 2, unnamed: 1, scanned: true), "2 named · 1 unnamed")
         XCTAssertEqual(PhotoInfoFormatting.facesSummary(named: 0, unnamed: 1, scanned: true), "1 unnamed")
     }
 
     func testSidecarAndDateSourceLabels() {
-        XCTAssertEqual(PhotoInfoFormatting.sidecarLabel(.absent), "none")
-        XCTAssertEqual(PhotoInfoFormatting.sidecarLabel(.cached(.init())), "present")
+        XCTAssertEqual(PhotoInfoFormatting.sidecarOnDiskLabel(false), "absent")
+        XCTAssertEqual(PhotoInfoFormatting.sidecarOnDiskLabel(true), "on disk")
+        XCTAssertNil(PhotoInfoFormatting.sidecarCacheLabel(.absent))
+        XCTAssertEqual(PhotoInfoFormatting.sidecarCacheLabel(.cached(.init())), "cache present")
         XCTAssertEqual(PhotoInfoFormatting.dateSourceLabel(hasDate: true, fromMetadata: true), "from EXIF")
         XCTAssertEqual(PhotoInfoFormatting.dateSourceLabel(hasDate: true, fromMetadata: false), "from filesystem")
         XCTAssertNil(PhotoInfoFormatting.dateSourceLabel(hasDate: false, fromMetadata: false))

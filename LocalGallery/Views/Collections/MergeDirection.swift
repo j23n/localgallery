@@ -3,12 +3,8 @@ import Foundation
 /// Which of two face groups survives a merge, and what to tell the user about
 /// it.
 ///
-/// The core's `merge(into:from:)` is directional and deliberately carries no
-/// policy: "which one should win" is a presentation question. It is answered
-/// here, once, because every entry point — the suggested-merge select screen
-/// and naming a group with a name that already exists — has to answer it the
-/// same way or the same pair of groups would merge differently depending on
-/// where the user tapped.
+/// The core's `merge(into:from:)` is directional; *which* id wins is
+/// `faceMergeDirection` in the core, so every UI answers it the same way.
 ///
 /// The rule, in order:
 ///
@@ -36,20 +32,13 @@ struct MergeDirection: Equatable {
     /// Nil when the two are the same group — the core refuses that, and a
     /// button that cannot work should not be drawn.
     init?(_ a: FaceService.Cluster, _ b: FaceService.Cluster) {
-        guard a.id != b.id else { return nil }
-        switch (a.name, b.name) {
-        case (.some, .none):
-            self.init(survivor: a, absorbed: b)
-        case (.none, .some):
-            self.init(survivor: b, absorbed: a)
-        default:
-            // Both named or neither: size decides, id breaks the tie.
-            if (a.size, b.id) > (b.size, a.id) {
-                self.init(survivor: a, absorbed: b)
-            } else {
-                self.init(survivor: b, absorbed: a)
-            }
-        }
+        guard let decided = faceMergeDirection(
+            a: FaceMergeCandidate(id: a.id, name: a.name, size: UInt32(clamping: a.size)),
+            b: FaceMergeCandidate(id: b.id, name: b.name, size: UInt32(clamping: b.size))
+        ) else { return nil }
+        let survivor = decided.survivorId == a.id ? a : b
+        let absorbed = decided.absorbedId == a.id ? a : b
+        self.init(survivor: survivor, absorbed: absorbed)
     }
 
     /// The name this merge takes back, when there is one. Only a *second*,

@@ -1,9 +1,10 @@
 import Foundation
 import ImageIO
 
-/// Lazy reader for EXIF and the `photo-tools` custom XMP namespace. Pure
-/// stateless helper — no caches, no observed state. Calls run on detached
-/// tasks so the heavy CGImageSource read stays off the main actor.
+/// Lazy reader for camera EXIF (aperture, ISO, lens, capture date, GPS).
+/// Tags, faces and photo-tools stamps live on the sidecar —
+/// `SidecarDocument`. Pure stateless helper. Calls run on detached tasks
+/// so the CGImageSource read stays off the main actor.
 enum EXIFService {
     /// EXIF `"yyyy:MM:dd HH:mm:ss"` parser, for the info panel's *displayed*
     /// capture date.
@@ -32,78 +33,6 @@ enum EXIFService {
     static func loadEXIF(for photo: PhotoFile) async -> EXIFData? {
         // `readEXIF` only throws CancellationError (the cooperative checks).
         try? await readEXIF(url: photo.url)
-    }
-
-    /// Reads the `photo-tools` custom XMP namespace (§1.2 of xmp-schema.md)
-    /// from embedded XMP and the optional `.xmp` sidecar.
-    ///
-    /// Nonisolated async, so the body already runs on the global executor —
-    /// off whatever actor the caller is on — with structured cancellation
-    /// intact. No `Task.detached` needed.
-    static func loadPhotoToolsMetadata(for photo: PhotoFile) async -> PhotoToolsMetadata {
-        readPhotoToolsMetadata(url: photo.url)
-    }
-
-    private static func readPhotoToolsMetadata(url: URL) -> PhotoToolsMetadata {
-        var meta = PhotoToolsMetadata()
-
-        // Embedded XMP — tag names come back without namespace prefix.
-        let options: [CFString: Any] = [kCGImageSourceShouldCache: false]
-        if let source = CGImageSourceCreateWithURL(url as CFURL, options as CFDictionary),
-           let xmp = CGImageSourceCopyMetadataAtIndex(source, 0, nil) {
-            let tags = CGImageMetadataCopyTags(xmp) as? [CGImageMetadataTag] ?? []
-            for tag in tags {
-                let name = CGImageMetadataTagCopyName(tag) as String? ?? ""
-                guard let value = CGImageMetadataTagCopyValue(tag) as? String,
-                      !value.isEmpty else { continue }
-                switch name {
-                case "TaggerVersion":
-                    meta.taggerVersion = value
-                case "CoreModelPack":
-                    meta.taggerVersion = meta.taggerVersion ?? value
-                case "TaggedAt":
-                    meta.taggedAt = value
-                case "CoreTaggedAt":
-                    meta.taggedAt = meta.taggedAt ?? value
-                case "CLIPModel":     meta.clipModel = meta.clipModel ?? value
-                case "CLIPTimestamp": meta.clipTimestamp = meta.clipTimestamp ?? value
-                case "CoreFacePack":
-                    meta.facePack = meta.facePack ?? value
-                case "CoreFaceTaggedAt":
-                    meta.faceTaggedAt = meta.faceTaggedAt ?? value
-                default: break
-                }
-            }
-        }
-
-        // Sidecar — simple tag extraction for scalar fields.
-        let xmpURL = url.appendingPathExtension("xmp")
-        if let data = try? Data(contentsOf: xmpURL),
-           let xml = String(data: data, encoding: .utf8) {
-            func scalar(_ localName: String) -> String? {
-                for prefix in ["photo-tools:\(localName)", "phototools:\(localName)"] {
-                    if let s = xml.range(of: "<\(prefix)>"),
-                       let e = xml.range(of: "</\(prefix)>", range: s.upperBound..<xml.endIndex) {
-                        let v = xml[s.upperBound..<e.lowerBound]
-                            .trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !v.isEmpty { return v }
-                    }
-                }
-                return nil
-            }
-            meta.taggerVersion = meta.taggerVersion
-                ?? scalar("TaggerVersion")
-                ?? scalar("CoreModelPack")
-            meta.taggedAt = meta.taggedAt
-                ?? scalar("TaggedAt")
-                ?? scalar("CoreTaggedAt")
-            meta.clipModel = meta.clipModel ?? scalar("CLIPModel")
-            meta.clipTimestamp = meta.clipTimestamp ?? scalar("CLIPTimestamp")
-            meta.facePack = meta.facePack ?? scalar("CoreFacePack")
-            meta.faceTaggedAt = meta.faceTaggedAt ?? scalar("CoreFaceTaggedAt")
-        }
-
-        return meta
     }
 
     private static func readEXIF(url: URL) async throws -> EXIFData? {

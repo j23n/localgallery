@@ -357,6 +357,9 @@ impl TaggingEngine {
             .reopen_skipped_for_decoder(crate::preprocess::DECODER_VERSION)?;
         // 3. Rows whose file changed in place since we tagged it.
         self.restat_done_rows()?;
+        // 4. Done rows whose sidecar is gone — Scan writes sidecars only,
+        //    so a missing file means this photo still needs a tag pass.
+        self.reopen_missing_sidecars()?;
 
         let root_prefix = opts.root_prefix.as_deref().map(normalize_root_prefix);
         let mut items = self
@@ -456,6 +459,15 @@ impl TaggingEngine {
                 continue;
             };
             if stat.size != row.size || stat.modified_unix != row.modified_unix {
+                self.cache.mark_stale(&row.path)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn reopen_missing_sidecars(&self) -> MlResult<()> {
+        for row in self.cache.done_rows_with_stat()? {
+            if !gallery_meta::sidecar_exists(self.vfs.as_ref(), &row.path) {
                 self.cache.mark_stale(&row.path)?;
             }
         }
@@ -601,7 +613,7 @@ impl TaggingEngine {
     }
 
     fn sidecar_view(&self, path: &str) -> Option<gallery_meta::SidecarView> {
-        let bytes = self.vfs.read(&gallery_meta::sidecar_path(path)).ok()?;
+        let bytes = gallery_meta::read_sidecar_bytes(self.vfs.as_ref(), path)?;
         gallery_meta::read_view(&bytes).ok()
     }
 

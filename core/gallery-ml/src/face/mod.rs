@@ -61,6 +61,7 @@ pub mod align;
 pub mod cluster;
 pub mod detect;
 pub mod engine;
+pub mod merge_policy;
 pub mod naming;
 /// REMOVE AFTER: one-shot keyword backfill. Delete this line with the file.
 pub mod named_keyword_resync;
@@ -74,7 +75,9 @@ pub use cluster::{
 };
 pub use detect::{Detection, FaceDetector};
 pub use engine::{
-    FaceEngine, FaceProgress, FaceRunOptions, FaceRunSummary, NoFaceProgress, ReclusterSummary,
+    FaceAssignmentRecord, FaceEngine, FacePhotoRecord, FaceProgress, FaceRunOptions,
+    FaceRunSummary, NoFaceProgress, ReclusterSummary,
 };
+pub use merge_policy::{cluster_merge_direction, ClusterMerge};
 pub use naming::{FailedWrite, SidecarWritePlan, SplitOutcome, SyncScope, SIDECAR_RETRIES};
 pub use quality::quality;

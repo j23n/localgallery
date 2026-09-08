@@ -92,46 +92,39 @@ final class MetadataConformanceTests: XCTestCase {
         ],
 
         // --- Embedded XMP ---------------------------------------------------
-        "xmp/tagslist.jpg": ["Embedded digiKam:TagsList is read through CGImageMetadataCopyTags; rdf:Seq members arrive as nested CGImageMetadataTags, not strings."],
+        "xmp/tagslist.jpg": ["Embedded digiKam:TagsList is ignored. No sidecar ⇒ no tags."],
         "xmp/tag_sources_disagree.jpg": [
-            "LANDMINE: only digiKam:TagsList is read. lr:hierarchicalSubject and dc:subject are invisible to the app even when they disagree.",
-            "The tag match is on the LEAF NAME \"TagsList\", so any namespace declaring a TagsList would also be picked up.",
+            "Embedded TagsList / lr:hierarchicalSubject / dc:subject are ignored. No sidecar ⇒ no tags.",
         ],
-        "xmp/country_code.jpg": ["CountryCode is uppercased on read (\"it\" → \"IT\")."],
+        "xmp/country_code.jpg": ["CountryCode in the image is ignored. No sidecar ⇒ no country."],
         "xmp/country_code_namespace_conflict.jpg": [
-            "LANDMINE: CountryCode is matched by LEAF NAME only, so IPTC's Iptc4xmpCore:CountryCode competes with photo-tools:CountryCode.",
-            "First tag enumerated wins (`countryCode == nil` guard). The order comes from ImageIO's XMP walk, not from the packet's byte order.",
+            "Embedded CountryCode is ignored. No sidecar ⇒ no country.",
         ],
         "xmp/regions_digikam_order.jpg": [
-            "Embedded regions are recovered by re-serialising the packet with CGImageMetadataCreateXMPData and running the same string parser as the sidecar path.",
-            "LANDMINE, CONFIRMED: ImageIO re-serialises struct fields ALPHABETICALLY, so Area always lands before Name — no matter how the packet was written.",
-            "That means EVERY embedded MWG region in this app hits the backwards-Name off-by-one described on regions/exiftool_order.jpg. This file was written in digiKam order (Name first) and still comes back mis-named.",
-            "Consequence for the port: embedded regions are currently shifted by one and the first is unnamed. The sidecar path is the only one that gets names right.",
+            "Embedded MWG regions are not read. Face boxes come from the sidecar.",
         ],
         "xmp/regions_exiftool_order.jpg": [
-            "Same regions as regions_digikam_order but written Area-before-Name. The output is IDENTICAL — proof that the input packet's element order is erased by ImageIO's re-serialisation.",
+            "Embedded MWG regions are not read. Face boxes come from the sidecar.",
         ],
         "xmp/full_embedded.jpg": [
-            "Tags + country + regions + EXIF date in one file, no sidecar.",
-            "The single embedded region comes back with name = nil for the reason above, even though the packet names it \"Alice\".",
+            "Tags, country and regions in the JPEG are ignored. EXIF date still comes from the image.",
+            "Scan writes a sidecar when this photo is tagged / faced / geocoded.",
         ],
 
         // --- Sidecar merge --------------------------------------------------
         "sidecar/only.jpg": ["No embedded metadata: the sidecar supplies tags, country and regions."],
         "sidecar/conflict.jpg": [
-            "The precedence table, all in one file:",
-            "tags = UNION, embedded first; the case-insensitive dedup is first-wins, so the EMBEDDED spelling of a conflicting path survives (\"People/Alice\", not the sidecar's \"people/alice\").",
-            "countryCode = EMBEDDED wins (IT, not FR).",
-            "faceRegions = SIDECAR wins outright when non-empty — the embedded region is discarded, not merged.",
+            "Tags, country and face regions come from the sidecar only.",
+            "Embedded XMP in the JPEG is ignored. The sidecar spelling (\"people/alice\") is what survives.",
+            "Country is FR from the sidecar, not IT from the image.",
         ],
         "sidecar/no_regions.jpg": [
-            "A sidecar with no regions leaves the embedded regions in place (the swap is guarded on non-empty).",
-            "The surviving embedded region is unnamed — see xmp/regions_digikam_order.jpg for why.",
+            "A sidecar with no MWG regions means the photo has no face boxes, even if the JPEG has embedded regions.",
         ],
         "sidecar/tagslist_bag.jpg": ["rdf:Bag works exactly like rdf:Seq: the parser only scans for `<rdf:li>` between the TagsList open and close tags."],
         "sidecar/truncated_tagslist.jpg": ["No `</digiKam:TagsList>` means the whole block is skipped — a truncated sidecar silently yields zero tags rather than a partial list."],
         "sidecar/garbage.jpg": ["A non-XML sidecar parses to nothing; there is no error surface, the photo just looks untagged."],
-        "sidecar/country_gap.jpg": ["Sidecar fills the country only when the embedded packet has none."],
+        "sidecar/country_gap.jpg": ["Country comes from the sidecar."],
         "sidecar/date_and_gps_ignored.jpg": [
             "LANDMINE: the sidecar parser reads exactly three things — digiKam:TagsList, photo-tools:CountryCode, MWG regions.",
             "exif:DateTimeOriginal and exif:GPS* in a sidecar are ignored entirely; dateTaken and GPS stay nil.",
@@ -171,7 +164,7 @@ final class MetadataConformanceTests: XCTestCase {
 
         // --- Containers -----------------------------------------------------
         "containers/plain.png": ["PNG with no metadata: everything nil/empty."],
-        "containers/png_with_xmp.png": ["XMP in a PNG iTXt chunk is read exactly like XMP in a JPEG APP1."],
+        "containers/png_with_xmp.png": ["XMP in a PNG iTXt chunk is ignored. No sidecar ⇒ no tags or country."],
         "containers/zero_byte.jpg": [
             "A zero-byte file yields no CGImageSource properties — but the sidecar is still read, so tags survive.",
             "The sidecar read is unconditional; it does not depend on the image opening.",
@@ -184,7 +177,7 @@ final class MetadataConformanceTests: XCTestCase {
         ],
         "containers/heif_xmp.heic": [
             "HEIC whose XMP packet is an ITEM in the ISO-BMFF `meta` box, located through `iinf`/`iloc` — not a marker segment like JPEG's APP1 or PNG's iTXt.",
-            "Before Phase 6 this file read as untagged: the container walk did not exist and `extract_xmp` fell through to None.",
+            "Embedded XMP tags and country are ignored. No sidecar ⇒ none.",
             "The fixture carries no pixels. The metadata reader never decodes, and a real HEVC payload would cost more than the whole 2 MB fixture budget.",
         ],
         "containers/heif_exif.heic": [
@@ -192,11 +185,12 @@ final class MetadataConformanceTests: XCTestCase {
         ],
         "containers/heif_both.heic": [
             "Exif item first in `mdat`, XMP item second. Only `iloc` says where each starts, so a reader that assumed the packet was at the front of `mdat` would hand the TIFF block to the XMP parser.",
-            "Both halves of a HEIC read at once: the date comes from kamadak-exif's own item walk, the tags and country from the core's.",
+            "EXIF date still comes from the image. Embedded XMP tags and country are ignored — no sidecar ⇒ none.",
         ],
         "containers/heif_mif1_brand.heic": [
             "Identical content to heif_xmp.heic, written with `mif1` as the MAJOR brand and `heic` only in the compatible list — how libheif and several Android encoders write the same file.",
             "The brand check consults both, so which one an encoder picks is not something the reader depends on.",
+            "Embedded XMP is ignored. No sidecar ⇒ no tags or country.",
         ],
 
         // --- Filenames ------------------------------------------------------

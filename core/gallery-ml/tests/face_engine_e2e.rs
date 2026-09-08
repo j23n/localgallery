@@ -333,6 +333,23 @@ fn a_photo_edited_in_place_is_re_detected_without_a_reset() {
     assert_eq!(f.run().processed, 0);
 }
 
+/// Scan writes sidecars only. A `done` row whose `.xmp` is gone still needs
+/// a face pass — deleting the file must reopen the row without a queue reset.
+#[test]
+fn a_deleted_sidecar_is_rewritten_without_a_reset() {
+    let f = Fixture::with_files(&[BRIGHT]);
+    f.enqueue_all(&[BRIGHT]);
+    assert!(f.run().processed >= 1);
+    let sidecar = f.dir.path().join(format!("{BRIGHT}.xmp"));
+    assert!(sidecar.exists(), "face scan writes a sidecar");
+    std::fs::remove_file(&sidecar).unwrap();
+
+    let summary = f.run();
+    assert_eq!(summary.processed, 1, "a missing sidecar must reopen the row");
+    assert!(sidecar.exists(), "the sidecar was not rewritten");
+    assert_eq!(f.run().processed, 0);
+}
+
 /// The face models changing invalidates the embedding space, so everything
 /// derived from it goes — but the *tagging* rows are none of its business.
 #[test]

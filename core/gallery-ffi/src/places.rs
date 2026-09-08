@@ -1,12 +1,13 @@
-//! Reverse-geocoded Places writes. A free function rather than a session:
-//! there is no ONNX, no queue, and no run lock — each photo is one
-//! read-modify-write of its sidecar.
+//! Reverse-geocoded Places writes and the path/eligibility rules.
+//!
+//! A free function rather than a session: there is no ONNX, no queue, and no
+//! run lock — each photo is one read-modify-write of its sidecar.
 
 use gallery_meta::{MetaError, PlaceWriteRequest};
 use gallery_vfs::{StdVfs, VfsError};
 
 /// Why a Places write failed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
 pub enum PlacesError {
     /// The requested path is not a usable `Places/…` tag.
     InvalidTag {
@@ -82,7 +83,7 @@ impl From<MetaError> for PlacesError {
 }
 
 /// One reverse-geocoded place, matching photo-tools schema §1.3 / §2.2.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct PlaceWrite {
     /// `Places/<Country>[/<Region>[/<City>[/<Neighborhood>]]]`.
     pub path: String,
@@ -101,11 +102,12 @@ pub struct PlaceWrite {
 /// Write a Places tag and the IPTC location fields into `image_path`'s sidecar.
 ///
 /// Returns whether bytes were actually written. A photo that already carries a
-/// `Places/*` tag is left alone (`false`), which is how a re-run stays a
-/// no-op and how a human/photo-tools placement is preserved.
+/// finished `Places/*` tag is left alone (`false`). A *strict prefix*
+/// (`Places/France` → `Places/France/…/Paris`) is upgraded.
 ///
 /// Concurrent sidecar writes retry a handful of times: tagging or a face
 /// naming can land on the same file during an analysis run.
+#[uniffi::export]
 pub fn write_places(image_path: String, place: PlaceWrite) -> Result<bool, PlacesError> {
     let request = PlaceWriteRequest {
         path: place.path,
@@ -131,4 +133,59 @@ pub fn write_places(image_path: String, place: PlaceWrite) -> Result<bool, Place
     Err(last.unwrap_or(PlacesError::Sidecar {
         detail: "exhausted concurrent-modification retries".into(),
     }))
+}
+
+/// `Places/<Country>/…` from already-normalized fields. Duplicate levels
+/// collapse. `None` when every field is empty.
+#[uniffi::export]
+pub fn place_from_parts(
+    country: Option<String>,
+    state: Option<String>,
+    city: Option<String>,
+    sublocation: Option<String>,
+    country_code: Option<String>,
+) -> Option<PlaceWrite> {
+    gallery_meta::place_from_parts(
+        country.as_deref(),
+        state.as_deref(),
+        city.as_deref(),
+        sublocation.as_deref(),
+        country_code.as_deref(),
+    )
+    .map(|r| PlaceWrite {
+        path: r.path,
+        country: r.country,
+        state: r.state,
+        city: r.city,
+        sublocation: r.sublocation,
+        country_code: r.country_code,
+    })
+}
+
+/// Nested Places path, missing levels collapsed.
+#[uniffi::export]
+pub fn places_path(
+    country: Option<String>,
+    state: Option<String>,
+    city: Option<String>,
+    sublocation: Option<String>,
+) -> Option<String> {
+    gallery_meta::places_path(
+        country.as_deref(),
+        state.as_deref(),
+        city.as_deref(),
+        sublocation.as_deref(),
+    )
+}
+
+/// `Places/France` is a strict prefix of `Places/France/Île-de-France/Paris`.
+#[uniffi::export]
+pub fn is_strict_places_prefix(existing: String, newer: String) -> bool {
+    gallery_meta::is_strict_places_prefix(&existing, &newer)
+}
+
+/// No finished city-depth Places tag in `tags`.
+#[uniffi::export]
+pub fn places_still_needed(tags: Vec<String>) -> bool {
+    gallery_meta::places_still_needed(tags)
 }

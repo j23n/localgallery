@@ -4,11 +4,8 @@ import XCTest
 
 /// Which of two face groups survives a merge.
 ///
-/// The core is deliberately directionless about this, so the policy lives in
-/// one place in the UI — and every entry point (the suggested-merge select
-/// screen and naming onto an existing person) goes through it, because the
-/// same pair merging differently depending on where the user tapped would
-/// be indefensible.
+/// The core owns the survivor rule (`faceMergeDirection`); these tests
+/// pin the UI wrapper so every entry point still goes through it.
 final class MergeDirectionTests: XCTestCase {
     private func cluster(
         _ id: Int64, size: Int, name: String? = nil

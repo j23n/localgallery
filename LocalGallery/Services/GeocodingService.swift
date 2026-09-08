@@ -20,8 +20,11 @@ import os
 /// retry with exponential backoff rather than burning the rest of the run.
 /// A miss (`nil`, or `geocodeFoundNoResult`) is not retried.
 ///
-/// Photos that already carry a finished `Places/<Country>/<Region>/<City>`
-/// path are skipped — a human or photo-tools placement is not overwritten.
+    /// Photos whose **library row** already carries a `Places/*` name are
+    /// not the Scan work queue (`needsLibraryPlaces`). The write path still
+    /// reads the **sidecar**: a finished
+    /// `Places/<Country>/<Region>/<City>` path is skipped, and no sidecar
+    /// means a geocode will persist one.
 /// A shallower tag (`Places/France`) is eligible to be *extended* when a
 /// later lookup yields the city. Lookups are cached within
 /// `cacheRadiusKm` (photo-tools' `geocode_cache_radius_km`, 0.5 km) so a
@@ -77,6 +80,14 @@ final class GeocodingService {
     /// minutes on one coordinate.
     static let maxRetryBackoff: TimeInterval = 16
 
+    /// `CLGeocoder` has no timeout of its own. A hung first lookup used
+    /// to park the whole Places pass on 1 / N.
+    nonisolated static let lookupTimeout: TimeInterval = 15
+
+    nonisolated enum LookupError: Error, Equatable, Sendable {
+        case timedOut
+    }
+
     private(set) var isRunning = false
     private(set) var progress: Progress?
     private(set) var lastSummary: Summary?
@@ -117,31 +128,69 @@ final class GeocodingService {
     /// actually yields a city. CLGeocoder often returns country + region
     /// with `locality == nil` for European cities; the first run then
     /// wrote a country-only tag and every later run skipped the photo.
+    ///
+    /// The sidecar is the write-path source of truth (`placesStillNeeded`).
+    /// Scan's work queue uses `needsLibraryPlaces` so a library rescan's
+    /// in-memory `Places/*` names skip already-placed photos without
+    /// opening every `.xmp` before the first lookup.
     nonisolated static func isEligible(_ photo: PhotoFile, force: Bool = false) -> Bool {
+        guard isCandidate(photo) else { return false }
+        if force { return true }
+        return placesStillNeeded(tags: placeTags(for: photo).map(\.fullPath))
+    }
+
+    /// Downloaded still with GPS. No sidecar I/O — safe on the main actor
+    /// over the whole library.
+    nonisolated static func isCandidate(_ photo: PhotoFile) -> Bool {
         guard !photo.isVideo else { return false }
         if case .remote(downloaded: false) = photo.locality { return false }
-        guard photo.gpsLatitude != nil, photo.gpsLongitude != nil else { return false }
+        return photo.gpsLatitude != nil && photo.gpsLongitude != nil
+    }
+
+    /// GPS still whose library row has no `Places/*` name yet.
+    ///
+    /// Cheap — reads `PhotoFile.placeTags`, no sidecar I/O. After a places
+    /// scan (and after a library rescan that reloads those sidecars) the
+    /// name is already on the row; Scan sizes the places queue with this
+    /// so already-tagged photos are not "up for places" again.
+    nonisolated static func needsLibraryPlaces(_ photo: PhotoFile, force: Bool = false) -> Bool {
+        guard isCandidate(photo) else { return false }
         if force { return true }
-        let depths = photo.hierarchicalTags.compactMap { tag -> Int? in
-            guard tag.namespace?.caseInsensitiveCompare("Places") == .orderedSame else { return nil }
-            return tag.fullPath.split(separator: "/").count
-        }
-        guard let deepest = depths.max() else { return true }
-        return deepest < 4
+        return photo.placeTags.isEmpty
+    }
+
+    /// Sidecar has no finished `Places/…/City` path. Reads the file.
+    nonisolated static func placesStillNeeded(_ photo: PhotoFile) -> Bool {
+        placesStillNeeded(tags: placeTags(for: photo).map(\.fullPath))
+    }
+
+    /// Places tags from the sidecar. No sidecar ⇒ none, so a write-path
+    /// pass will geocode even when the library row already carries a name.
+    nonisolated static func placeTags(for photo: PhotoFile) -> [HierarchicalTag] {
+        let doc = SidecarDocument.read(imageURL: photo.url)
+        guard doc.exists else { return [] }
+        return doc.rawTags.map { HierarchicalTag(raw: $0) }
     }
 
     /// Reverse-geocode `photos` and write sidecars. Serial: `CLGeocoder`
     /// forbids overlapping reverse-geocode requests.
     func geocode(_ photos: [PhotoFile], force: Bool = false) async -> Summary {
         guard !isRunning else { return lastSummary ?? Summary() }
-        let eligible = photos.filter { Self.isEligible($0, force: force) }
         isRunning = true
         cancelRequested = false
-        progress = Progress(done: 0, total: eligible.count, startedAt: Date())
         lastError = nil
+        let startedAt = Date()
+        // GPS stills only — no sidecar walk. Scan already dropped rows
+        // that carry a `Places/*` name; a finished sidecar city is still
+        // skipped per photo below for callers that pass the whole library.
+        let candidates = photos.filter(Self.isCandidate)
+        Log.ml.info(
+            "Places run starting input=\(photos.count) candidates=\(candidates.count) force=\(force) cache=\(cache.count)"
+        )
+        progress = Progress(done: 0, total: candidates.count, startedAt: startedAt)
         var summary = Summary()
 
-        for photo in eligible {
+        for photo in candidates {
             if cancelRequested {
                 summary.cancelled = true
                 break
@@ -149,7 +198,7 @@ final class GeocodingService {
             summary.processed += 1
             progress = Progress(
                 done: summary.processed,
-                total: eligible.count,
+                total: candidates.count,
                 startedAt: progress?.startedAt ?? Date()
             )
             guard let lat = photo.gpsLatitude, let lon = photo.gpsLongitude else {
@@ -157,15 +206,36 @@ final class GeocodingService {
                 onPlaceRecorded?(photo.url, nil, .skipped)
                 continue
             }
+            if !force && !Self.placesStillNeeded(photo) {
+                summary.skipped += 1
+                onPlaceRecorded?(photo.url, nil, .skipped)
+                if summary.skipped == 1 || summary.skipped.isMultiple(of: 500) {
+                    Log.ml.info(
+                        "Places skip already-placed \(summary.skipped) \(Log.r.path(photo.url))"
+                    )
+                }
+                continue
+            }
+            Log.ml.info(
+                "Places photo \(summary.processed)/\(candidates.count) \(Log.r.path(photo.url)) lat=\(lat) lon=\(lon)"
+            )
             do {
+                let resolveAt = now()
                 guard let place = try await resolve(latitude: lat, longitude: lon) else {
+                    Log.ml.info(
+                        "Places miss \(Log.r.path(photo.url)) in \(Self.ms(since: resolveAt))ms"
+                    )
                     summary.skipped += 1
                     onPlaceRecorded?(photo.url, nil, .skipped)
                     continue
                 }
+                let writeAt = now()
                 let written = try await Self.write(
                     photo.url.standardizedFileURL.path,
                     place: place
+                )
+                Log.ml.info(
+                    "Places \(written ? "wrote" : "kept") \(place.path) \(Log.r.path(photo.url)) resolve=\(Self.ms(since: resolveAt))ms write=\(Self.ms(since: writeAt))ms"
                 )
                 if written {
                     summary.written += 1
@@ -178,7 +248,7 @@ final class GeocodingService {
                 summary.failed += 1
                 lastError = error.localizedDescription
                 onPlaceRecorded?(photo.url, nil, .failed(error.localizedDescription))
-                if error is PlacesWriteError {
+                if error is PlacesError {
                     Log.ml.error("Places write failed for \(Log.r.path(photo.url)): \(Log.r.error(error))")
                 } else {
                     Log.ml.error("Geocode lookup failed for \(Log.r.path(photo.url)): \(Log.r.error(error))")
@@ -192,7 +262,7 @@ final class GeocodingService {
         progress = nil
         lastSummary = summary
         Log.ml.info(
-            "Places run: \(summary.processed) processed, \(summary.written) written, \(summary.skipped) skipped, \(summary.failed) failed, cancelled=\(summary.cancelled)"
+            "Places run: \(summary.processed) processed, \(summary.written) written, \(summary.skipped) skipped, \(summary.failed) failed, cancelled=\(summary.cancelled) cache=\(cache.count) elapsed=\(Self.ms(since: startedAt))ms"
         )
         return summary
     }
@@ -204,9 +274,18 @@ final class GeocodingService {
     /// Cache hit within `cacheRadiusKm`, else a live lookup that is stored.
     func resolve(latitude: Double, longitude: Double) async throws -> CacheEntry? {
         if let hit = nearest(latitude: latitude, longitude: longitude) {
+            Log.ml.debug(
+                "Places cache hit \(hit.path) lat=\(latitude) lon=\(longitude) cache=\(cache.count)"
+            )
             return hit
         }
-        guard let lookup else { return nil }
+        guard let lookup else {
+            Log.ml.error("Places lookup closure is nil — no provider")
+            return nil
+        }
+        Log.ml.info(
+            "Places cache miss lat=\(latitude) lon=\(longitude) cache=\(cache.count) — live CLGeocoder"
+        )
         guard let entry = try await lookupLive(
             latitude: latitude,
             longitude: longitude,
@@ -231,11 +310,22 @@ final class GeocodingService {
             await waitUntilAllowed()
             if cancelRequested { return nil }
             lastLiveLookupAt = now()
+            let attemptAt = now()
+            Log.ml.info(
+                "Places CLGeocoder attempt \(attempt + 1)/\(Self.maxLookupAttempts) lat=\(latitude) lon=\(longitude)"
+            )
             do {
-                return try await lookup(latitude, longitude)
+                let entry = try await lookup(latitude, longitude)
+                Log.ml.info(
+                    "Places CLGeocoder returned in \(Self.ms(since: attemptAt))ms path=\(entry?.path ?? "nil")"
+                )
+                return entry
             } catch {
                 attempt += 1
                 let retriesLeft = Self.maxLookupAttempts - attempt
+                Log.ml.error(
+                    "Places CLGeocoder error attempt \(attempt) after \(Self.ms(since: attemptAt))ms: \(error.localizedDescription) retryable=\(Self.isRetryable(error))"
+                )
                 if Self.isRetryable(error), retriesLeft > 0, !cancelRequested {
                     let backoff = Self.backoff(afterFailures: attempt)
                     Log.ml.info(
@@ -278,6 +368,7 @@ final class GeocodingService {
     /// A "no result" is a miss, not a throttle.
     static func isRetryable(_ error: Error) -> Bool {
         let ns = error as NSError
+        if error is LookupError { return true }
         if ns.domain == kCLErrorDomain {
             return ns.code == CLError.Code.network.rawValue
         }
@@ -350,12 +441,68 @@ final class GeocodingService {
         return []
     }
 
-    private static func liveLookup(latitude: Double, longitude: Double) async throws -> CacheEntry? {
+    /// Off the main actor so a hung Apple call cannot pin the UI, and so
+    /// `CLGeocoder` is not created on the main actor and then sent into a
+    /// task group (Swift 6: `CLGeocoder` is not `Sendable`).
+    nonisolated private static func liveLookup(
+        latitude: Double,
+        longitude: Double
+    ) async throws -> CacheEntry? {
+        let started = Date()
+        let timeout = lookupTimeout
+        Log.ml.info(
+            "Places CLGeocoder.reverseGeocodeLocation starting lat=\(latitude) lon=\(longitude) timeout=\(Int(timeout))s"
+        )
+        do {
+            return try await withThrowingTaskGroup(of: CacheEntry?.self) { group in
+                group.addTask {
+                    try await Self.reverseGeocode(latitude: latitude, longitude: longitude)
+                }
+                group.addTask {
+                    var waited = 0
+                    let step = 5
+                    while waited + step < Int(timeout) {
+                        try await Task.sleep(for: .seconds(step))
+                        waited += step
+                        Log.ml.info(
+                            "Places CLGeocoder still waiting \(waited)s lat=\(latitude) lon=\(longitude)"
+                        )
+                    }
+                    try await Task.sleep(for: .seconds(timeout - Double(waited)))
+                    Log.ml.error(
+                        "Places CLGeocoder timed out after \(Int(timeout))s lat=\(latitude) lon=\(longitude)"
+                    )
+                    throw LookupError.timedOut
+                }
+                let first = try await group.next()!
+                group.cancelAll()
+                Log.ml.info(
+                    "Places CLGeocoder finished in \(Self.ms(since: started))ms lat=\(latitude) lon=\(longitude)"
+                )
+                return first
+            }
+        } catch {
+            Log.ml.error(
+                "Places CLGeocoder failed in \(Self.ms(since: started))ms: \(error.localizedDescription)"
+            )
+            throw error
+        }
+    }
+
+    nonisolated private static func ms(since date: Date) -> Int {
+        Int(Date().timeIntervalSince(date) * 1000)
+    }
+
+    nonisolated private static func reverseGeocode(
+        latitude: Double,
+        longitude: Double
+    ) async throws -> CacheEntry? {
+        let geocoder = CLGeocoder()
         let location = CLLocation(latitude: latitude, longitude: longitude)
         // English names match photo-tools' Nominatim output (`Places/France`
         // not `Places/Frankreich`) so a library tagged by both tools shares
         // one tree.
-        let marks = try await CLGeocoder().reverseGeocodeLocation(
+        let marks = try await geocoder.reverseGeocodeLocation(
             location,
             preferredLocale: Locale(identifier: "en_US")
         )
@@ -363,25 +510,9 @@ final class GeocodingService {
         return place(from: mark, latitude: latitude, longitude: longitude)
     }
 
-    /// photo-tools §2.2: missing levels collapse; no placeholders.
-    static func placesPath(
-        country: String?,
-        state: String?,
-        city: String?,
-        sublocation: String?
-    ) -> String? {
-        var segments: [String] = []
-        if let country = nonempty(country) { segments.append(country) }
-        if let state = nonempty(state) { segments.append(state) }
-        if let city = nonempty(city) { segments.append(city) }
-        if let sublocation = nonempty(sublocation) { segments.append(sublocation) }
-        guard !segments.isEmpty else { return nil }
-        return "Places/" + segments.joined(separator: "/")
-    }
-
     /// The CLPlacemark fields Places actually reads. Isolated so tests can
     /// feed a Paris-without-`locality` mark without constructing a placemark.
-    struct PlacemarkParts: Equatable, Sendable {
+    nonisolated struct PlacemarkParts: Equatable, Sendable {
         var country: String? = nil
         var state: String? = nil
         var subAdministrativeArea: String? = nil
@@ -391,7 +522,7 @@ final class GeocodingService {
         var isoCountryCode: String? = nil
     }
 
-    static func place(from mark: CLPlacemark, latitude: Double, longitude: Double) -> CacheEntry? {
+    nonisolated static func place(from mark: CLPlacemark, latitude: Double, longitude: Double) -> CacheEntry? {
         place(
             from: PlacemarkParts(
                 country: mark.country,
@@ -412,50 +543,35 @@ final class GeocodingService {
     /// `subAdministrativeArea` instead. Falling back through those — and
     /// dropping duplicates of country/state — is what turns
     /// `Places/France` + a country code into `Places/France/Île-de-France/Paris`.
-    static func place(from parts: PlacemarkParts, latitude: Double, longitude: Double) -> CacheEntry? {
-        let country = nonempty(parts.country)
-        let state = distinct(nonempty(parts.state), from: country)
-        let city = distinct(
-            nonempty(parts.locality)
-                ?? nonempty(parts.postalCity)
-                ?? nonempty(parts.subAdministrativeArea),
-            from: country, state
-        )
-        let sublocation = distinct(nonempty(parts.subLocality), from: country, state, city)
-        guard let path = placesPath(
-            country: country,
-            state: state,
+    nonisolated static func place(from parts: PlacemarkParts, latitude: Double, longitude: Double) -> CacheEntry? {
+        // Apple often leaves `locality` nil for European cities; the city
+        // sits on `postalAddress.city` or `subAdministrativeArea` instead.
+        // The core then collapses duplicate country/state/city levels.
+        let city = nonempty(parts.locality)
+            ?? nonempty(parts.postalCity)
+            ?? nonempty(parts.subAdministrativeArea)
+        guard let built = placeFromParts(
+            country: parts.country,
+            state: parts.state,
             city: city,
-            sublocation: sublocation
+            sublocation: parts.subLocality,
+            countryCode: parts.isoCountryCode
         ) else { return nil }
-        let code = parts.isoCountryCode?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .uppercased()
         return CacheEntry(
             latitude: latitude,
             longitude: longitude,
-            path: path,
-            country: country,
-            state: state,
-            city: city,
-            sublocation: sublocation,
-            countryCode: (code?.count == 2) ? code : nil
+            path: built.path,
+            country: built.country,
+            state: built.state,
+            city: built.city,
+            sublocation: built.sublocation,
+            countryCode: built.countryCode
         )
     }
 
-    private static func nonempty(_ value: String?) -> String? {
+    nonisolated private static func nonempty(_ value: String?) -> String? {
         let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return trimmed.isEmpty ? nil : trimmed
-    }
-
-    private static func distinct(_ value: String?, from others: String?...) -> String? {
-        guard let value else { return nil }
-        for other in others {
-            if let other, value.localizedCaseInsensitiveCompare(other) == .orderedSame {
-                return nil
-            }
-        }
-        return value
     }
 
     private static func write(_ path: String, place: CacheEntry) async throws -> Bool {
@@ -483,4 +599,9 @@ final class GeocodingService {
             + cos(p1) * cos(p2) * sin(dl / 2) * sin(dl / 2)
         return 2 * r * atan2(sqrt(a), sqrt(1 - a))
     }
+}
+
+/// Test/UI alias for the core's prefix rule.
+func isStrictPlacesPrefix(_ existing: String, of newer: String) -> Bool {
+    isStrictPlacesPrefix(existing: existing, newer: newer)
 }

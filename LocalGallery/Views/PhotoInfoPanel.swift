@@ -9,7 +9,7 @@ struct PhotoInfoPanel: View {
     @Environment(GalleryStore.self) private var store
     @Environment(\.openURL) private var openURL
     @State private var exifData: EXIFData?
-    @State private var photoToolsData: PhotoToolsMetadata = PhotoToolsMetadata()
+    @State private var sidecar = SidecarDocument.empty
     @State private var isLoading = true
     @State private var debugExpanded = false
 
@@ -24,18 +24,15 @@ struct PhotoInfoPanel: View {
         .task(id: photo.id) {
             isLoading = true
             exifData = nil
-            photoToolsData = PhotoToolsMetadata()
+            sidecar = SidecarDocument.empty
             async let exif = store.loadEXIF(for: photo)
-            async let pt = store.loadPhotoToolsMetadata(for: photo)
+            sidecar = SidecarDocument.read(imageURL: photo.url)
             exifData = await exif
-            photoToolsData = await pt
             isLoading = false
         }
         .onChange(of: store.analysis.isRunning) { _, running in
             guard !running else { return }
-            Task {
-                photoToolsData = await store.loadPhotoToolsMetadata(for: photo)
-            }
+            sidecar = SidecarDocument.read(imageURL: photo.url)
         }
     }
 
@@ -110,12 +107,12 @@ struct PhotoInfoPanel: View {
 
     private var peopleSection: some View {
         section("People") {
-            if photo.faceRegions.isEmpty {
+            if photo.faceRegions.isEmpty && onFileNoBoxTags.isEmpty {
                 Text("No faces on this photo.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 4)
-            } else {
+            } else if !photo.faceRegions.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(alignment: .top, spacing: 10) {
                         ForEach(Array(photo.faceRegions.enumerated()), id: \.offset) { index, region in
@@ -126,12 +123,12 @@ struct PhotoInfoPanel: View {
                 }
             }
 
-            if !photo.peopleTagsWithoutFace.isEmpty {
+            if !onFileNoBoxTags.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("On file, no box")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    HierarchicalTagFlowView(tags: photo.peopleTagsWithoutFace)
+                    HierarchicalTagFlowView(tags: onFileNoBoxTags)
                 }
                 .padding(.top, 6)
             }
@@ -286,10 +283,15 @@ struct PhotoInfoPanel: View {
     @ViewBuilder
     private var debugBody: some View {
         Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 8) {
-            debugRow("Tag", primary: photoToolsData.taggerVersion, secondary: taggedAgo, detail: clipDetail)
-            debugRow("Face", primary: photoToolsData.facePack, secondary: facedAgo, detail: facesDebugText)
+            debugRow("Tag", primary: tools.taggerVersion, secondary: taggedAgo, detail: clipDetail)
+            debugRow("Face", primary: tools.facePack, secondary: facedAgo, detail: facesDebugText)
             debugRow("Place", primary: placeDebugPrimary, secondary: nil, detail: nil)
-            debugRow("Sidecar", primary: PhotoInfoFormatting.sidecarLabel(photo.sidecarStatus), secondary: nil, detail: nil)
+            debugRow(
+                "Sidecar",
+                primary: PhotoInfoFormatting.sidecarOnDiskLabel(photo.sidecarOnDisk || sidecar.exists),
+                secondary: PhotoInfoFormatting.sidecarCacheLabel(photo.sidecarStatus),
+                detail: nil
+            )
             if let source = PhotoInfoFormatting.dateSourceLabel(
                 hasDate: takenDate != nil,
                 fromMetadata: photo.dateFromMetadata
@@ -395,6 +397,17 @@ struct PhotoInfoPanel: View {
         apertureText != nil || shutterSpeedText != nil || exifData?.iso != nil
     }
 
+    private var onFileNoBoxTags: [HierarchicalTag] {
+        var tags = photo.peopleTagsWithoutFace
+        var seen = Set(tags.map { $0.displayName.lowercased() })
+        for name in sidecar.namedWithoutBox {
+            if seen.insert(name.lowercased()).inserted {
+                tags.append(HierarchicalTag(raw: HierarchicalTag.personPath(for: name)))
+            }
+        }
+        return tags
+    }
+
     private var objectTags: [HierarchicalTag] {
         tags(in: "objects")
     }
@@ -416,26 +429,40 @@ struct PhotoInfoPanel: View {
         photo.hierarchicalTags.filter { $0.namespace?.lowercased() == namespace }
     }
 
+    private var tools: PhotoToolsMetadata {
+        photo.photoTools.merging(over: sidecar.tools)
+    }
+
     private var taggedAgo: String? {
-        photoToolsData.taggedAt.map { PhotoInfoFormatting.relativeTimestamp($0) }
+        tools.taggedAt.map { PhotoInfoFormatting.relativeTimestamp($0) }
     }
 
     private var facedAgo: String? {
-        photoToolsData.faceTaggedAt.map { PhotoInfoFormatting.relativeTimestamp($0) }
+        tools.faceTaggedAt.map { PhotoInfoFormatting.relativeTimestamp($0) }
     }
 
     private var clipDetail: String? {
-        photoToolsData.clipModel.map { "CLIP  \($0)" }
+        tools.clipModel.map { "CLIP  \($0)" }
     }
 
     private var facesDebugText: String? {
         let named = photo.faceRegions.filter { $0.name != nil }.count
         let unnamed = photo.faceRegions.count - named
-        return PhotoInfoFormatting.facesSummary(
+        let withheld = onFileNoBoxTags.count
+        if let summary = PhotoInfoFormatting.facesSummary(
             named: named,
             unnamed: unnamed,
-            scanned: photoToolsData.facePack != nil
-        )
+            scanned: tools.facePack != nil
+        ) {
+            if withheld > 0 {
+                return "\(summary) · \(withheld) on file, no box"
+            }
+            return summary
+        }
+        if withheld > 0 {
+            return withheld == 1 ? "1 on file, no box" : "\(withheld) on file, no box"
+        }
+        return nil
     }
 
     private var placeDebugPrimary: String {

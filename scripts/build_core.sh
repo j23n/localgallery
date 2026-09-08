@@ -175,6 +175,45 @@ find_ort_lib() {
     return 1
 }
 
+# UniFFI C symbol names (no leading `_`). Bindgen reads the *dylib*;
+# Xcode links the *staticlib*. The staticlib is allowed to have extra
+# names (it is an archive of every .o); what must not happen is the
+# dylib advertising a function the .a does not define.
+uniffi_syms() {
+    # `-j` is Apple nm: names only, so archive member headers cannot
+    # leak into the list. Fall back to the last field if `-j` is absent.
+    local names
+    names="$(nm -gU -j "$1" 2>/dev/null || nm -gU "$1" 2>/dev/null | awk '{ print $NF }')"
+    printf '%s\n' "$names" \
+        | grep -E '^_?uniffi_gallery_ffi_(fn|checksum)_' \
+        | sed 's/^_//' \
+        | sort -u
+}
+
+assert_staticlib_has_dylib_uniffi() {
+    local static_lib="$1" dylib="$2"
+    local dylib_syms static_syms missing
+    dylib_syms="$(uniffi_syms "$dylib")"
+    static_syms="$(uniffi_syms "$static_lib")"
+    if [[ -z "$dylib_syms" ]]; then
+        echo "error: $dylib has no UniFFI exports" >&2
+        return 1
+    fi
+    if [[ -z "$static_syms" ]]; then
+        echo "warning: could not read UniFFI symbols from $static_lib (nm); continuing" >&2
+        return 0
+    fi
+    missing="$(comm -23 <(printf '%s\n' "$dylib_syms") <(printf '%s\n' "$static_syms"))"
+    if [[ -n "$missing" ]]; then
+        echo "error: staticlib is missing UniFFI symbols the dylib exported:" >&2
+        echo "$missing" | sed 's/^/       /' >&2
+        echo "       staticlib: $static_lib" >&2
+        echo "       dylib:     $dylib" >&2
+        return 1
+    fi
+    return 0
+}
+
 # Build one Rust target and merge its ORT archive. Sets MERGED_LIB to the
 # resulting archive path. (Avoid `$(build_and_merge …)` — bash suppresses
 # `set -e` inside command substitutions, so a failed cargo would race ahead.)
@@ -182,16 +221,27 @@ build_and_merge() {
     local target="$1" expected_platform="$2" expected_name="$3"
     local built_dir static_lib ort_lib
 
+    built_dir="$CORE_DIR/target/$target/$PROFILE"
+    # Force both crate-types to relink. cargo incremental has been seen to
+    # refresh the cdylib (so bindgen emits new Swift) and keep yesterday's
+    # staticlib (so the xcframework is missing those C symbols).
+    rm -f "$built_dir/$LIB_NAME" "$built_dir/$DYLIB_NAME"
+
     echo "==> cargo build ($PROFILE, $target)"
     (cd "$CORE_DIR" && cargo build -p gallery-ffi --target "$target" --profile "$CARGO_PROFILE")
 
-    built_dir="$CORE_DIR/target/$target/$PROFILE"
     static_lib="$built_dir/$LIB_NAME"
     [[ -f "$static_lib" ]] || { echo "error: $static_lib missing after build" >&2; exit 1; }
     [[ -f "$built_dir/$DYLIB_NAME" ]] || {
         echo "error: $built_dir/$DYLIB_NAME missing after build" >&2
         exit 1
     }
+    if ! assert_staticlib_has_dylib_uniffi "$static_lib" "$built_dir/$DYLIB_NAME"; then
+        echo "==> cargo clean -p gallery-ffi ($target) and rebuild"
+        (cd "$CORE_DIR" && cargo clean -p gallery-ffi --target "$target")
+        (cd "$CORE_DIR" && cargo build -p gallery-ffi --target "$target" --profile "$CARGO_PROFILE")
+        assert_staticlib_has_dylib_uniffi "$static_lib" "$built_dir/$DYLIB_NAME" || exit 1
+    fi
 
     ort_lib="$(find_ort_lib "$built_dir" || true)"
     if [[ -z "$ort_lib" ]]; then

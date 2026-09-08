@@ -1,5 +1,7 @@
 //! Where a photo's `.xmp` sidecar lives (schema §1.4).
 
+use gallery_vfs::Vfs;
+
 /// `IMG_1234.jpg` → `IMG_1234.jpg.xmp`.
 ///
 /// The extension is *appended*, not replaced — the MWG / digiKam convention —
@@ -28,6 +30,24 @@ pub fn alt_sidecar_path(image_path: &str) -> Option<String> {
         return None;
     }
     Some(format!("{}.xmp", &image_path[..dot]))
+}
+
+/// Appended form first, then the Lightroom alt.
+pub fn sidecar_exists(vfs: &dyn Vfs, image_path: &str) -> bool {
+    let canonical = sidecar_path(image_path);
+    if vfs.exists(&canonical) {
+        return true;
+    }
+    alt_sidecar_path(image_path).is_some_and(|p| vfs.exists(&p))
+}
+
+/// Bytes of the sidecar that exists, appended form preferred.
+pub fn read_sidecar_bytes(vfs: &dyn Vfs, image_path: &str) -> Option<Vec<u8>> {
+    let canonical = sidecar_path(image_path);
+    if let Ok(bytes) = vfs.read(&canonical) {
+        return Some(bytes);
+    }
+    alt_sidecar_path(image_path).and_then(|p| vfs.read(&p).ok())
 }
 
 #[cfg(test)]
@@ -74,5 +94,36 @@ mod tests {
             alt_sidecar_path("/a.b/IMG_1234.jpg").as_deref(),
             Some("/a.b/IMG_1234.xmp")
         );
+    }
+
+    #[test]
+    fn sidecar_exists_prefers_the_appended_form() {
+        let vfs = gallery_vfs::MemVfs::new();
+        vfs.insert("/lib/a.jpg.xmp", b"<x/>".to_vec());
+        vfs.insert("/lib/a.xmp", b"<alt/>".to_vec());
+        assert!(sidecar_exists(&vfs, "/lib/a.jpg"));
+        assert_eq!(
+            read_sidecar_bytes(&vfs, "/lib/a.jpg").as_deref(),
+            Some(&b"<x/>"[..])
+        );
+    }
+
+    #[test]
+    fn sidecar_exists_falls_back_to_the_lightroom_alt() {
+        let vfs = gallery_vfs::MemVfs::new();
+        vfs.insert("/lib/a.xmp", b"<alt/>".to_vec());
+        assert!(sidecar_exists(&vfs, "/lib/a.jpg"));
+        assert_eq!(
+            read_sidecar_bytes(&vfs, "/lib/a.jpg").as_deref(),
+            Some(&b"<alt/>"[..])
+        );
+    }
+
+    #[test]
+    fn a_photo_with_no_sidecar_file_is_missing() {
+        let vfs = gallery_vfs::MemVfs::new();
+        vfs.insert("/lib/a.jpg", b"jpeg".to_vec());
+        assert!(!sidecar_exists(&vfs, "/lib/a.jpg"));
+        assert_eq!(read_sidecar_bytes(&vfs, "/lib/a.jpg"), None);
     }
 }

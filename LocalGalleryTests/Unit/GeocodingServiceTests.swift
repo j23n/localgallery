@@ -40,12 +40,13 @@ final class GeocodingServiceTests: XCTestCase {
         NSError(domain: kCLErrorDomain, code: CLError.Code.network.rawValue)
     }
 
-    func testEligibilityRequiresDownloadedStillWithGpsAndNoPlacesTag() {
+    func testEligibilityRequiresDownloadedStillWithGpsAndNoPlacesTag() throws {
         let local = PhotoFile.fixture(
             url: URL(fileURLWithPath: "/lib/a.jpg"),
             gps: (lat: 48.8584, lon: 2.2945)
         )
         XCTAssertTrue(GeocodingService.isEligible(local))
+        XCTAssertTrue(GeocodingService.needsLibraryPlaces(local))
 
         let video = PhotoFile.fixture(
             url: URL(fileURLWithPath: "/lib/clip.mov"),
@@ -64,15 +65,50 @@ final class GeocodingServiceTests: XCTestCase {
         let noGps = PhotoFile.fixture(url: URL(fileURLWithPath: "/lib/b.jpg"))
         XCTAssertFalse(GeocodingService.isEligible(noGps))
 
+        let temp = makeTemp()
+        let placedURL = temp.appending("placed.jpg")
+        XCTAssertTrue(FileManager.default.createFile(atPath: placedURL.path, contents: Data()))
+        try writePlacesSidecar(at: placedURL, tags: ["Places/Italy/Lazio/Rome"])
         let alreadyPlaced = PhotoFile.fixture(
-            url: URL(fileURLWithPath: "/lib/c.jpg"),
+            url: placedURL,
             tags: ["Places/Italy/Lazio/Rome"],
             gps: (lat: 41.9, lon: 12.5)
         )
         XCTAssertFalse(GeocodingService.isEligible(alreadyPlaced))
+        XCTAssertFalse(
+            GeocodingService.needsLibraryPlaces(alreadyPlaced),
+            "a library row that already carries Places/Rome is not up for Scan"
+        )
 
-        let countryOnly = PhotoFile.fixture(
+        let memoryOnly = PhotoFile.fixture(
+            url: URL(fileURLWithPath: "/lib/c.jpg"),
+            tags: ["Places/Italy/Lazio/Rome"],
+            gps: (lat: 41.9, lon: 12.5)
+        )
+        XCTAssertTrue(
+            GeocodingService.isEligible(memoryOnly),
+            "Places tags that are not on a sidecar do not skip the write path — a geocode will persist one"
+        )
+        XCTAssertFalse(
+            GeocodingService.needsLibraryPlaces(memoryOnly),
+            "after a rescan the Places name is on the row; Scan must not queue the whole library again"
+        )
+
+        let countryInMemory = PhotoFile.fixture(
             url: URL(fileURLWithPath: "/lib/d.jpg"),
+            tags: ["Places/France"],
+            gps: (lat: 48.8584, lon: 2.2945)
+        )
+        XCTAssertFalse(
+            GeocodingService.needsLibraryPlaces(countryInMemory),
+            "any Places/* name on the library row means the photo is already place-tagged"
+        )
+
+        let countryURL = temp.appending("country.jpg")
+        XCTAssertTrue(FileManager.default.createFile(atPath: countryURL.path, contents: Data()))
+        try writePlacesSidecar(at: countryURL, tags: ["Places/France"])
+        let countryOnly = PhotoFile.fixture(
+            url: countryURL,
             tags: ["Places/France"],
             gps: (lat: 48.8584, lon: 2.2945)
         )
@@ -84,6 +120,10 @@ final class GeocodingServiceTests: XCTestCase {
         XCTAssertTrue(
             GeocodingService.isEligible(alreadyPlaced, force: true),
             "force must re-geocode a photo that already has a city"
+        )
+        XCTAssertTrue(
+            GeocodingService.needsLibraryPlaces(alreadyPlaced, force: true),
+            "Drop and Rescan must put an already-placed photo back on the queue"
         )
         XCTAssertFalse(
             GeocodingService.isEligible(video, force: true),
@@ -374,7 +414,10 @@ final class GeocodingServiceTests: XCTestCase {
                 NSError(domain: kCLErrorDomain, code: CLError.Code.geocodeCanceled.rawValue)
             )
         )
-        XCTAssertFalse(GeocodingService.isRetryable(PlacesWriteError.invalidTag("Places/")))
+        XCTAssertTrue(GeocodingService.isRetryable(GeocodingService.LookupError.timedOut))
+        XCTAssertFalse(GeocodingService.isRetryable(
+            PlacesError.InvalidTag(tag: "Places/", reason: "Places/ with no country is not a place")
+        ))
     }
 
     func testBackoffDoublesThenCaps() {
@@ -551,6 +594,20 @@ final class GeocodingServiceTests: XCTestCase {
         let xml = try String(contentsOf: temp.appending("a.jpg.xmp"), encoding: .utf8)
         XCTAssertTrue(xml.contains("Places/Italy/Rome"))
         XCTAssertFalse(xml.contains("Places/France/Paris"))
+    }
+
+    private func writePlacesSidecar(at image: URL, tags: [String]) throws {
+        let items = tags.map { "<rdf:li>\($0)</rdf:li>" }.joined()
+        let xmp = """
+        <x:xmpmeta xmlns:x='adobe:ns:meta/'>
+        <rdf:RDF xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'>
+         <rdf:Description rdf:about='' xmlns:digiKam='http://www.digikam.org/ns/1.0/'>
+          <digiKam:TagsList><rdf:Seq>\(items)</rdf:Seq></digiKam:TagsList>
+         </rdf:Description>
+        </rdf:RDF>
+        </x:xmpmeta>
+        """
+        try Data(xmp.utf8).write(to: URL(fileURLWithPath: image.path + ".xmp"))
     }
 
     func testStrictPlacesPrefix() {

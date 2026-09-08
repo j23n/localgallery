@@ -93,6 +93,11 @@ final class LibraryAnalysis {
     @ObservationIgnored var onSidecarsWritten: (@MainActor () async -> Void)?
     /// One Places sidecar just landed. `GalleryStore` wires this to the
     /// shared 30 s coalescer — same cooldown tagging and faces already use.
+    /// Sidecar paths written this Places pass. Applied in one shot at
+    /// phase end — per-write `applyParsedSidecars` rebuilds a 12k-row
+    /// index, and `onPlaceWritten` used to start a light rescan (~7 s)
+    /// that stole the main actor after every photo.
+    @ObservationIgnored private var pendingPlacePaths: [String] = []
     @ObservationIgnored var onPlaceWritten: (@MainActor () -> Void)?
     /// Sidecar bytes just landed (or were re-read). The Store unions them
     /// onto the live `PhotoFile` — scans will not, because the image file
@@ -111,11 +116,13 @@ final class LibraryAnalysis {
             self?.activity.scheduleIngest(paths: paths, phase: .faces)
             self?.onSidecarPaths?(paths)
         }
+        faces.onLastRunDiagnostics = { [weak self] byPath in
+            self?.activity.attachDiagnostics(byPath)
+        }
         places.onPlaceRecorded = { [weak self] url, path, outcome in
             self?.activity.record(.place(url: url, path: path, outcome: outcome))
             if case .written = outcome {
-                self?.onPlaceWritten?()
-                self?.onSidecarPaths?([url.path])
+                self?.pendingPlacePaths.append(url.path)
             }
         }
     }
@@ -219,29 +226,58 @@ final class LibraryAnalysis {
             if phases.contains(.faces) { await faces.resetQueue() }
         }
         let all = photos?() ?? []
-        let tagPhotos = phases.contains(.tagging) && tagging.isAvailable
-            ? all.filter(TaggingService.isEligible) : []
-        let facePhotos = phases.contains(.faces) && faces.isAvailable
-            ? all.filter(FaceService.isEligible) : []
-        let placePhotos = phases.contains(.places)
-            ? all.filter { GeocodingService.isEligible($0, force: force) } : []
-        guard !tagPhotos.isEmpty || !facePhotos.isEmpty || !placePhotos.isEmpty else {
-            lastSummary = Summary()
-            // "Nothing to do" is a scan result, not a UI one: unlabeled
-            // groups from an earlier run live in the cache and still need
-            // to reach Collections. Face `finish()` is the usual publisher,
-            // and this path never starts a run.
-            await faces.refreshClusters()
-            return
-        }
+        let wantTag = phases.contains(.tagging) && tagging.isAvailable
+        let wantFace = phases.contains(.faces) && faces.isAvailable
+        let wantPlace = phases.contains(.places)
 
+        // Cheap filters only (no sidecar I/O). Places uses the `Places/*`
+        // names already on the library row — a rescan reloads those from
+        // the sidecar — so already-placed photos are not the work queue.
+        // The geocode loop still reads the sidecar to skip/extend a city.
         isRunning = true
         activePhases = phases
         cancelRequested = false
         lastError = nil
         lastSummary = nil
-        activity.beginRun()
         let startedAt = Date()
+        let firstPhase: Phase = wantTag ? .tagging : wantFace ? .faces : .places
+        publish(firstPhase, done: 0, total: 0, overallDone: 0, overallTotal: 0, startedAt: startedAt)
+        Log.ml.info(
+            "Scan start library=\(all.count) tag=\(wantTag) face=\(wantFace) place=\(wantPlace) force=\(force)"
+        )
+
+        let (tagPhotos, facePhotos, placePhotos) = await Task.detached(priority: .userInitiated) {
+            (
+                wantTag ? all.filter(TaggingService.isEligible) : [],
+                wantFace ? all.filter(FaceService.isEligible) : [],
+                wantPlace ? all.filter { GeocodingService.needsLibraryPlaces($0, force: force) } : []
+            )
+        }.value
+        Log.ml.info(
+            "Scan queues tag=\(tagPhotos.count) face=\(facePhotos.count) place=\(placePhotos.count) in \(Int(Date().timeIntervalSince(startedAt) * 1000))ms"
+        )
+
+        if cancelRequested {
+            await end(Summary(cancelled: true))
+            return
+        }
+        guard !tagPhotos.isEmpty || !facePhotos.isEmpty || !placePhotos.isEmpty else {
+            lastSummary = Summary()
+            progress = nil
+            // "Nothing to do" is a scan result, not a UI one: unlabeled
+            // groups from an earlier run live in the cache and still need
+            // to reach Collections. Face `finish()` is the usual publisher,
+            // and this path never starts a run.
+            defer {
+                isRunning = false
+                activePhases = []
+                cancelRequested = false
+            }
+            await faces.refreshClusters()
+            return
+        }
+
+        activity.beginRun()
         var overallDone = 0
         var summary = Summary()
 
@@ -305,6 +341,7 @@ final class LibraryAnalysis {
         }
 
         if !placePhotos.isEmpty {
+            Log.ml.info("Scan places phase starting \(placePhotos.count) GPS stills")
             publish(.places, done: 0, total: placePhotos.count, overallDone: overallDone, overallTotal: placePhotos.count, startedAt: startedAt)
             async let placeSummary = places.geocode(placePhotos, force: force)
             await waitForStart({ self.places.isRunning })
@@ -324,6 +361,7 @@ final class LibraryAnalysis {
             if let err = places.lastError {
                 lastError = err
             }
+            flushPlaceSidecars()
         }
 
         summary.cancelled = cancelRequested
@@ -348,6 +386,7 @@ final class LibraryAnalysis {
         // let a queued vnode hop start another walk the moment we finished.
         // `defer` so a cancellation mid-refresh cannot leave the flag stuck.
         finish(summary)
+        flushPlaceSidecars()
         defer {
             isRunning = false
             activePhases = []
@@ -359,6 +398,14 @@ final class LibraryAnalysis {
         await faces.refreshClusters()
         await faces.unloadSession()
         await onSidecarsWritten?()
+    }
+
+    private func flushPlaceSidecars() {
+        guard !pendingPlacePaths.isEmpty else { return }
+        let paths = pendingPlacePaths
+        pendingPlacePaths.removeAll(keepingCapacity: true)
+        Log.ml.info("Places applying \(paths.count) sidecars onto the live library")
+        onSidecarPaths?(paths)
     }
 
     private func finish(_ summary: Summary) {

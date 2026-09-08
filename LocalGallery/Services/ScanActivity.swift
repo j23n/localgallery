@@ -46,6 +46,11 @@ struct ScanActivityEntry: Identifiable, Equatable, Sendable {
     /// Hierarchical paths relevant to `phase` (`Objects/…`, `People/…`, `Places/…`).
     let tags: [String]
     let faceNames: [String]
+    var facePack: String? = nil
+    var faceTaggedAt: String? = nil
+    var sidecarOnDisk: Bool = false
+    var faceDecisions: [String] = []
+    var diagnostics: [FacePhotoDiagnostic] = []
 
     var faceCount: Int { faceNames.count }
 
@@ -105,7 +110,11 @@ struct ScanActivityEntry: Identifiable, Equatable, Sendable {
             phase: .faces,
             outcome: .existing,
             tags: photo.peopleTagsWithoutFace.map(\.fullPath),
-            faceNames: photo.faceRegions.compactMap(\.name)
+            faceNames: photo.faceRegions.compactMap(\.name),
+            facePack: photo.photoTools.facePack,
+            faceTaggedAt: photo.photoTools.faceTaggedAt,
+            sidecarOnDisk: photo.sidecarOnDisk,
+            faceDecisions: photo.faceDecisions
         )
     }
 
@@ -130,6 +139,19 @@ struct ScanActivityEntry: Identifiable, Equatable, Sendable {
     }
 }
 
+/// Per-detection row from the last face assign (SQLite, not the sidecar).
+struct FacePhotoDiagnostic: Equatable, Sendable {
+    enum Assignment: String, Equatable, Sendable {
+        case joined, seeded
+    }
+
+    var score: Float
+    var quality: Float
+    var clusterID: Int64?
+    var assignment: Assignment?
+    var label: String?
+}
+
 /// In-memory journal of one analysis run. Newest first, capped so a 20k
 /// library cannot grow without bound across repeated scans.
 ///
@@ -145,10 +167,25 @@ final class ScanActivityLog {
     /// Bumped on `beginRun` so an in-flight ingest from the *previous* run
     /// cannot append after we cleared.
     private var generation = 0
+    /// Last-run face assign rows, keyed by every spelling of the photo path.
+    /// Ingest is async; attach can win or lose the race, so both sides merge.
+    private var pendingDiagnostics: [String: [FacePhotoDiagnostic]] = [:]
 
     func beginRun() {
         generation += 1
         entries = []
+        pendingDiagnostics = [:]
+    }
+
+    /// Attach per-detection score / quality / Joined-vs-Seeded onto face
+    /// journal rows. Safe to call before or after sidecar ingest.
+    func attachDiagnostics(_ byPath: [String: [FacePhotoDiagnostic]]) {
+        for (path, faces) in byPath {
+            for key in GalleryStore.pathKeys(for: URL(fileURLWithPath: path)) {
+                pendingDiagnostics[key] = faces
+            }
+        }
+        applyPendingDiagnostics()
     }
 
     /// Parse sidecars for `paths` off the main actor, then prepend.
@@ -190,6 +227,23 @@ final class ScanActivityLog {
         if entries.count > Self.cap {
             entries.removeLast(entries.count - Self.cap)
         }
+        applyPendingDiagnostics()
+    }
+
+    private func applyPendingDiagnostics() {
+        for i in entries.indices {
+            guard entries[i].phase == .faces else { continue }
+            if let faces = pendingFor(entries[i].url) {
+                entries[i].diagnostics = faces
+            }
+        }
+    }
+
+    private func pendingFor(_ url: URL) -> [FacePhotoDiagnostic]? {
+        for key in GalleryStore.pathKeys(for: url) {
+            if let faces = pendingDiagnostics[key] { return faces }
+        }
+        return nil
     }
 
     private static func key(for entry: ScanActivityEntry) -> String {
@@ -211,23 +265,16 @@ final class ScanActivityLog {
         at: Date = Date()
     ) -> ScanActivityEntry {
         let url = URL(fileURLWithPath: path).standardizedFileURL
-        let sidecar = URL(fileURLWithPath: path + ".xmp")
-        var tags: [String] = []
-        var faceNames: [String] = []
-        if let data = try? Data(contentsOf: sidecar) {
-            let parsed = parseXmpBytes(bytes: data)
-            tags = parsed.rawTags.filter { tag in
-                let ns = tag.split(separator: "/").first.map(String.init)?.lowercased()
-                switch phase {
-                case .tagging: return ns == "objects" || ns == "scenes" || ns == "landmarks"
-                case .faces: return ns == "people"
-                case .places: return ns == "places"
-                }
-            }
-            if phase == .faces {
-                faceNames = parsed.faceRegions.compactMap(\.name)
+        let doc = SidecarDocument.read(imagePath: path)
+        let tags = doc.rawTags.filter { tag in
+            let ns = tag.split(separator: "/").first.map(String.init)?.lowercased()
+            switch phase {
+            case .tagging: return ns == "objects" || ns == "scenes" || ns == "landmarks"
+            case .faces: return ns == "people"
+            case .places: return ns == "places"
             }
         }
+        let faceNames = phase == .faces ? doc.faceRegions.compactMap(\.name) : []
         return ScanActivityEntry(
             id: UUID(),
             photoID: PhotoFile.stableID(for: url),
@@ -237,7 +284,11 @@ final class ScanActivityLog {
             phase: phase,
             outcome: .written,
             tags: tags,
-            faceNames: faceNames
+            faceNames: faceNames,
+            facePack: doc.tools.facePack,
+            faceTaggedAt: doc.tools.faceTaggedAt,
+            sidecarOnDisk: doc.exists,
+            faceDecisions: doc.decisions
         )
     }
 }

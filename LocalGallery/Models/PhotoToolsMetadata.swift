@@ -12,17 +12,29 @@ import Foundation
 /// Face fields come from `CoreFacePack` / `CoreFaceTaggedAt`. The face
 /// timestamp is its own field so a later tagging write cannot look like a
 /// new face scan.
-struct PhotoToolsMetadata: Equatable, Sendable {
-    var taggerVersion: String?
-    var taggedAt: String?
-    var clipModel: String?
-    var clipTimestamp: String?
-    var facePack: String?
-    var faceTaggedAt: String?
+struct PhotoToolsMetadata: Equatable, Sendable, Codable {
+    var taggerVersion: String? = nil
+    var taggedAt: String? = nil
+    var clipModel: String? = nil
+    var clipTimestamp: String? = nil
+    var facePack: String? = nil
+    var faceTaggedAt: String? = nil
 
     var isEmpty: Bool {
         taggerVersion == nil && taggedAt == nil
             && clipModel == nil && clipTimestamp == nil
             && facePack == nil && faceTaggedAt == nil
+    }
+
+    /// Prefer this record's fields; fill gaps from `older`.
+    func merging(over older: PhotoToolsMetadata) -> PhotoToolsMetadata {
+        PhotoToolsMetadata(
+            taggerVersion: taggerVersion ?? older.taggerVersion,
+            taggedAt: taggedAt ?? older.taggedAt,
+            clipModel: clipModel ?? older.clipModel,
+            clipTimestamp: clipTimestamp ?? older.clipTimestamp,
+            facePack: facePack ?? older.facePack,
+            faceTaggedAt: faceTaggedAt ?? older.faceTaggedAt
+        )
     }
 }

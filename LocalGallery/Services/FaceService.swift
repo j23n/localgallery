@@ -210,6 +210,9 @@ final class FaceService {
     /// Paths this run just finished (detections, empty scans, cache hits).
     /// `LibraryAnalysis` records them into the live Scan Activity journal.
     @ObservationIgnored var onPhotosRecorded: (@MainActor ([String]) -> Void)?
+    /// Per-photo detections of the last finished run (score, quality,
+    /// Joined vs Seeded). Scan Activity detail only — not a library field.
+    @ObservationIgnored var onLastRunDiagnostics: (@MainActor ([String: [FacePhotoDiagnostic]]) -> Void)?
 
     @ObservationIgnored private var session: FaceSession?
     /// Which pack `session` was opened against, so a pack change reopens it.
@@ -481,6 +484,7 @@ final class FaceService {
         cancelRequested = false
         progress = nil
         lastSummary = summary
+        pullLastRunDiagnostics()
         if let failure = summary.failure {
             lastError = failure
             Log.ml.error("Face run failed: \(String(describing: failure))")
@@ -502,6 +506,34 @@ final class FaceService {
         // one. `isRunning` stays true until then so the next phase waits.
         await releaseSession()
         isRunning = false
+    }
+
+    /// Pull the last run's per-photo assign journal before the session
+    /// is released. Requires a core rebuild (`takeLastRunPhotos`).
+    private func pullLastRunDiagnostics() {
+        guard let session else { return }
+        let records = session.takeLastRunPhotos()
+        guard !records.isEmpty else { return }
+        var byPath: [String: [FacePhotoDiagnostic]] = [:]
+        byPath.reserveCapacity(records.count)
+        for record in records {
+            byPath[record.path] = record.faces.map { face in
+                let assignment: FacePhotoDiagnostic.Assignment?
+                switch face.assignment {
+                case .joined: assignment = .joined
+                case .seeded: assignment = .seeded
+                case .none: assignment = nil
+                }
+                return FacePhotoDiagnostic(
+                    score: face.score,
+                    quality: face.quality,
+                    clusterID: face.clusterId,
+                    assignment: assignment,
+                    label: face.label
+                )
+            }
+        }
+        onLastRunDiagnostics?(byPath)
     }
 
     // MARK: - Review

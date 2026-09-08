@@ -128,9 +128,9 @@ enum EnrichmentService {
             )
         }
 
-        // EXIF + embedded XMP + `.xmp` sidecar, merged by the core. The
-        // per-field precedence between the two sources is documented at the
-        // merge site in `gallery_meta::media`, which is now its only copy.
+        // EXIF date/GPS from the image; tags, country and faces from the
+        // sidecar only. A photo with no sidecar is untagged until Scan
+        // writes one.
         let metadata = readImageMetadata(path: photo.url.path)
         let tags = metadata.hierarchicalTags.map {
             HierarchicalTag(fullPath: $0.fullPath, namespace: $0.namespace,

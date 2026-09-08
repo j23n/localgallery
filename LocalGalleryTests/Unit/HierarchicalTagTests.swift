@@ -26,6 +26,15 @@ final class HierarchicalTagTests: XCTestCase {
         XCTAssertEqual(tag.displayName, "Rome")
     }
 
+    func testPhotoFilePlaceTagsReadsThePlacesName() {
+        let photo = PhotoFile.fixture(
+            tags: ["People/Ada", "Places/Italy/Lazio/Rome", "Scenes/Beach"]
+        )
+        XCTAssertEqual(photo.placeTags.map(\.fullPath), ["Places/Italy/Lazio/Rome"])
+        XCTAssertEqual(photo.placeTags.first?.displayName, "Rome")
+        XCTAssertTrue(PhotoFile.fixture(tags: ["People/Ada"]).placeTags.isEmpty)
+    }
+
     func testNamespaceCapitalizationIsPreserved() {
         // Tag namespaces are written by photo-tools in TitleCase. The parser
         // doesn't lowercase them — downstream code (TagNamespace.icon) is

@@ -1517,6 +1517,19 @@ impl CacheDb {
         Ok(count.max(0) as u32)
     }
 
+    /// `(face_idx, cluster_id)` for every clustered face of one photo.
+    pub fn cluster_ids_for_hash(&self, hash: &[u8; 32]) -> MlResult<Vec<(u32, i64)>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT face_idx, cluster_id FROM cluster_members
+             WHERE content_hash = ?1 ORDER BY face_idx",
+        )?;
+        let rows = stmt.query_map(params![hash.as_slice()], |r| {
+            Ok((r.get::<_, i64>(0)?.max(0) as u32, r.get(1)?))
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     /// The `(content_hash, face_idx)` pairs of one cluster, in stable order.
     pub fn cluster_members(&self, id: i64) -> MlResult<Vec<([u8; 32], u32)>> {
         let conn = self.lock();

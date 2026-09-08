@@ -140,6 +140,8 @@ targets:
         shell: /bin/bash
         # So Compile Sources waits for bindgen instead of type-checking
         # ImageIOHeicDecoder.swift against a stale GalleryCore.swift.
+        # Do not list the xcframework here: ProcessXCFramework already
+        # depends on it, and a script output on the same file is a cycle.
         outputFiles:
           - $(SRCROOT)/build/core/Generated/GalleryCore.swift
           - $(SRCROOT)/build/core/headers/GalleryCoreFFI.h

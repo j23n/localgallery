@@ -93,11 +93,15 @@ pub use engine::{
 };
 pub use error::{ErrorCode, MlError, MlResult};
 pub use face::{
-    Detection, FaceEngine, FaceProgress, FaceRunOptions, FaceRunSummary, FailedWrite,
-    NoFaceProgress, ReclusterSummary, SidecarWritePlan, ALIGN_VERSION,
+    cluster_merge_direction, ClusterMerge, Detection, FaceAssignmentRecord, FaceEngine,
+    FacePhotoRecord, FaceProgress, FaceRunOptions, FaceRunSummary, FailedWrite, NoFaceProgress,
+    ReclusterSummary, SidecarWritePlan, ALIGN_VERSION,
 };
 pub use heif::HeifDecoder;
-pub use pack::{ClusteringConfig, FaceSpec, Manifest, ModelPack, RootConfig};
+pub use pack::{
+    resolve_model_pack, ClusteringConfig, FaceSpec, Manifest, ModelPack, PackResolution,
+    PackSource, RootConfig,
+};
 pub use preprocess::{
     host_heic_decode, limit_long_side, rgb_from_packed, CrateDecoder, HostHeicDecoder,
     ImageDecoder, ImageKind, PreprocessConfig, ResizeFilter, RgbImage, Tensor,

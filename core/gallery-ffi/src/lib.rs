@@ -37,8 +37,10 @@ mod support;
 pub mod tagging;
 
 pub use faces::{
-    ClusterState, ClusterSummary, FaceError, FaceFailure, FaceLibraryStats, FaceProgressListener,
-    FaceRef, FaceRunSummary, FaceSession, FaceStats, ReclusterSummary, SidecarWriteReport,
+    face_merge_direction, ClusterState, ClusterSummary, FaceAssignKind, FaceAssignmentRecord,
+    FaceError, FaceFailure, FaceLibraryStats, FaceMergeCandidate, FaceMergeDecision, FacePhotoRecord,
+    FaceProgressListener, FaceRef, FaceRunSummary, FaceSession, FaceStats, ReclusterSummary,
+    SidecarWriteReport,
 };
 pub use heic::{HeicDecodeError, HeicDecoder, HeicPixels};
 pub use library::{
@@ -48,16 +50,20 @@ pub use library::{
     MemoryLeafFolder, MemoryPersonLink, MemoryRecord, ScheduledMemoryRecord, TagSuggestionRecord,
 };
 pub use scanner::{
-    load_snapshot, parse_xmp_bytes, probe_snapshot_version, read_image_metadata, read_video_date,
+    load_snapshot, named_people_without_box, parse_xmp_bytes, probe_snapshot_version,
+    read_image_metadata, read_sidecar, read_video_date,
     save_snapshot, snapshot_version, ImageMetadataRecord, ProviderProbe, ScanContentVersion,
     ScanError, ScanFolderNode, ScanLocality, ScanOutcomeRecord, ScanPhoto, ScanProgressListener,
     ScanRegion, ScanRequest, ScanSidecarRow, ScanTag, ScanTimings, ScannerSession,
-    SidecarParseRecord, SnapshotRecord, VfsProviderAttrs, WallClock,
+    SidecarParseRecord, SidecarViewRecord, SnapshotRecord, VfsProviderAttrs, WallClock,
 };
-pub use places::{write_places, PlaceWrite, PlacesError};
+pub use places::{
+    is_strict_places_prefix, place_from_parts, places_path, places_still_needed, write_places,
+    PlaceWrite, PlacesError,
+};
 pub use tagging::{
-    inspect_model_pack, ModelPackInfo, TaggingError, TaggingFailure, TaggingProgressListener,
-    TaggingRunSummary, TaggingSession, TaggingStats,
+    inspect_model_pack, resolve_model_pack, ModelPackInfo, PackResolution, PackSource, TaggingError,
+    TaggingFailure, TaggingProgressListener, TaggingRunSummary, TaggingSession, TaggingStats,
 };
 
 /// Version of the Rust core, for logging and "is the framework I linked the

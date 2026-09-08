@@ -172,11 +172,36 @@ final class LibraryAnalysisTests: XCTestCase {
         }
 
         await run.start()
-        XCTAssertEqual(run.lastSummary, LibraryAnalysis.Summary(), "a finished Places tag is skipped")
+        XCTAssertEqual(
+            run.lastSummary,
+            LibraryAnalysis.Summary(),
+            "a Places name already on the library row is not the Scan work queue"
+        )
 
         await run.start(phases: [.places], force: true)
         XCTAssertEqual(run.lastSummary?.places?.written, 1)
         XCTAssertEqual(run.lastSummary?.places?.processed, 1)
+    }
+
+    func testScanSkipsAnyPlacesNameAlreadyOnTheLibraryRow() async {
+        let temp = makeTemp()
+        let run = makeAnalysis(temp)
+        let photoURL = temp.appending("paris.jpg")
+        XCTAssertTrue(FileManager.default.createFile(atPath: photoURL.path, contents: Data("jpeg".utf8)))
+        run.photos = {
+            [PhotoFile.fixture(
+                url: photoURL,
+                tags: ["Places/France/Paris"],
+                gps: (lat: 48.8584, lon: 2.2945)
+            )]
+        }
+
+        await run.start()
+        XCTAssertEqual(
+            run.lastSummary,
+            LibraryAnalysis.Summary(),
+            "a rescan-loaded Places/Paris name must not put the photo back up for places"
+        )
     }
 
     func testProgressCountTextIsTheCurrentPhaseWorkQueue() {

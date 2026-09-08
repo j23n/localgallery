@@ -8,6 +8,12 @@
 //! `CoreTags` list does not include Places, so a later tagging run cannot
 //! retract them, and a photo photo-tools (or a human) already placed is left
 //! alone.
+//!
+//! One exception to "already placed": a *strict prefix* (`Places/France` →
+//! `Places/France/Île-de-France/Paris`) is an upgrade, not a fork. The first
+//! geocode often returns country only (Apple leaves `locality` nil for many
+//! European cities). A later pass that actually has the city must be allowed
+//! to extend the path; overwriting a different country must not.
 
 use std::collections::BTreeSet;
 
@@ -52,6 +58,125 @@ impl PlaceWriteRequest {
     }
 }
 
+/// A finished Places path has country, region and city (`Places/a/b/c`).
+///
+/// Shallower tags stay eligible so a later geocode can extend them. Four
+/// or more segments is treated as placed: a human or photo-tools city is
+/// not overwritten.
+pub const PLACES_FINISHED_DEPTH: usize = 4;
+
+/// First `Places/…` entry in document order.
+pub fn first_places_tag(tags: impl IntoIterator<Item = impl AsRef<str>>) -> Option<String> {
+    tags.into_iter()
+        .map(|t| t.as_ref().to_string())
+        .find(|t| is_places_tag(t))
+}
+
+/// `Places/France` is a strict prefix of `Places/France/Île-de-France/Paris`.
+pub fn is_strict_places_prefix(existing: &str, newer: &str) -> bool {
+    let a = place_segments(existing);
+    let b = place_segments(newer);
+    a.first().map(String::as_str) == Some("places")
+        && b.len() > a.len()
+        && a.iter().zip(b.iter()).all(|(x, y)| x == y)
+}
+
+/// How many `/`-separated segments a Places tag has. `None` if it is not one.
+pub fn places_depth(tag: &str) -> Option<usize> {
+    is_places_tag(tag).then(|| place_segments(tag).len())
+}
+
+/// Whether a sidecar's Places tags are still shallow enough to extend.
+///
+/// No Places tag ⇒ needed. A path of depth ≥ [`PLACES_FINISHED_DEPTH`] ⇒ done.
+pub fn places_still_needed(tags: impl IntoIterator<Item = impl AsRef<str>>) -> bool {
+    match tags.into_iter().filter_map(|t| places_depth(t.as_ref())).max() {
+        None => true,
+        Some(depth) => depth < PLACES_FINISHED_DEPTH,
+    }
+}
+
+/// `Places/<Country>[/<Region>[/<City>[/<Neighborhood>]]]`, missing levels
+/// collapsed. `None` when every field is empty.
+pub fn places_path(
+    country: Option<&str>,
+    state: Option<&str>,
+    city: Option<&str>,
+    sublocation: Option<&str>,
+) -> Option<String> {
+    let mut segments = Vec::new();
+    for part in [country, state, city, sublocation] {
+        if let Some(value) = nonempty(part) {
+            segments.push(value);
+        }
+    }
+    if segments.is_empty() {
+        return None;
+    }
+    Some(format!("{PLACES_ROOT}/{}", segments.join("/")))
+}
+
+/// Build a write request from already-normalized place fields.
+///
+/// Duplicate levels (Singapore the city == Singapore the country) are
+/// dropped so the path does not read `Places/Singapore/Singapore`.
+pub fn place_from_parts(
+    country: Option<&str>,
+    state: Option<&str>,
+    city: Option<&str>,
+    sublocation: Option<&str>,
+    country_code: Option<&str>,
+) -> Option<PlaceWriteRequest> {
+    let country = nonempty(country);
+    let state = distinct(state, &[country.as_deref()]);
+    let city = distinct(city, &[country.as_deref(), state.as_deref()]);
+    let sublocation = distinct(
+        sublocation,
+        &[country.as_deref(), state.as_deref(), city.as_deref()],
+    );
+    let path = places_path(
+        country.as_deref(),
+        state.as_deref(),
+        city.as_deref(),
+        sublocation.as_deref(),
+    )?;
+    let country_code = nonempty(country_code)
+        .map(|cc| cc.to_uppercase())
+        .filter(|cc| cc.len() == 2);
+    Some(PlaceWriteRequest {
+        path,
+        country,
+        state,
+        city,
+        sublocation,
+        country_code,
+    })
+}
+
+fn nonempty(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+}
+
+fn distinct(value: Option<&str>, others: &[Option<&str>]) -> Option<String> {
+    let value = nonempty(value)?;
+    let key = nfc_lower(&value);
+    if others.iter().flatten().any(|other| nfc_lower(other) == key) {
+        return None;
+    }
+    Some(value)
+}
+
+fn place_segments(tag: &str) -> Vec<String> {
+    tag.split('/')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(nfc_lower)
+        .collect()
+}
+
 /// Apply `request` to an existing sidecar's bytes, or synthesise a new packet.
 pub fn apply_places(
     existing: Option<&[u8]>,
@@ -69,21 +194,21 @@ pub fn apply_places(
 
     let view = view_of(&doc);
     // A Places tag from anyone — photo-tools, a human, a previous run of
-    // ours — means the photo is already placed. Adding a second path would
-    // fork the taxonomy (two countries on one GPS point) and overwriting
-    // would discard a human decision.
-    if view.tags_list.iter().any(|t| is_places_tag(t)) {
-        return Ok(crate::write::AppliedTags {
-            bytes: serialize(&doc),
-            added: vec![],
-            removed: vec![],
-            owned: vec![],
-            created,
-            changed: false,
-        });
-    }
-
-    let plan = PlacePlan::build(&view, &path, request);
+    // ours — means the photo is already placed, *unless* it is a strict
+    // prefix of the new path. Adding a second country would fork the
+    // taxonomy; overwriting a different city would discard a human decision.
+    // Extending `Places/France` to `Places/France/Île-de-France/Paris` is
+    // the one write that is still ours.
+    let plan = match first_places_tag(&view.tags_list) {
+        Some(current) if nfc_lower(&current) == nfc_lower(&path) => {
+            return Ok(unchanged(&doc, created));
+        }
+        Some(current) if is_strict_places_prefix(&current, &path) => {
+            PlacePlan::upgrade(&view, &current, &path, request)
+        }
+        Some(_) => return Ok(unchanged(&doc, created)),
+        None => PlacePlan::build(&view, &path, request),
+    };
     apply_plan(&mut doc, &root, &plan);
 
     let bytes = serialize(&doc);
@@ -95,11 +220,22 @@ pub fn apply_places(
     Ok(crate::write::AppliedTags {
         bytes,
         added: plan.tags_to_add.clone(),
-        removed: vec![],
+        removed: plan.tags_to_remove.clone(),
         owned: plan.tags_to_add.clone(),
         created,
         changed,
     })
+}
+
+fn unchanged(doc: &Document, created: bool) -> crate::write::AppliedTags {
+    crate::write::AppliedTags {
+        bytes: serialize(doc),
+        added: vec![],
+        removed: vec![],
+        owned: vec![],
+        created,
+        changed: false,
+    }
 }
 
 /// Locate (or create) `image_path`'s sidecar and apply `request` to it.
@@ -126,7 +262,7 @@ pub fn write_places(
 
     let applied = apply_places(existing.as_deref(), request)?;
     let created = before.is_none();
-    let written = applied.changed || created;
+    let written = applied.changed;
 
     if written {
         if stat_token(vfs, &target) != before {
@@ -168,8 +304,11 @@ fn is_places_tag(tag: &str) -> bool {
 
 struct PlacePlan {
     tags_to_add: Vec<String>,
+    tags_to_remove: Vec<String>,
     subjects_to_add: Vec<String>,
+    subjects_to_remove: Vec<String>,
     lr_to_add: Vec<String>,
+    lr_to_remove: Vec<String>,
     country: Option<String>,
     state: Option<String>,
     city: Option<String>,
@@ -178,6 +317,28 @@ struct PlacePlan {
 }
 
 impl PlacePlan {
+    fn scalars(
+        request: &PlaceWriteRequest,
+    ) -> (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) {
+        (
+            request.country.clone(),
+            request.state.clone(),
+            request.city.clone(),
+            request.sublocation.clone(),
+            request
+                .country_code
+                .as_deref()
+                .map(|cc| cc.trim().to_uppercase())
+                .filter(|cc| cc.len() == 2),
+        )
+    }
+
     fn build(view: &SidecarView, path: &str, request: &PlaceWriteRequest) -> PlacePlan {
         let existing_tags: BTreeSet<String> = view.tags_list.iter().map(|t| nfc(t)).collect();
         let tags_to_add = if existing_tags.contains(&nfc(path)) {
@@ -204,26 +365,46 @@ impl PlacePlan {
             vec![lr]
         };
 
+        let (country, state, city, sublocation, country_code) = Self::scalars(request);
         PlacePlan {
             tags_to_add,
+            tags_to_remove: vec![],
             subjects_to_add,
+            subjects_to_remove: vec![],
             lr_to_add,
-            country: request.country.clone(),
-            state: request.state.clone(),
-            city: request.city.clone(),
-            sublocation: request.sublocation.clone(),
-            country_code: request
-                .country_code
-                .as_deref()
-                .map(|cc| cc.trim().to_uppercase())
-                .filter(|cc| cc.len() == 2),
+            lr_to_remove: vec![],
+            country,
+            state,
+            city,
+            sublocation,
+            country_code,
         }
+    }
+
+    fn upgrade(
+        view: &SidecarView,
+        current: &str,
+        path: &str,
+        request: &PlaceWriteRequest,
+    ) -> PlacePlan {
+        let mut plan = Self::build(view, path, request);
+        plan.tags_to_remove = vec![current.to_string()];
+        let old_leaf = leaf_of(current).to_string();
+        let new_leaf = leaf_of(path).to_string();
+        if nfc_lower(&old_leaf) != nfc_lower(&new_leaf) {
+            plan.subjects_to_remove = vec![old_leaf];
+        }
+        plan.lr_to_remove = vec![to_lr_path(current)];
+        plan
     }
 
     fn touches_anything(&self) -> bool {
         !self.tags_to_add.is_empty()
+            || !self.tags_to_remove.is_empty()
             || !self.subjects_to_add.is_empty()
+            || !self.subjects_to_remove.is_empty()
             || !self.lr_to_add.is_empty()
+            || !self.lr_to_remove.is_empty()
             || self.country.is_some()
             || self.state.is_some()
             || self.city.is_some()
@@ -244,7 +425,7 @@ fn apply_plan(doc: &mut Document, root: &NodePath, plan: &PlacePlan) {
         PREFIX_DIGIKAM,
         PROP_TAGS_LIST,
         "Seq",
-        &[],
+        &plan.tags_to_remove,
         &plan.tags_to_add,
     );
     edit_list_ignore_case(
@@ -254,7 +435,7 @@ fn apply_plan(doc: &mut Document, root: &NodePath, plan: &PlacePlan) {
         PREFIX_DC,
         PROP_SUBJECT,
         "Bag",
-        &[],
+        &plan.subjects_to_remove,
         &plan.subjects_to_add,
     );
     edit_list_exact(
@@ -264,7 +445,7 @@ fn apply_plan(doc: &mut Document, root: &NodePath, plan: &PlacePlan) {
         PREFIX_LR,
         PROP_HIERARCHICAL_SUBJECT,
         "Bag",
-        &[],
+        &plan.lr_to_remove,
         &plan.lr_to_add,
     );
 
@@ -394,16 +575,19 @@ mod tests {
     fn an_existing_places_tag_is_left_alone() {
         let vfs = MemVfs::new();
         vfs.insert("/lib/a.jpg", b"jpeg".to_vec());
-        crate::write_tags(
-            &vfs,
-            "/lib/a.jpg",
-            &crate::TagWriteRequest::new(
-                ["Places/France/Paris".to_string()],
-                "pack",
-                "2026-08-03T10:00:00Z",
-            ),
-        )
-        .unwrap();
+        // A human / photo-tools placement, not a tagging write — `write_tags`
+        // will not plant `Places/*` (that root is not in its replace set).
+        vfs.insert(
+            "/lib/a.jpg.xmp",
+            br#"<x:xmpmeta xmlns:x="adobe:ns:meta/">
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+ <rdf:Description rdf:about="" xmlns:digiKam="http://www.digikam.org/ns/1.0/">
+  <digiKam:TagsList><rdf:Seq><rdf:li>Places/France/Paris</rdf:li></rdf:Seq></digiKam:TagsList>
+ </rdf:Description>
+</rdf:RDF>
+</x:xmpmeta>"#
+                .to_vec(),
+        );
 
         let outcome = write_places(&vfs, "/lib/a.jpg", &req("Places/Italy/Rome")).unwrap();
         assert!(!outcome.written);
@@ -457,5 +641,115 @@ mod tests {
     fn a_bare_places_root_is_rejected() {
         let err = normalize_places_path("Places").unwrap_err();
         assert!(matches!(err, MetaError::InvalidTag { .. }));
+    }
+
+    #[test]
+    fn a_country_only_tag_is_extended_with_the_city() {
+        let vfs = MemVfs::new();
+        vfs.insert("/lib/eiffel.jpg", b"jpeg".to_vec());
+        let country = PlaceWriteRequest {
+            path: "Places/France".into(),
+            country: Some("France".into()),
+            country_code: Some("FR".into()),
+            ..Default::default()
+        };
+        assert!(write_places(&vfs, "/lib/eiffel.jpg", &country)
+            .unwrap()
+            .written);
+
+        let with_city = PlaceWriteRequest {
+            path: "Places/France/Île-de-France/Paris".into(),
+            country: Some("France".into()),
+            state: Some("Île-de-France".into()),
+            city: Some("Paris".into()),
+            country_code: Some("FR".into()),
+            ..Default::default()
+        };
+        assert!(write_places(&vfs, "/lib/eiffel.jpg", &with_city)
+            .unwrap()
+            .written);
+
+        let view = crate::read_view(&vfs.read("/lib/eiffel.jpg.xmp").unwrap()).unwrap();
+        assert_eq!(
+            view.tags_list,
+            vec!["Places/France/Île-de-France/Paris"]
+        );
+        assert!(!view.tags_list.iter().any(|t| t == "Places/France"));
+        assert_eq!(view.subject, vec!["Paris"]);
+    }
+
+    #[test]
+    fn a_different_country_is_not_overwritten() {
+        let vfs = MemVfs::new();
+        vfs.insert("/lib/a.jpg", b"jpeg".to_vec());
+        write_places(&vfs, "/lib/a.jpg", &req("Places/Italy/Rome")).unwrap();
+        let france = PlaceWriteRequest {
+            path: "Places/France/Paris".into(),
+            country: Some("France".into()),
+            city: Some("Paris".into()),
+            country_code: Some("FR".into()),
+            ..Default::default()
+        };
+        assert!(!write_places(&vfs, "/lib/a.jpg", &france).unwrap().written);
+        let view = crate::read_view(&vfs.read("/lib/a.jpg.xmp").unwrap()).unwrap();
+        assert_eq!(view.tags_list, vec!["Places/Italy/Rome"]);
+    }
+
+    #[test]
+    fn prefix_compare_is_case_insensitive_and_strict() {
+        assert!(is_strict_places_prefix(
+            "Places/France",
+            "Places/France/Île-de-France/Paris"
+        ));
+        assert!(is_strict_places_prefix(
+            "Places/France/Île-de-France",
+            "Places/France/Île-de-France/Paris"
+        ));
+        assert!(!is_strict_places_prefix(
+            "Places/France/Paris",
+            "Places/France/Île-de-France/Paris"
+        ));
+        assert!(!is_strict_places_prefix("Places/France", "Places/France"));
+        assert!(!is_strict_places_prefix(
+            "Places/Italy",
+            "Places/France/Paris"
+        ));
+    }
+
+    #[test]
+    fn places_still_needed_treats_city_depth_as_finished() {
+        assert!(places_still_needed(Vec::<String>::new()));
+        assert!(places_still_needed(["Places/France"]));
+        assert!(places_still_needed(["Places/France/Île-de-France"]));
+        assert!(!places_still_needed(["Places/France/Île-de-France/Paris"]));
+        assert!(!places_still_needed([
+            "Places/France/Île-de-France/Paris/Louvre"
+        ]));
+    }
+
+    #[test]
+    fn place_from_parts_collapses_duplicate_levels() {
+        let singapore = place_from_parts(
+            Some("Singapore"),
+            None,
+            Some("Singapore"),
+            None,
+            Some("sg"),
+        )
+        .unwrap();
+        assert_eq!(singapore.path, "Places/Singapore");
+        assert_eq!(singapore.country_code.as_deref(), Some("SG"));
+        assert!(singapore.city.is_none());
+
+        let tokyo = place_from_parts(
+            Some("Japan"),
+            Some("Tokyo"),
+            Some("Tokyo"),
+            None,
+            Some("JP"),
+        )
+        .unwrap();
+        assert_eq!(tokyo.path, "Places/Japan/Tokyo");
+        assert!(tokyo.city.is_none());
     }
 }

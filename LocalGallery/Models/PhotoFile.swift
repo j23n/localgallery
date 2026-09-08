@@ -58,6 +58,13 @@ struct PhotoFile: Identifiable, Hashable, Codable, Sendable {
     /// source XMP carries none. Used by the People rail to crop thumbnails to
     /// the matching face.
     var faceRegions: [FaceRegion] = []
+    /// Pack / timestamps from the last sidecar apply.
+    var photoTools: PhotoToolsMetadata = PhotoToolsMetadata()
+    /// `CoreFaceDecisions` strings from the sidecar (named-below-floor, etc.).
+    var faceDecisions: [String] = []
+    /// A `.xmp` exists next to the image (appended or Lightroom alt).
+    /// Distinct from `sidecarStatus`, which is the provider fetch cache.
+    var sidecarOnDisk: Bool = false
     /// Where the photo bytes live. Default `.local`; populated by the scanner
     /// for file-provider URLs. Runtime/cache state — not part of the stable
     /// UUID derivation.
@@ -78,6 +85,13 @@ struct PhotoFile: Identifiable, Hashable, Codable, Sendable {
         hierarchicalTags.filter { $0.namespace?.lowercased() == "people" }
     }
 
+    /// `Places/*` keywords on the file. After a library rescan these are
+    /// the sidecar names already on the row — Scan uses them to skip
+    /// photos that are already place-tagged, without another sidecar walk.
+    var placeTags: [HierarchicalTag] {
+        hierarchicalTags.filter { $0.namespace?.lowercased() == "places" }
+    }
+
     /// People keywords that have no matching named MWG region — a name on
     /// the file that this pack never boxed.
     var peopleTagsWithoutFace: [HierarchicalTag] {
@@ -86,10 +100,10 @@ struct PhotoFile: Identifiable, Hashable, Codable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, url, filename, fileSize, dateTaken, dateFromMetadata, isVideo, livePhotoVideoURL, hierarchicalTags, countryCode, enrichedFileDate, fileModificationDate, gpsLatitude, gpsLongitude, faceRegions
+        case id, url, filename, fileSize, dateTaken, dateFromMetadata, isVideo, livePhotoVideoURL, hierarchicalTags, countryCode, enrichedFileDate, fileModificationDate, gpsLatitude, gpsLongitude, faceRegions, photoTools, faceDecisions, sidecarOnDisk
     }
 
-    init(id: UUID, url: URL, filename: String, fileSize: Int64, dateTaken: Date?, dateFromMetadata: Bool = false, isVideo: Bool = false, livePhotoVideoURL: URL? = nil, hierarchicalTags: [HierarchicalTag] = [], countryCode: String? = nil, enrichedFileDate: Date? = nil, fileModificationDate: Date? = nil, gpsLatitude: Double? = nil, gpsLongitude: Double? = nil, faceRegions: [FaceRegion] = [], locality: PhotoLocality = .local, sidecarStatus: SidecarStatus = .absent) {
+    init(id: UUID, url: URL, filename: String, fileSize: Int64, dateTaken: Date?, dateFromMetadata: Bool = false, isVideo: Bool = false, livePhotoVideoURL: URL? = nil, hierarchicalTags: [HierarchicalTag] = [], countryCode: String? = nil, enrichedFileDate: Date? = nil, fileModificationDate: Date? = nil, gpsLatitude: Double? = nil, gpsLongitude: Double? = nil, faceRegions: [FaceRegion] = [], photoTools: PhotoToolsMetadata = PhotoToolsMetadata(), faceDecisions: [String] = [], sidecarOnDisk: Bool = false, locality: PhotoLocality = .local, sidecarStatus: SidecarStatus = .absent) {
         self.id = id
         self.url = url
         self.filename = filename
@@ -105,6 +119,9 @@ struct PhotoFile: Identifiable, Hashable, Codable, Sendable {
         self.gpsLatitude = gpsLatitude
         self.gpsLongitude = gpsLongitude
         self.faceRegions = faceRegions
+        self.photoTools = photoTools
+        self.faceDecisions = faceDecisions
+        self.sidecarOnDisk = sidecarOnDisk
         self.locality = locality
         self.sidecarStatus = sidecarStatus
     }
@@ -126,6 +143,9 @@ struct PhotoFile: Identifiable, Hashable, Codable, Sendable {
         gpsLatitude = try c.decodeIfPresent(Double.self, forKey: .gpsLatitude)
         gpsLongitude = try c.decodeIfPresent(Double.self, forKey: .gpsLongitude)
         faceRegions = try c.decodeIfPresent([FaceRegion].self, forKey: .faceRegions) ?? []
+        photoTools = try c.decodeIfPresent(PhotoToolsMetadata.self, forKey: .photoTools) ?? PhotoToolsMetadata()
+        faceDecisions = try c.decodeIfPresent([String].self, forKey: .faceDecisions) ?? []
+        sidecarOnDisk = try c.decodeIfPresent(Bool.self, forKey: .sidecarOnDisk) ?? false
     }
 
     static func == (lhs: PhotoFile, rhs: PhotoFile) -> Bool {

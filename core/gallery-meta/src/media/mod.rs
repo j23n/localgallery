@@ -5,10 +5,10 @@
 //! video. Not the sidecar *cache* path — `SidecarSyncService` fetches bytes
 //! its own way and hands them to [`swift_xmp::parse_xmp_bytes`] directly.
 //!
-//! The merge at the bottom of [`read_image_metadata`] is the only place the
-//! sidecar-vs-embedded precedence table exists now. It used to live in a
-//! comment in `MetadataReader.readImageMetadata`; the Swift copy goes away
-//! with the swap, so this is the copy.
+//! Tags, country and face regions come from the sidecar only. ML and
+//! geocoding write `.xmp` and never the image; a photo with no sidecar is
+//! untagged until Scan writes one. Capture date and GPS still come from
+//! EXIF in the image — those are camera facts, not our writes.
 
 pub mod container;
 pub mod embedded;
@@ -35,7 +35,7 @@ pub struct ImageMetadata {
     /// EXIF capture date as a **zone-less wall clock**. The platform layer
     /// resolves it in the device zone, exactly as `exifDateFormatter` does.
     pub capture_wall_clock: Option<CivilDateTime>,
-    /// Deduplicated tags, embedded first.
+    /// Sidecar `digiKam:TagsList`, deduplicated.
     pub hierarchical_tags: Vec<HierarchicalTag>,
     /// Uppercase country code.
     pub country_code: Option<String>,
@@ -43,7 +43,7 @@ pub struct ImageMetadata {
     pub gps_latitude: Option<f64>,
     /// Signed longitude.
     pub gps_longitude: Option<f64>,
-    /// Face regions, sidecar-preferred.
+    /// Face regions from the sidecar.
     pub face_regions: Vec<FaceRegion>,
     /// TIFF orientation. Not part of the Swift reader's output; see
     /// [`ExifFacts::orientation`].
@@ -52,14 +52,10 @@ pub struct ImageMetadata {
 
 /// Read `path` and its `.xmp` sidecar.
 ///
-/// # Precedence, when both sources have something to say
-///
-/// | field | rule |
+/// | field | source |
 /// |---|---|
-/// | tags | **union**, embedded first, case-insensitive first-wins dedup — so the *embedded* spelling of a conflicting path survives. Exception: when the sidecar has `TaggerVersion`, its `Objects/*` and `Scenes/*` replace the embedded ones |
-/// | `country_code` | **embedded wins**; the sidecar only fills a gap |
-/// | `face_regions` | **sidecar wins outright** when it has any; embedded survive only when the sidecar has none |
-/// | dates, GPS | **embedded only** — a sidecar's `exif:DateTimeOriginal` and `exif:GPS*` are read by nobody |
+/// | tags, country, face regions | **sidecar only** |
+/// | dates, GPS | **EXIF in the image** — a sidecar's `exif:DateTimeOriginal` and `exif:GPS*` are read by nobody |
 ///
 /// The sidecar read is **unconditional**: it does not depend on the image
 /// opening, which is why a zero-byte JPEG still comes back tagged
@@ -75,44 +71,23 @@ pub struct ImageMetadata {
 pub fn read_image_metadata(vfs: &dyn Vfs, path: &str) -> ImageMetadata {
     let bytes = read_metadata_prefix(vfs, path);
     let exif = read_exif_facts(&bytes);
-    let embedded = extract_xmp(&bytes)
-        .map(|packet| read_embedded_xmp(&packet))
-        .unwrap_or_default();
     let sidecar = read_sidecar(vfs, path);
-    merge(exif, embedded, sidecar)
+    merge(exif, sidecar)
 }
 
 /// The `.xmp` next to `path`, parsed. Missing or unreadable ⇒ nothing.
 fn read_sidecar(vfs: &dyn Vfs, path: &str) -> SwiftXmpParse {
-    let sidecar_path = crate::sidecar::sidecar_path(path);
-    match vfs.read(&sidecar_path) {
-        Ok(bytes) => parse_xmp_bytes(&bytes),
-        Err(_) => SwiftXmpParse::default(),
+    match crate::sidecar::read_sidecar_bytes(vfs, path) {
+        Some(bytes) => parse_xmp_bytes(&bytes),
+        None => SwiftXmpParse::default(),
     }
 }
 
-/// Apply the precedence table. Split out so it can be tested without a VFS.
-fn merge(exif: ExifFacts, embedded: EmbeddedXmp, sidecar: SwiftXmpParse) -> ImageMetadata {
-    let mut raw_tags = embedded.raw_tags;
-    if sidecar.tagger_version.is_some() {
-        raw_tags.retain(|t| !crate::tags::is_content_tag(t));
-    }
-    raw_tags.extend(sidecar.raw_tags);
-
-    let country_code = embedded.country_code.or(sidecar.country_code);
-
-    let regions = if sidecar.face_regions.is_empty() {
-        embedded.face_regions
-    } else {
-        sidecar.face_regions
-    };
-
-    // Dedup by lowercased path, first occurrence wins. Because the embedded
-    // tags were appended first, an embedded "People/Alice" beats a sidecar
-    // "people/alice" — the spelling that survives is the embedded one.
+/// Sidecar tags / country / regions plus image EXIF date and GPS.
+fn merge(exif: ExifFacts, sidecar: SwiftXmpParse) -> ImageMetadata {
     let mut seen: Vec<String> = Vec::new();
     let mut hierarchical_tags = Vec::new();
-    for raw in raw_tags {
+    for raw in sidecar.raw_tags {
         let key = raw.to_lowercase();
         if seen.contains(&key) {
             continue;
@@ -124,10 +99,11 @@ fn merge(exif: ExifFacts, embedded: EmbeddedXmp, sidecar: SwiftXmpParse) -> Imag
     ImageMetadata {
         capture_wall_clock: exif.capture_wall_clock,
         hierarchical_tags,
-        country_code,
+        country_code: sidecar.country_code,
         gps_latitude: exif.gps_latitude,
         gps_longitude: exif.gps_longitude,
-        face_regions: regions
+        face_regions: sidecar
+            .face_regions
             .into_iter()
             .map(|r| FaceRegion {
                 name: r.name,
@@ -156,115 +132,49 @@ mod tests {
         }
     }
 
-    fn merged(embedded: EmbeddedXmp, sidecar: SwiftXmpParse) -> ImageMetadata {
-        merge(ExifFacts::default(), embedded, sidecar)
+    fn merged(sidecar: SwiftXmpParse) -> ImageMetadata {
+        merge(ExifFacts::default(), sidecar)
     }
 
     #[test]
-    fn tags_union_with_the_embedded_spelling_surviving_a_case_conflict() {
-        let out = merged(
-            EmbeddedXmp {
-                raw_tags: vec!["People/Alice".into(), "Objects/Car".into()],
-                ..Default::default()
-            },
-            SwiftXmpParse {
-                raw_tags: vec!["people/alice".into(), "Scenes/Beach".into()],
-                ..Default::default()
-            },
-        );
+    fn tags_and_country_come_from_the_sidecar_only() {
+        let out = merged(SwiftXmpParse {
+            raw_tags: vec!["people/alice".into(), "Scenes/Beach".into(), "people/alice".into()],
+            country_code: Some("FR".into()),
+            ..Default::default()
+        });
         assert_eq!(
             out.hierarchical_tags
                 .iter()
                 .map(|t| t.full_path.as_str())
                 .collect::<Vec<_>>(),
-            vec!["People/Alice", "Objects/Car", "Scenes/Beach"]
+            vec!["people/alice", "Scenes/Beach"]
         );
+        assert_eq!(out.country_code.as_deref(), Some("FR"));
     }
 
     #[test]
-    fn a_stamped_sidecar_replaces_embedded_objects_and_scenes() {
-        let out = merged(
-            EmbeddedXmp {
-                raw_tags: vec![
-                    "People/Alice".into(),
-                    "Objects/Car".into(),
-                    "Scenes/Indoor".into(),
-                ],
-                ..Default::default()
-            },
-            SwiftXmpParse {
-                raw_tags: vec!["people/alice".into(), "Scenes/Beach".into()],
-                tagger_version: Some("mobileclip-s2-2026.1".into()),
-                ..Default::default()
-            },
-        );
-        assert_eq!(
-            out.hierarchical_tags
-                .iter()
-                .map(|t| t.full_path.as_str())
-                .collect::<Vec<_>>(),
-            vec!["People/Alice", "Scenes/Beach"]
-        );
+    fn an_empty_sidecar_means_no_tags_or_regions() {
+        let out = merged(SwiftXmpParse::default());
+        assert!(out.hierarchical_tags.is_empty());
+        assert!(out.face_regions.is_empty());
+        assert_eq!(out.country_code, None);
     }
 
     #[test]
-    fn the_embedded_country_wins_and_the_sidecar_only_fills_a_gap() {
-        let with_both = merged(
-            EmbeddedXmp {
-                country_code: Some("IT".into()),
-                ..Default::default()
-            },
-            SwiftXmpParse {
-                country_code: Some("FR".into()),
-                ..Default::default()
-            },
-        );
-        assert_eq!(with_both.country_code.as_deref(), Some("IT"));
-
-        let gap = merged(
-            EmbeddedXmp::default(),
-            SwiftXmpParse {
-                country_code: Some("NO".into()),
-                ..Default::default()
-            },
-        );
-        assert_eq!(gap.country_code.as_deref(), Some("NO"));
-    }
-
-    #[test]
-    fn sidecar_regions_replace_embedded_ones_outright() {
-        let replaced = merged(
-            EmbeddedXmp {
-                face_regions: vec![region("EmbeddedFace", 0.11)],
-                ..Default::default()
-            },
-            SwiftXmpParse {
-                face_regions: vec![region("SidecarFace", 0.51)],
-                ..Default::default()
-            },
-        );
-        assert_eq!(replaced.face_regions.len(), 1, "merged, not replaced");
-        assert_eq!(
-            replaced.face_regions[0].name.as_deref(),
-            Some("SidecarFace")
-        );
-
-        // …but an empty sidecar region list leaves the embedded ones alone.
-        let kept = merged(
-            EmbeddedXmp {
-                face_regions: vec![region("EmbeddedOnly", 0.21)],
-                ..Default::default()
-            },
-            SwiftXmpParse::default(),
-        );
-        assert_eq!(kept.face_regions[0].name.as_deref(), Some("EmbeddedOnly"));
+    fn sidecar_regions_are_kept() {
+        let out = merged(SwiftXmpParse {
+            face_regions: vec![region("SidecarFace", 0.51)],
+            ..Default::default()
+        });
+        assert_eq!(out.face_regions.len(), 1);
+        assert_eq!(out.face_regions[0].name.as_deref(), Some("SidecarFace"));
     }
 
     #[test]
     fn a_sidecars_dates_and_gps_are_read_by_nobody() {
         let out = merge(
             ExifFacts::default(),
-            EmbeddedXmp::default(),
             parse_xmp_bytes(
                 b"<x><exif:DateTimeOriginal>1999:09:09 09:09:09</exif:DateTimeOriginal>\
                   <exif:GPSLatitude>48,51.29N</exif:GPSLatitude></x>",
@@ -299,6 +209,7 @@ mod tests {
         let vfs = CountingVfs::new();
         let packet = br#"<digiKam:TagsList><rdf:Seq><rdf:li>Scenes/Beach</rdf:li></rdf:Seq></digiKam:TagsList>"#;
         vfs.insert("/lib/huge.jpg", fat_jpeg(packet, 16 << 20));
+        vfs.insert("/lib/huge.jpg.xmp", packet.to_vec());
 
         let out = read_image_metadata(&vfs, "/lib/huge.jpg");
         assert_eq!(
@@ -307,13 +218,29 @@ mod tests {
                 .map(|t| t.full_path.as_str())
                 .collect::<Vec<_>>(),
             vec!["Scenes/Beach"],
-            "the bounded read still finds the packet"
+            "tags come from the sidecar, not the JPEG packet"
         );
         assert!(
             vfs.bytes_read() < (1 << 20),
             "read {} bytes off a 16 MB image",
             vfs.bytes_read()
         );
+    }
+
+    #[test]
+    fn embedded_xmp_in_the_image_is_not_read() {
+        use super::prefix::tests::fat_jpeg;
+
+        let vfs = gallery_vfs::MemVfs::new();
+        let packet = br#"<digiKam:TagsList><rdf:Seq><rdf:li>Scenes/Beach</rdf:li></rdf:Seq></digiKam:TagsList>"#;
+        vfs.insert("/lib/embedded.jpg", fat_jpeg(packet, 4096));
+        let out = read_image_metadata(&vfs, "/lib/embedded.jpg");
+        assert!(
+            out.hierarchical_tags.is_empty(),
+            "a JPEG packet is not a sidecar"
+        );
+        assert_eq!(out.country_code, None);
+        assert!(out.face_regions.is_empty());
     }
 
     #[test]

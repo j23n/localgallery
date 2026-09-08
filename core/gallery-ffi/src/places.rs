@@ -189,3 +189,75 @@ pub fn is_strict_places_prefix(existing: String, newer: String) -> bool {
 pub fn places_still_needed(tags: Vec<String>) -> bool {
     gallery_meta::places_still_needed(tags)
 }
+
+/// Queue + write skip. `force` always returns true.
+#[uniffi::export]
+pub fn places_needed(tags: Vec<String>, force: bool) -> bool {
+    gallery_session::places_needed(tags, force)
+}
+
+/// Why a Nominatim lookup failed.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
+pub enum GeoError {
+    /// Transient — retry.
+    Retryable {
+        /// Log text.
+        detail: String,
+    },
+    /// Do not retry.
+    Fatal {
+        /// Log text.
+        detail: String,
+    },
+}
+
+impl std::fmt::Display for GeoError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GeoError::Retryable { detail } | GeoError::Fatal { detail } => write!(f, "{detail}"),
+        }
+    }
+}
+
+impl std::error::Error for GeoError {}
+
+impl From<gallery_geo::GeoError> for GeoError {
+    fn from(e: gallery_geo::GeoError) -> Self {
+        match e {
+            gallery_geo::GeoError::Retryable(detail) => GeoError::Retryable { detail },
+            gallery_geo::GeoError::Fatal(detail) => GeoError::Fatal { detail },
+        }
+    }
+}
+
+/// Reverse-geocode via Nominatim. `endpoint` is injected (empty = public OSM).
+///
+/// English names. The host owns rate limiting and the haversine cache.
+#[uniffi::export]
+pub fn nominatim_lookup(
+    endpoint: String,
+    latitude: f64,
+    longitude: f64,
+) -> Result<Option<PlaceWrite>, GeoError> {
+    use gallery_geo::{Nominatim, ReverseGeocoder};
+    let url = if endpoint.trim().is_empty() {
+        gallery_geo::DEFAULT_ENDPOINT.to_string()
+    } else {
+        endpoint
+    };
+    let req = Nominatim::new(url).lookup(latitude, longitude)?;
+    Ok(req.map(|r| PlaceWrite {
+        path: r.path,
+        country: r.country,
+        state: r.state,
+        city: r.city,
+        sublocation: r.sublocation,
+        country_code: r.country_code,
+    }))
+}
+
+/// Watch debounce, milliseconds. Hosts implement the OS watcher.
+#[uniffi::export]
+pub fn library_watch_refresh_interval_ms() -> u64 {
+    gallery_session::REFRESH_INTERVAL.as_millis() as u64
+}

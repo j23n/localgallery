@@ -1,0 +1,10 @@
+{
+  "place_id": 1,
+  "address": {
+    "country": "France",
+    "state": "Île-de-France",
+    "city": "Paris",
+    "suburb": "Louvre",
+    "country_code": "fr"
+  }
+}

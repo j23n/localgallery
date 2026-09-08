@@ -8,6 +8,8 @@ members = [
     "gallery-index",
     "gallery-memories",
     "gallery-ml",
+    "gallery-geo",
+    "gallery-session",
     "gallery-ffi",
     "uniffi-bindgen",
 ]

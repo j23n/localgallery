@@ -330,7 +330,7 @@ struct SettingsView: View {
             if let footer = taggingFooter {
                 Text(footer)
             } else {
-                Text("Scan Photos runs tagging, faces, and places, skipping work that is already current. Drop and Rescan overwrites one of those passes on every photo. Scan Activity → On file lists People tags with no detected face.")
+                Text("Scan Photos runs tagging, faces, and places, skipping work that is already current. Drop and Rescan overwrites one of those passes on every photo. Scan Activity → On file lists People tags with no detected face. Places uses Nominatim — GPS coordinates leave the device.")
             }
         }
         .task {
@@ -363,9 +363,9 @@ struct SettingsView: View {
         let tagging = store.tagging
         guard tagging.hasCheckedForPack, tagging.pack == nil else { return nil }
         if tagging.hasBundledPack {
-            return "The model pack that ships with this build could not be verified. Tagging and face scanning are off; place names from GPS still work."
+            return "The model pack that ships with this build could not be verified. Tagging and face scanning are off; place names from GPS still work (Nominatim)."
         }
-        return "This build ships no model pack, so tagging and face scanning are off. Place names from GPS still work."
+        return "This build ships no model pack, so tagging and face scanning are off. Place names from GPS still work (Nominatim — coordinates leave the device)."
     }
 
     private static func analysisSummaryLine(_ summary: LibraryAnalysis.Summary) -> String {

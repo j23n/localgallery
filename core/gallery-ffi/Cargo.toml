@@ -18,6 +18,8 @@ gallery-index = { path = "../gallery-index" }
 gallery-memories = { path = "../gallery-memories" }
 gallery-meta = { path = "../gallery-meta" }
 gallery-ml = { path = "../gallery-ml" }
+gallery-geo = { path = "../gallery-geo" }
+gallery-session = { path = "../gallery-session" }
 gallery-model = { path = "../gallery-model" }
 gallery-scan = { path = "../gallery-scan" }
 gallery-vfs = { path = "../gallery-vfs" }

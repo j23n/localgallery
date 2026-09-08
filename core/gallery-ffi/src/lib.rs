@@ -58,8 +58,9 @@ pub use scanner::{
     SidecarParseRecord, SidecarViewRecord, SnapshotRecord, VfsProviderAttrs, WallClock,
 };
 pub use places::{
-    is_strict_places_prefix, place_from_parts, places_path, places_still_needed, write_places,
-    PlaceWrite, PlacesError,
+    is_strict_places_prefix, library_watch_refresh_interval_ms, nominatim_lookup, place_from_parts,
+    places_needed, places_path, places_still_needed, write_places, GeoError, PlaceWrite,
+    PlacesError,
 };
 pub use tagging::{
     inspect_model_pack, resolve_model_pack, ModelPackInfo, PackResolution, PackSource, TaggingError,

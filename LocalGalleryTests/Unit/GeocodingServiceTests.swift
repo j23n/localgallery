@@ -99,9 +99,9 @@ final class GeocodingServiceTests: XCTestCase {
             tags: ["Places/France"],
             gps: (lat: 48.8584, lon: 2.2945)
         )
-        XCTAssertFalse(
+        XCTAssertTrue(
             GeocodingService.needsLibraryPlaces(countryInMemory),
-            "any Places/* name on the library row means the photo is already place-tagged"
+            "a country-only Places tag stays on the queue so a later pass can add the city"
         )
 
         let countryURL = temp.appending("country.jpg")

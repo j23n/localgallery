@@ -7,17 +7,14 @@ import os
 /// Reverse-geocode GPS into photo-tools `Places/*` tags and IPTC location
 /// fields, the same shape `photo-tools tag --gps` writes.
 ///
-/// Apple's `CLGeocoder` stands in for Nominatim: it needs no API key and
-/// works offline for many regions. The *output* matches photo-tools
-/// (schema §1.3 / §2.2): one nested
+/// The lookup is Nominatim in the Rust core (English names), same source
+/// Linux uses. Coordinates leave the device. The *output* is one nested
 /// `Places/<Country>[/<Region>[/<City>[/<Neighborhood>]]]` keyword plus
 /// `photoshop:City/State/Country`, `Iptc4xmpCore:CountryCode/Location`, and
 /// `phototools:CountryCode`.
 ///
-/// Live lookups are serial (CLGeocoder forbids overlap) and paced at
-/// `minLookupInterval`. Apple rate-limits per app and reports that as
-/// `kCLErrorNetwork`; those errors — and a handful of transport failures —
-/// retry with exponential backoff rather than burning the rest of the run.
+/// Live lookups are serial and paced at `minLookupInterval`. Nominatim
+/// 429 / 5xx and transport failures retry with exponential backoff.
 /// A miss (`nil`, or `geocodeFoundNoResult`) is not retried.
 ///
     /// Photos whose **library row** already carries a `Places/*` name are
@@ -65,11 +62,14 @@ final class GeocodingService {
     /// Matches photo-tools' `gps.geocode_cache_radius_km`.
     static let cacheRadiusKm = 0.5
 
-    /// Floor between live `CLGeocoder` calls. Apple documents no hard
-    /// per-second cap, but exceeding the per-app budget fails with
-    /// `kCLErrorNetwork`; one lookup a second stays under it in practice
-    /// and matches Nominatim's polite rate.
+    /// Floor between live Nominatim calls (their polite rate).
     static let minLookupInterval: TimeInterval = 1
+
+    /// Injected endpoint. Empty / unset uses the public OSM instance.
+    nonisolated static var nominatimEndpoint: String {
+        let env = ProcessInfo.processInfo.environment["LOCALGALLERY_NOMINATIM"] ?? ""
+        return env.isEmpty ? "https://nominatim.openstreetmap.org/reverse" : env
+    }
 
     /// Live attempts per unique coordinate, including the first. A photo
     /// that exhausts these is counted failed and left eligible for the
@@ -80,8 +80,8 @@ final class GeocodingService {
     /// minutes on one coordinate.
     static let maxRetryBackoff: TimeInterval = 16
 
-    /// `CLGeocoder` has no timeout of its own. A hung first lookup used
-    /// to park the whole Places pass on 1 / N.
+    /// Nominatim HTTP timeout (core default is 15s). Kept so the Swift
+    /// watchdog still abandons a hung transport.
     nonisolated static let lookupTimeout: TimeInterval = 15
 
     nonisolated enum LookupError: Error, Equatable, Sendable {
@@ -125,7 +125,7 @@ final class GeocodingService {
     /// segments) is left alone — a human or photo-tools placement is not
     /// overwritten. Shallower tags (`Places/France`, `Places/France/Île-de-France`)
     /// stay eligible so a later pass can extend them once the geocoder
-    /// actually yields a city. CLGeocoder often returns country + region
+    /// actually yields a city. An older lookup often returns country + region
     /// with `locality == nil` for European cities; the first run then
     /// wrote a country-only tag and every later run skipped the photo.
     ///
@@ -156,7 +156,7 @@ final class GeocodingService {
     nonisolated static func needsLibraryPlaces(_ photo: PhotoFile, force: Bool = false) -> Bool {
         guard isCandidate(photo) else { return false }
         if force { return true }
-        return photo.placeTags.isEmpty
+        return placesNeeded(tags: photo.placeTags.map(\.fullPath), force: force)
     }
 
     /// Sidecar has no finished `Places/…/City` path. Reads the file.
@@ -172,8 +172,8 @@ final class GeocodingService {
         return doc.rawTags.map { HierarchicalTag(raw: $0) }
     }
 
-    /// Reverse-geocode `photos` and write sidecars. Serial: `CLGeocoder`
-    /// forbids overlapping reverse-geocode requests.
+    /// Reverse-geocode `photos` and write sidecars. Serial: Nominatim
+    /// is paced at one live request per second.
     func geocode(_ photos: [PhotoFile], force: Bool = false) async -> Summary {
         guard !isRunning else { return lastSummary ?? Summary() }
         isRunning = true
@@ -284,7 +284,7 @@ final class GeocodingService {
             return nil
         }
         Log.ml.info(
-            "Places cache miss lat=\(latitude) lon=\(longitude) cache=\(cache.count) — live CLGeocoder"
+                "Places cache miss lat=\(latitude) lon=\(longitude) cache=\(cache.count) — live Nominatim"
         )
         guard let entry = try await lookupLive(
             latitude: latitude,
@@ -312,19 +312,19 @@ final class GeocodingService {
             lastLiveLookupAt = now()
             let attemptAt = now()
             Log.ml.info(
-                "Places CLGeocoder attempt \(attempt + 1)/\(Self.maxLookupAttempts) lat=\(latitude) lon=\(longitude)"
+                "Places Nominatim attempt \(attempt + 1)/\(Self.maxLookupAttempts) lat=\(latitude) lon=\(longitude)"
             )
             do {
                 let entry = try await lookup(latitude, longitude)
                 Log.ml.info(
-                    "Places CLGeocoder returned in \(Self.ms(since: attemptAt))ms path=\(entry?.path ?? "nil")"
+                    "Places Nominatim returned in \(Self.ms(since: attemptAt))ms path=\(entry?.path ?? "nil")"
                 )
                 return entry
             } catch {
                 attempt += 1
                 let retriesLeft = Self.maxLookupAttempts - attempt
                 Log.ml.error(
-                    "Places CLGeocoder error attempt \(attempt) after \(Self.ms(since: attemptAt))ms: \(error.localizedDescription) retryable=\(Self.isRetryable(error))"
+                    "Places Nominatim error attempt \(attempt) after \(Self.ms(since: attemptAt))ms: \(error.localizedDescription) retryable=\(Self.isRetryable(error))"
                 )
                 if Self.isRetryable(error), retriesLeft > 0, !cancelRequested {
                     let backoff = Self.backoff(afterFailures: attempt)
@@ -363,10 +363,10 @@ final class GeocodingService {
         }
     }
 
-    /// Transient failures worth another try. Apple surfaces geocoder
-    /// throttling as `kCLErrorNetwork`; transport errors use `NSURLError`.
-    /// A "no result" is a miss, not a throttle.
+    /// Transient failures worth another try. Nominatim 429/5xx arrive as
+    /// `GeoError.retryable`. Tests still inject `kCLErrorNetwork`.
     static func isRetryable(_ error: Error) -> Bool {
+        if case .retryable = error as? GeoError { return true }
         let ns = error as NSError
         if error is LookupError { return true }
         if ns.domain == kCLErrorDomain {
@@ -442,8 +442,7 @@ final class GeocodingService {
     }
 
     /// Off the main actor so a hung Apple call cannot pin the UI, and so
-    /// `CLGeocoder` is not created on the main actor and then sent into a
-    /// task group (Swift 6: `CLGeocoder` is not `Sendable`).
+    /// Nominatim runs off the main actor so a hung HTTP call cannot pin the UI.
     nonisolated private static func liveLookup(
         latitude: Double,
         longitude: Double
@@ -451,7 +450,7 @@ final class GeocodingService {
         let started = Date()
         let timeout = lookupTimeout
         Log.ml.info(
-            "Places CLGeocoder.reverseGeocodeLocation starting lat=\(latitude) lon=\(longitude) timeout=\(Int(timeout))s"
+            "Places Nominatim starting lat=\(latitude) lon=\(longitude) timeout=\(Int(timeout))s"
         )
         do {
             return try await withThrowingTaskGroup(of: CacheEntry?.self) { group in
@@ -465,25 +464,25 @@ final class GeocodingService {
                         try await Task.sleep(for: .seconds(step))
                         waited += step
                         Log.ml.info(
-                            "Places CLGeocoder still waiting \(waited)s lat=\(latitude) lon=\(longitude)"
+                            "Places Nominatim still waiting \(waited)s lat=\(latitude) lon=\(longitude)"
                         )
                     }
                     try await Task.sleep(for: .seconds(timeout - Double(waited)))
                     Log.ml.error(
-                        "Places CLGeocoder timed out after \(Int(timeout))s lat=\(latitude) lon=\(longitude)"
+                        "Places Nominatim timed out after \(Int(timeout))s lat=\(latitude) lon=\(longitude)"
                     )
                     throw LookupError.timedOut
                 }
                 let first = try await group.next()!
                 group.cancelAll()
                 Log.ml.info(
-                    "Places CLGeocoder finished in \(Self.ms(since: started))ms lat=\(latitude) lon=\(longitude)"
+                    "Places Nominatim finished in \(Self.ms(since: started))ms lat=\(latitude) lon=\(longitude)"
                 )
                 return first
             }
         } catch {
             Log.ml.error(
-                "Places CLGeocoder failed in \(Self.ms(since: started))ms: \(error.localizedDescription)"
+                "Places Nominatim failed in \(Self.ms(since: started))ms: \(error.localizedDescription)"
             )
             throw error
         }
@@ -497,17 +496,22 @@ final class GeocodingService {
         latitude: Double,
         longitude: Double
     ) async throws -> CacheEntry? {
-        let geocoder = CLGeocoder()
-        let location = CLLocation(latitude: latitude, longitude: longitude)
-        // English names match photo-tools' Nominatim output (`Places/France`
-        // not `Places/Frankreich`) so a library tagged by both tools shares
-        // one tree.
-        let marks = try await geocoder.reverseGeocodeLocation(
-            location,
-            preferredLocale: Locale(identifier: "en_US")
+        let built = try nominatimLookup(
+            endpoint: nominatimEndpoint,
+            latitude: latitude,
+            longitude: longitude
         )
-        guard let mark = marks.first else { return nil }
-        return place(from: mark, latitude: latitude, longitude: longitude)
+        guard let built else { return nil }
+        return CacheEntry(
+            latitude: latitude,
+            longitude: longitude,
+            path: built.path,
+            country: built.country,
+            state: built.state,
+            city: built.city,
+            sublocation: built.sublocation,
+            countryCode: built.countryCode
+        )
     }
 
     /// The CLPlacemark fields Places actually reads. Isolated so tests can

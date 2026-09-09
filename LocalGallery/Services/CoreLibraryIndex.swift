@@ -196,6 +196,33 @@ final class CoreLibraryIndex {
     /// O(1) photo lookup by id.
     func photo(byID id: UUID) -> PhotoFile? { photoByID[id] }
 
+    /// Patch one photo in the object table and every published copy that
+    /// already holds it. Used for locality / sidecar-cache updates that
+    /// must not wait for (or trigger) a full core rebuild.
+    func updatePhoto(_ photo: PhotoFile) {
+        updatePhotos([photo])
+    }
+
+    /// Patch the given photos by id. Membership and sort order stay put;
+    /// only the structs the UI already has are replaced.
+    func updatePhotos(_ photos: [PhotoFile]) {
+        guard !photos.isEmpty else { return }
+        for photo in photos {
+            photoByID[photo.id] = photo
+        }
+        if !sortedPhotos.isEmpty {
+            sortedPhotos = sortedPhotos.map { photoByID[$0.id] ?? $0 }
+        }
+        if !tagPhotoCache.isEmpty {
+            for key in tagPhotoCache.keys {
+                tagPhotoCache[key] = tagPhotoCache[key]?.map { photoByID[$0.id] ?? $0 }
+            }
+        }
+        if let cached = searchCache {
+            searchCache = (cached.key, cached.result.map { photoByID[$0.id] ?? $0 })
+        }
+    }
+
     /// Photos credited to `tag`, including the `Places/*` prefix expansion, in
     /// `allPhotos` order — `TagIndex.photos(forTag:)`'s contract.
     func photos(forTag tag: TagSuggestion) -> [PhotoFile] {

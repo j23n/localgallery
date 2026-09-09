@@ -67,6 +67,26 @@ struct PhotoFolder: Identifiable, Codable, Sendable, Hashable {
         return folder
     }
 
+    /// Replace the photo with a matching id, walking the whole tree.
+    /// Used to keep folder rows in lockstep with `allPhotos` when only
+    /// runtime fields (locality, sidecar cache) change.
+    func replacingPhoto(_ photo: PhotoFile) -> PhotoFolder {
+        replacingPhotos([photo.id: photo])
+    }
+
+    /// Replace any photo whose id is a key in `byID`. Counts and covers
+    /// stay put — this is a field-level sync, not a membership change.
+    func replacingPhotos(_ byID: [UUID: PhotoFile]) -> PhotoFolder {
+        var folder = self
+        for i in folder.photos.indices {
+            if let updated = byID[folder.photos[i].id] {
+                folder.photos[i] = updated
+            }
+        }
+        folder.subfolders = folder.subfolders.map { $0.replacingPhotos(byID) }
+        return folder
+    }
+
     /// Insert `child` under the node with `parentID`.
     func inserting(_ child: PhotoFolder, inParent parentID: UUID) -> PhotoFolder {
         var folder = self

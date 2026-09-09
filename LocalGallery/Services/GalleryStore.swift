@@ -782,10 +782,11 @@ final class GalleryStore {
     ///     `PhotoFile`s (new path, new stable id) into `destFolderID`, and
     ///     rebuilds indexes. Persistence is `movePhotos`'s job.
     ///   - `.photoLocalityChanged`, `.allDownloadsCleared`, and
-    ///     `.sidecarCacheCleared` only update in-memory locality / sidecar
-    ///     status — no rebuild, no save. The next scan repopulates from
-    ///     disk; this matches the pre-refactor behaviour for those paths
-    ///     and avoids churning the cache on every download completion.
+    ///     `.sidecarCacheCleared` update in-memory locality / sidecar
+    ///     status on `allPhotos`, the index object table, and the folder
+    ///     tree so grid / viewer / folder rows cannot diverge. No core
+    ///     rebuild, no save — the next scan repopulates from disk and
+    ///     avoids churning the cache on every download completion.
     ///
     /// The widget snapshot, memory regeneration, and sidecar-sync planning
     /// are intentionally NOT triggered from here — they depend on
@@ -842,16 +843,34 @@ final class GalleryStore {
                 allPhotos[idx].enrichedFileDate = nil
             }
             allPhotos[idx].locality = locality
+            syncRuntimeCopies(of: allPhotos[idx])
         case .allDownloadsCleared:
             for i in allPhotos.indices {
                 if case .remote = allPhotos[i].locality {
                     allPhotos[i].locality = .remote(downloaded: false)
                 }
             }
+            syncRuntimeCopies(of: allPhotos)
         case .sidecarCacheCleared:
             for i in allPhotos.indices {
                 allPhotos[i].sidecarStatus = .absent
             }
+            syncRuntimeCopies(of: allPhotos)
+        }
+    }
+
+    /// Keep the index object table and folder-tree photo rows aligned with
+    /// `allPhotos` after a runtime-only field change. Avoids a full rebuild
+    /// (locality / cache status are not sort or match keys).
+    private func syncRuntimeCopies(of photo: PhotoFile) {
+        syncRuntimeCopies(of: [photo])
+    }
+
+    private func syncRuntimeCopies(of photos: [PhotoFile]) {
+        index.updatePhotos(photos)
+        if let root = rootFolder {
+            let byID = Dictionary(photos.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+            rootFolder = root.replacingPhotos(byID)
         }
     }
 

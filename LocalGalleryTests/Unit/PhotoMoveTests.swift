@@ -138,6 +138,103 @@ final class PhotoMoveTests: XCTestCase {
         XCTAssertNil(h.store.createFolder(named: "a/b", in: parent))
     }
 
+    func testMovePlanCoversSidecarsAndLivePair() {
+        let photo = PhotoFile.fixture(
+            url: URL(fileURLWithPath: "/inbox/live.jpg"),
+            livePhotoVideoURL: URL(fileURLWithPath: "/inbox/live.mov")
+        )
+        let dest = URL(fileURLWithPath: "/italy")
+        let plan = PhotoDiskMove.plan(for: photo, directory: dest, names: ("live.jpg", "live.mov"))
+        XCTAssertEqual(plan.map(\.role), [
+            .primary, .sidecar, .altSidecar, .livePhoto, .liveSidecar, .liveAltSidecar
+        ])
+        XCTAssertEqual(plan.map(\.to.lastPathComponent), [
+            "live.jpg", "live.jpg.xmp", "live.xmp", "live.mov", "live.mov.xmp", "live.xmp"
+        ])
+    }
+
+    func testMoveVerdictIsNotSuccessWhenOnlyThePrimaryMoves() {
+        let companions = [
+            PhotoStepOutcome(
+                role: .sidecar,
+                url: URL(fileURLWithPath: "/a.jpg.xmp"),
+                status: .failed
+            )
+        ]
+        XCTAssertEqual(
+            PhotoDiskMove.verdict(primary: .succeeded, companions: companions, rollback: nil),
+            .partial
+        )
+        XCTAssertEqual(
+            PhotoDiskMove.verdict(primary: .succeeded, companions: companions, rollback: .rolledBack),
+            .rolledBack
+        )
+        XCTAssertEqual(
+            PhotoDiskMove.verdict(primary: .succeeded, companions: companions, rollback: .needsReconciliation),
+            .needsReconciliation
+        )
+    }
+
+    func testCompanionFailureRollsThePrimaryBack() async {
+        let h = makeHarness()
+        addTeardownBlock {
+            PhotoDiskMove.testFailRoles = []
+            PhotoDiskMove.testFailRollback = false
+        }
+        let src = h.tempDir.appending("inbox", isDirectory: true)
+        let dest = h.tempDir.appending("italy", isDirectory: true)
+        write(src.appendingPathComponent("shot.jpg"))
+        write(URL(fileURLWithPath: src.appendingPathComponent("shot.jpg").path + ".xmp"))
+        let photo = PhotoFile.fixture(url: src.appendingPathComponent("shot.jpg"))
+        let inbox = PhotoFolder.fixture(url: src, photos: [photo])
+        let italy = PhotoFolder.fixture(url: dest)
+        let root = PhotoFolder.fixture(url: h.tempDir.url, subfolders: [inbox, italy])
+        h.store.apply(.scanResult(photos: [photo], root: root, persistCache: false))
+
+        PhotoDiskMove.testFailRoles = [.sidecar]
+        let result = await h.store.movePhotos([photo], to: italy)
+
+        XCTAssertTrue(result.moved.isEmpty, "rolled-back move must not report success")
+        XCTAssertEqual(result.failed, [photo.id])
+        XCTAssertTrue(result.partialIDs.isEmpty)
+        XCTAssertFalse(result.needsReconciliation)
+        XCTAssertEqual(h.store.allPhotos.map(\.id), [photo.id])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: src.appendingPathComponent("shot.jpg").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: src.appendingPathComponent("shot.jpg").path + ".xmp"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dest.appendingPathComponent("shot.jpg").path))
+    }
+
+    func testFailedRollbackForcesReconciliationAndDoesNotReportFullSuccess() async {
+        let h = makeHarness()
+        addTeardownBlock {
+            PhotoDiskMove.testFailRoles = []
+            PhotoDiskMove.testFailRollback = false
+        }
+        let src = h.tempDir.appending("inbox", isDirectory: true)
+        let dest = h.tempDir.appending("italy", isDirectory: true)
+        write(src.appendingPathComponent("shot.jpg"))
+        write(URL(fileURLWithPath: src.appendingPathComponent("shot.jpg").path + ".xmp"))
+        let photo = PhotoFile.fixture(url: src.appendingPathComponent("shot.jpg"))
+        let inbox = PhotoFolder.fixture(url: src, photos: [photo])
+        let italy = PhotoFolder.fixture(url: dest)
+        let root = PhotoFolder.fixture(url: h.tempDir.url, subfolders: [inbox, italy])
+        h.store.apply(.scanResult(photos: [photo], root: root, persistCache: false))
+
+        PhotoDiskMove.testFailRoles = [.sidecar]
+        PhotoDiskMove.testFailRollback = true
+        let result = await h.store.movePhotos([photo], to: italy)
+
+        XCTAssertEqual(result.moved.count, 1)
+        XCTAssertEqual(result.partialIDs, [photo.id])
+        XCTAssertTrue(result.needsReconciliation)
+        XCTAssertTrue(result.failed.isEmpty)
+        let moved = result.moved[photo.id]
+        XCTAssertEqual(moved?.url.path, dest.appendingPathComponent("shot.jpg").path)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dest.appendingPathComponent("shot.jpg").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: src.appendingPathComponent("shot.jpg").path + ".xmp"))
+        XCTAssertEqual(h.store.allPhotos.map(\.id), [moved?.id])
+    }
+
     func testPromptNamesTheDestination() {
         let photo = PhotoFile.fixture()
         let dest = PhotoFolder.fixture(url: URL(fileURLWithPath: "/lib/Italy"), name: "Italy")

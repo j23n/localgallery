@@ -25,8 +25,14 @@ final class JSONDiskCache<Value: Codable & Sendable> {
     private let label: String
     private let debounce: Duration
     /// Latest scheduled write. New saves cancel it (debounce coalescing) and
-    /// chain behind it (write ordering).
+    /// chain behind it (write ordering). `clear()` does not join this task;
+    /// the disk gate's epoch is what stops a late write from resurrecting
+    /// the file.
     private var saveTask: Task<Void, Never>?
+    /// Serialises the on-disk mutation itself. `clear()` bumps the epoch
+    /// under this lock, so a save that already passed its cancel check
+    /// still no-ops if a clear landed first.
+    private let disk = DiskGate()
 
     init(url: URL, version: Int, label: String, debounce: Duration = .zero) {
         self.url = url
@@ -47,7 +53,9 @@ final class JSONDiskCache<Value: Codable & Sendable> {
     }
 
     /// Fire-and-forget save. Coalesced within the debounce window; ordered
-    /// behind any in-flight write. Errors are logged.
+    /// behind any in-flight write. Errors are logged. A `clear()` that
+    /// lands after this call is scheduled invalidates the epoch so the
+    /// write is skipped rather than resurrecting the file.
     func save(_ value: Value) {
         saveTask?.cancel()
         let previous = saveTask
@@ -55,6 +63,8 @@ final class JSONDiskCache<Value: Codable & Sendable> {
         let url = url
         let label = label
         let debounce = debounce
+        let epoch = disk.epoch
+        let disk = disk
         saveTask = Task.detached(priority: .utility) {
             if debounce > .zero {
                 try? await Task.sleep(for: debounce)
@@ -66,7 +76,7 @@ final class JSONDiskCache<Value: Codable & Sendable> {
             if Task.isCancelled { return }
             do {
                 let data = try JSONEncoder().encode(payload)
-                try data.write(to: url, options: .atomic)
+                try disk.write(data, to: url, epoch: epoch)
             } catch {
                 // Loud on purpose, and specific about the consequence. The
                 // failure mode this line exists for is silent and permanent:
@@ -110,12 +120,47 @@ final class JSONDiskCache<Value: Codable & Sendable> {
         }
     }
 
-    /// Remove the file and cancel any pending write — without the cancel, a
-    /// save scheduled just before `clear()` would resurrect the file with
-    /// pre-clear contents.
+    /// Remove the file and invalidate any pending or in-flight write.
+    /// Cancel alone is not enough: a save that already passed its cancel
+    /// check can still write after this returns. The disk gate bumps an
+    /// epoch under the same lock as the write, so that late write no-ops
+    /// and cannot resurrect the file.
     func clear() {
         saveTask?.cancel()
         saveTask = nil
-        try? FileManager.default.removeItem(at: url)
+        disk.clear(url)
+    }
+
+    /// Wait for the in-flight save (or clear-chained write) to finish.
+    /// Tests use this instead of polling the file.
+    func flush() async {
+        await saveTask?.value
+    }
+
+    /// Lock + epoch so `save` and `clear` cannot interleave on disk.
+    /// `@unchecked Sendable` because `NSLock` is: the lock is the isolation.
+    private final class DiskGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var generation: UInt64 = 0
+
+        var epoch: UInt64 {
+            lock.lock()
+            defer { lock.unlock() }
+            return generation
+        }
+
+        func write(_ data: Data, to url: URL, epoch: UInt64) throws {
+            lock.lock()
+            defer { lock.unlock() }
+            guard epoch == generation else { return }
+            try data.write(to: url, options: .atomic)
+        }
+
+        func clear(_ url: URL) {
+            lock.lock()
+            defer { lock.unlock() }
+            generation += 1
+            try? FileManager.default.removeItem(at: url)
+        }
     }
 }

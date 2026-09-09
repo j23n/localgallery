@@ -35,6 +35,22 @@ final class PhotoMaterializer {
     private let pathMonitor = NWPathMonitor()
     private var isOnExpensivePath = false
 
+    /// How long a waiter will sit on a blocking coordinated read before
+    /// surfacing `.timeout`. The underlying coordinator is not cancelled
+    /// (it cannot be); the photo stays in `activeTasks` so a retry dedups
+    /// onto the same attempt instead of starting a second download.
+    var coordinationTimeout: Duration = .seconds(60)
+
+    #if DEBUG
+    /// Skip the local/probe short-circuit so tests can exercise the
+    /// coordination path against a plain file.
+    var testForceCoordination = false
+    /// Injected delay inside the coordination worker, for timeout tests.
+    var testCoordinationDelay: Duration?
+    /// Number of blocking coordination attempts started.
+    private(set) var debugCoordinationStarts = 0
+    #endif
+
     init() {
         pathMonitor.pathUpdateHandler = { [weak self] path in
             let expensive = path.isExpensive
@@ -66,24 +82,41 @@ final class PhotoMaterializer {
     /// Throws on failure so the caller can surface a retry UI.
     @discardableResult
     func ensureMaterialized(_ photo: PhotoFile) async throws -> URL {
+        #if DEBUG
+        let forceCoordination = testForceCoordination
+        #else
+        let forceCoordination = false
+        #endif
+
         // Fast path: already local.
-        if photo.locality == .local {
+        if photo.locality == .local && !forceCoordination {
             return photo.url
         }
-        let probe = FileProviderDetector.probe(photo.url)
-        if probe.status == .local {
-            return photo.url
+        if !forceCoordination {
+            let probe = FileProviderDetector.probe(photo.url)
+            if probe.status == .local {
+                return photo.url
+            }
         }
 
         // Coalesce — return the existing task if one is already running.
+        // Each waiter applies its own timeout around that shared attempt
+        // so one slow download cannot pin every caller, and a timeout
+        // does not cancel the download the next retry should join.
         if let existing = activeTasks[photo.id] {
-            return try await existing.value
+            return try await awaitMaterialization(existing)
         }
 
         let progress = Progress(totalUnitCount: 100)
         inFlight[photo.id] = progress
         let token = UUID()
         requestTokens[photo.id] = token
+
+        #if DEBUG
+        let delay = testCoordinationDelay
+        debugCoordinationStarts += 1
+        #endif
+        let timeout = coordinationTimeout
 
         let task = Task<URL, Error> { [weak self] in
             defer {
@@ -98,7 +131,17 @@ final class PhotoMaterializer {
                 }
             }
             do {
-                try await Self.coordinatedRead(at: photo.url, progress: progress)
+                try await Self.coordinatedRead(
+                    at: photo.url,
+                    progress: progress,
+                    testDelay: {
+                        #if DEBUG
+                        return delay
+                        #else
+                        return nil
+                        #endif
+                    }()
+                )
                 progress.completedUnitCount = progress.totalUnitCount
                 return photo.url
             } catch {
@@ -107,7 +150,32 @@ final class PhotoMaterializer {
             }
         }
         activeTasks[photo.id] = task
-        return try await task.value
+        // Timeout leaves the shared task running so a retry coalesces.
+        return try await awaitMaterialization(task, timeout: timeout)
+    }
+
+    /// Wait on `task` but give up after `coordinationTimeout`. Does not
+    /// cancel `task` — the file coordinator cannot be interrupted, and a
+    /// subsequent `ensureMaterialized` for the same id must join it.
+    private func awaitMaterialization(
+        _ task: Task<URL, Error>,
+        timeout: Duration? = nil
+    ) async throws -> URL {
+        let timeout = timeout ?? coordinationTimeout
+        return try await withThrowingTaskGroup(of: URL.self) { group in
+            group.addTask {
+                try await task.value
+            }
+            group.addTask {
+                try await Task.sleep(for: timeout)
+                throw MaterializationError.timeout
+            }
+            defer { group.cancelAll() }
+            guard let result = try await group.next() else {
+                throw MaterializationError.timeout
+            }
+            return result
+        }
     }
 
     /// Cancel an in-flight materialisation. Currently a best-effort: the
@@ -142,7 +210,14 @@ final class PhotoMaterializer {
     /// materialised — this is the universal fallback that works for every
     /// file provider (iCloud, OneDrive, Proton, Drive, Dropbox). Runs on a
     /// global queue because the coordinator blocks the calling thread.
-    nonisolated private static func coordinatedRead(at url: URL, progress: Progress) async throws {
+    nonisolated private static func coordinatedRead(
+        at url: URL,
+        progress: Progress,
+        testDelay: Duration?
+    ) async throws {
+        if let testDelay {
+            try await Task.sleep(for: testDelay)
+        }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             DispatchQueue.global(qos: .userInitiated).async {
                 let coordinator = NSFileCoordinator()

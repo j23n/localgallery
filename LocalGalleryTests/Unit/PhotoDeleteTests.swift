@@ -185,6 +185,71 @@ final class PhotoDeleteTests: XCTestCase {
         XCTAssertTrue(h.store.allPhotos.isEmpty)
     }
 
+    func testDeletePlanListsPrimarySidecarsAndLivePair() {
+        let photo = PhotoFile.fixture(
+            url: URL(fileURLWithPath: "/lib/IMG.jpg"),
+            livePhotoVideoURL: URL(fileURLWithPath: "/lib/IMG.mov")
+        )
+        let plan = PhotoDiskDelete.plan(for: photo)
+        XCTAssertEqual(plan.map(\.role), [
+            .primary, .sidecar, .altSidecar, .livePhoto, .liveSidecar, .liveAltSidecar
+        ])
+        XCTAssertEqual(plan.map(\.url.path), [
+            "/lib/IMG.jpg",
+            "/lib/IMG.jpg.xmp",
+            "/lib/IMG.xmp",
+            "/lib/IMG.mov",
+            "/lib/IMG.mov.xmp",
+            "/lib/IMG.xmp",
+        ])
+    }
+
+    func testDeleteVerdictIsPartialWhenOnlyThePrimarySucceeds() {
+        let jpg = URL(fileURLWithPath: "/lib/a.jpg")
+        let verdict = PhotoDiskDelete.verdict(for: [
+            PhotoStepOutcome(role: .primary, url: jpg, status: .succeeded),
+            PhotoStepOutcome(role: .sidecar, url: URL(fileURLWithPath: jpg.path + ".xmp"), status: .failed),
+        ])
+        XCTAssertEqual(verdict, .partial)
+    }
+
+    func testDeleteVerdictSucceedsWhenCompanionsAreAlreadyMissing() {
+        let jpg = URL(fileURLWithPath: "/lib/a.jpg")
+        let verdict = PhotoDiskDelete.verdict(for: [
+            PhotoStepOutcome(role: .primary, url: jpg, status: .succeeded),
+            PhotoStepOutcome(role: .sidecar, url: URL(fileURLWithPath: jpg.path + ".xmp"), status: .missing),
+        ])
+        XCTAssertEqual(verdict, .succeeded)
+    }
+
+    func testALeftoverSidecarIsAPartialDeleteNotFullSuccess() async {
+        let h = makeHarness()
+        addTeardownBlock {
+            PhotoDiskDelete.testFailRoles = []
+        }
+        let jpg = h.tempDir.appending("shot.jpg")
+        let xmp = URL(fileURLWithPath: jpg.path + ".xmp")
+        write(jpg)
+        write(xmp)
+        let photo = PhotoFile.fixture(url: jpg)
+        h.store.apply(.scanResult(
+            photos: [photo],
+            root: PhotoFolder.fixture(url: h.tempDir.url, photos: [photo]),
+            persistCache: false
+        ))
+
+        PhotoDiskDelete.testFailRoles = [.sidecar]
+        let result = await h.store.deletePhotos([photo])
+
+        XCTAssertEqual(result.deletedIDs, [photo.id])
+        XCTAssertTrue(result.failed.isEmpty)
+        XCTAssertEqual(result.partialIDs, [photo.id])
+        XCTAssertTrue(result.needsReconciliation)
+        XCTAssertTrue(h.store.allPhotos.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: jpg.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: xmp.path))
+    }
+
     func testRemovingPhotosFromANestedFolderRecomputesCounts() {
         let leafPhoto = PhotoFile.fixture(url: URL(fileURLWithPath: "/lib/2024/a.jpg"))
         let other = PhotoFile.fixture(url: URL(fileURLWithPath: "/lib/2024/b.jpg"))

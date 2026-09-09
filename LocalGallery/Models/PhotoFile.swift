@@ -103,7 +103,7 @@ struct PhotoFile: Identifiable, Hashable, Codable, Sendable {
         case id, url, filename, fileSize, dateTaken, dateFromMetadata, isVideo, livePhotoVideoURL, hierarchicalTags, countryCode, enrichedFileDate, fileModificationDate, gpsLatitude, gpsLongitude, faceRegions, photoTools, faceDecisions, sidecarOnDisk
     }
 
-    init(id: UUID, url: URL, filename: String, fileSize: Int64, dateTaken: Date?, dateFromMetadata: Bool = false, isVideo: Bool = false, livePhotoVideoURL: URL? = nil, hierarchicalTags: [HierarchicalTag] = [], countryCode: String? = nil, enrichedFileDate: Date? = nil, fileModificationDate: Date? = nil, gpsLatitude: Double? = nil, gpsLongitude: Double? = nil, faceRegions: [FaceRegion] = [], photoTools: PhotoToolsMetadata = PhotoToolsMetadata(), faceDecisions: [String] = [], sidecarOnDisk: Bool = false, locality: PhotoLocality = .local, sidecarStatus: SidecarStatus = .absent) {
+    init(id: UUID, url: URL, filename: String, fileSize: Int64, dateTaken: Date?, dateFromMetadata: Bool = false, isVideo: Bool = false, livePhotoVideoURL: URL? = nil, hierarchicalTags: [HierarchicalTag] = [], countryCode: String? = nil, enrichedFileDate: Date? = nil, fileModificationDate: Date? = nil, gpsLatitude: Double? = nil, gpsLongitude: Double? = nil, faceRegions: [FaceRegion] = [], photoTools: PhotoToolsMetadata = PhotoToolsMetadata(), faceDecisions: [String] = [], sidecarOnDisk: Bool = false, locality: PhotoLocality = .local, sidecarStatus: SidecarStatus = .absent, dimensions: CGSize? = nil, exif: EXIFData? = nil) {
         self.id = id
         self.url = url
         self.filename = filename
@@ -124,6 +124,8 @@ struct PhotoFile: Identifiable, Hashable, Codable, Sendable {
         self.sidecarOnDisk = sidecarOnDisk
         self.locality = locality
         self.sidecarStatus = sidecarStatus
+        self.dimensions = dimensions
+        self.exif = exif
     }
 
     init(from decoder: Decoder) throws {
@@ -191,7 +193,10 @@ struct PhotoFile: Identifiable, Hashable, Codable, Sendable {
     }
 
     /// Same photo after an on-disk move. Identity follows the new URL
-    /// (`stableID`), which is what a later scan would derive.
+    /// (`stableID`), which is what a later scan would derive. Every
+    /// non-path field — persisted metadata and runtime-only state — is
+    /// copied so a move cannot drop tags, tools, locality, or a lazy EXIF
+    /// load the viewer already paid for.
     func relocated(to url: URL, livePhotoVideoURL: URL? = nil) -> PhotoFile {
         PhotoFile(
             id: PhotoFile.stableID(for: url),
@@ -209,8 +214,13 @@ struct PhotoFile: Identifiable, Hashable, Codable, Sendable {
             gpsLatitude: gpsLatitude,
             gpsLongitude: gpsLongitude,
             faceRegions: faceRegions,
+            photoTools: photoTools,
+            faceDecisions: faceDecisions,
+            sidecarOnDisk: sidecarOnDisk,
             locality: locality,
-            sidecarStatus: sidecarStatus
+            sidecarStatus: sidecarStatus,
+            dimensions: dimensions,
+            exif: exif
         )
     }
 

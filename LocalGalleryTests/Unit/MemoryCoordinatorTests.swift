@@ -184,4 +184,55 @@ final class MemoryCoordinatorTests: XCTestCase {
         h.coordinator.markSeen("onThisDay-2024-06-11")
         XCTAssertEqual(h.coordinator.seenMemoryIDs["onThisDay-2024-06-11"], today)
     }
+
+    // MARK: Force-regen races
+
+    func testForceRegenerateDiscardsInFlightResultsAndQueuesAReplacement() async throws {
+        let h = makeHarness(photos: libraryPhotos())
+        defer { cleanup(h) }
+
+        var stalledOnce = false
+        h.coordinator.testStallBeforePublish = {
+            guard !stalledOnce else { return }
+            stalledOnce = true
+            XCTAssertTrue(h.coordinator.all.isEmpty, "must not publish before the epoch check")
+            h.coordinator.forceRegenerate()
+            XCTAssertTrue(h.coordinator.all.isEmpty)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: h.cacheURL.path),
+                           "force-regen must clear the disk cache before the stale save can land")
+        }
+
+        h.coordinator.generateIfNeeded()
+        var attempts = 0
+        while h.coordinator.all.isEmpty && attempts < 400 {
+            try await Task.sleep(for: .milliseconds(10))
+            attempts += 1
+        }
+        XCTAssertTrue(stalledOnce, "the in-flight generation must have reached the stall")
+        XCTAssertFalse(h.coordinator.all.isEmpty, "the queued replacement must publish")
+        XCTAssertTrue(h.coordinator.hasGeneratedToday)
+    }
+
+    func testSupersededGenerationDoesNotResurrectTheDiskCache() async throws {
+        let h = makeHarness(photos: libraryPhotos())
+        defer { cleanup(h) }
+
+        var stalledOnce = false
+        h.coordinator.testStallBeforePublish = {
+            guard !stalledOnce else { return }
+            stalledOnce = true
+            h.coordinator.forceRegenerate()
+        }
+
+        await h.coordinator.runScheduledRefresh()
+        // The scheduled call awaits the cancelled task, then the queued
+        // replacement is fire-and-forget from drain. Wait for it.
+        var attempts = 0
+        while h.coordinator.all.isEmpty && attempts < 400 {
+            try await Task.sleep(for: .milliseconds(10))
+            attempts += 1
+        }
+        XCTAssertTrue(stalledOnce)
+        XCTAssertFalse(h.coordinator.all.isEmpty)
+    }
 }

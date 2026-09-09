@@ -99,6 +99,18 @@ final class MemoryCoordinator {
     /// predate the change that forced the regen) can't set the daily gate
     /// when it lands.
     @ObservationIgnored private var generationEpoch = 0
+    /// The in-flight generation, retained so `forceRegenerate` can cancel it
+    /// rather than only bumping the epoch and hoping the old Task notices.
+    @ObservationIgnored private var generationTask: Task<Void, Never>?
+    /// Seed for the generation that should replace a cancelled in-flight
+    /// run. Drained when the cancelled task releases `isGenerating`.
+    @ObservationIgnored private var pendingGenerationSeed: String?
+
+    #if DEBUG
+    /// Test seam: runs after the engine returns and before the epoch /
+    /// cancellation publish checks, so a force-regen can interleave.
+    @ObservationIgnored var testStallBeforePublish: (@MainActor () async -> Void)?
+    #endif
 
     // MARK: Wiring
 
@@ -223,20 +235,9 @@ final class MemoryCoordinator {
         let stale = generatedDay.map { !cal.isDate($0, inSameDayAs: today) } ?? true
         guard stale || all.isEmpty else { return }
         guard let inputs = makeInputs?(), !inputs.photos.isEmpty else { return }
-        guard !isGenerating else { return }
-        isGenerating = true
-        let epoch = generationEpoch
         let daySeed = seed ?? WidgetDayKey.string(for: today)
-        Task {
-            defer { isGenerating = false }
-            await generate(inputs: inputs, seed: daySeed)
-            // Gate only on completion — a process death or cancellation
-            // mid-generation must not consume the daily gate; an epoch bump
-            // means a force-regen superseded this run's inputs.
-            if !Task.isCancelled && epoch == generationEpoch {
-                generatedDay = today
-            }
-        }
+        guard !isGenerating else { return }
+        startGeneration(inputs: inputs, seed: daySeed, today: today)
     }
 
     /// Clear the once-per-day gate + cached memories and immediately re-run
@@ -254,7 +255,12 @@ final class MemoryCoordinator {
         all = []
         cache.clear()
         Log.memory.info("Force-regenerating memories")
-        generateIfNeeded(seed: "\(clock.now().timeIntervalSinceReferenceDate)")
+        let seed = "\(clock.now().timeIntervalSinceReferenceDate)"
+        generationTask?.cancel()
+        pendingGenerationSeed = seed
+        if !isGenerating {
+            drainPendingGeneration()
+        }
     }
 
     /// Background-task entry point: same once-per-day gate as the foreground
@@ -271,20 +277,60 @@ final class MemoryCoordinator {
             Log.bg.info("Memories already generated today; skipping BG regeneration")
             return
         }
-        guard !isGenerating else { return }
-        isGenerating = true
-        defer { isGenerating = false }
-        let epoch = generationEpoch
-        await generate(inputs: inputs, seed: WidgetDayKey.string(for: today))
-        // Gate only on completion: if the BG task expired and cancelled us
-        // mid-generation, the day must stay unconsumed so the next foreground
-        // entry retries instead of keeping yesterday's memories all day.
-        if !Task.isCancelled && epoch == generationEpoch {
-            generatedDay = today
+        if isGenerating {
+            await generationTask?.value
+            await waitForGenerationToIdle()
+            return
+        }
+        let task = startGeneration(
+            inputs: inputs,
+            seed: WidgetDayKey.string(for: today),
+            today: today
+        )
+        await task.value
+        // A force-regen that cancelled this run queues a replacement from
+        // the task's cleanup; the BG handler must wait for that too.
+        await waitForGenerationToIdle()
+    }
+
+    private func waitForGenerationToIdle() async {
+        while isGenerating {
+            await generationTask?.value
         }
     }
 
-    private func generate(inputs: GenerationInputs, seed: String) async {
+    @discardableResult
+    private func startGeneration(
+        inputs: GenerationInputs,
+        seed: String,
+        today: Date?
+    ) -> Task<Void, Never> {
+        isGenerating = true
+        let epoch = generationEpoch
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.generate(inputs: inputs, seed: seed, epoch: epoch)
+            // Gate only on completion — a process death or cancellation
+            // mid-generation must not consume the daily gate; an epoch bump
+            // means a force-regen superseded this run's inputs.
+            if !Task.isCancelled && epoch == self.generationEpoch, let today {
+                self.generatedDay = today
+            }
+            self.isGenerating = false
+            self.generationTask = nil
+            self.drainPendingGeneration()
+        }
+        generationTask = task
+        return task
+    }
+
+    private func drainPendingGeneration() {
+        guard let seed = pendingGenerationSeed else { return }
+        pendingGenerationSeed = nil
+        generateIfNeeded(seed: seed)
+    }
+
+    private func generate(inputs: GenerationInputs, seed: String, epoch: Int) async {
         let t = CFAbsoluteTimeGetCurrent()
 
         // Drop file-provider placeholders that don't have a cached sidecar
@@ -345,10 +391,22 @@ final class MemoryCoordinator {
             surfacedClusters: surfacedClusters
         ))
 
+        #if DEBUG
+        if let stall = testStallBeforePublish {
+            await stall()
+        }
+        #endif
+
         // An expired BG task cancels mid-generation — don't publish a
-        // potentially partial result set over a good cached one.
+        // potentially partial result set over a good cached one. An epoch
+        // bump means a force-regen invalidated these inputs; writing the
+        // cache here would resurrect memories `forceRegenerate` just cleared.
         guard !Task.isCancelled else {
             Log.memory.info("Memory generation cancelled; discarding results")
+            return
+        }
+        guard epoch == generationEpoch else {
+            Log.memory.info("Memory generation superseded; discarding results")
             return
         }
 

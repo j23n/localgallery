@@ -1,18 +1,22 @@
 //! Library session: walk, enrich, index. No GTK.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use gallery_index::{LibraryIndex, TagSuggestion};
 use gallery_meta::media::{read_image_metadata, read_video_date_at};
-use gallery_model::date::{AppleDate, CivilDateTime};
+use gallery_model::date::AppleDate;
 use gallery_model::photo::{PhotoFile, PhotoFolder, StableId};
 use gallery_model::snapshot::{self, LibrarySnapshot, SidecarCandidate};
 use gallery_scan::{scan_with_progress, ScanInput, ScanOutcome};
-use gallery_vfs::{StdVfs, Vfs};
+use gallery_vfs::{take_unsupported_names, StdVfs, Vfs};
 
 use crate::config::{self, Config};
+use crate::persist;
+use crate::row;
+use crate::time;
 
 /// Why a library is not showing photos.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +42,64 @@ pub struct LibraryState {
     pub index: LibraryIndex,
     /// Sidecar rows from the last walk.
     pub sidecar_manifest: Vec<SidecarCandidate>,
+    /// How the on-disk snapshot was treated for this open.
+    pub snapshot_reuse: SnapshotReuse,
+    /// Directory entries `StdVfs` could not represent as UTF-8.
+    pub unsupported_names: Vec<OsString>,
+}
+
+/// How [`open_library`] treated the derived snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SnapshotReuse {
+    /// Snapshot matched this root and was reused.
+    Hit,
+    /// No snapshot file.
+    Missing,
+    /// Snapshot belongs to a different library folder.
+    RootMismatch,
+    /// Version is not this build's. Safe to ignore and rescan.
+    VersionMismatch {
+        /// Version the file claimed.
+        found: i64,
+        /// Version this build writes.
+        expected: i64,
+    },
+    /// File is not JSON / has no version.
+    Corrupt {
+        /// Parser detail.
+        detail: String,
+    },
+    /// Version matched but the payload did not decode.
+    Payload {
+        /// Parser detail.
+        detail: String,
+    },
+    /// File existed but could not be read.
+    Unreadable {
+        /// IO detail.
+        detail: String,
+    },
+}
+
+impl SnapshotReuse {
+    /// User-facing line when a snapshot was discarded and the tree was rebuilt.
+    pub fn recovery_message(&self) -> Option<String> {
+        match self {
+            SnapshotReuse::Corrupt { detail } => {
+                Some(format!("Library snapshot is corrupt; rescanned ({detail})"))
+            }
+            SnapshotReuse::Payload { detail } => Some(format!(
+                "Library snapshot payload is unreadable; rescanned ({detail})"
+            )),
+            SnapshotReuse::Unreadable { detail } => Some(format!(
+                "Library snapshot could not be read; rescanned ({detail})"
+            )),
+            SnapshotReuse::VersionMismatch { found, expected } => Some(format!(
+                "Library snapshot version {found} (expected {expected}); rescanned"
+            )),
+            SnapshotReuse::Hit | SnapshotReuse::Missing | SnapshotReuse::RootMismatch => None,
+        }
+    }
 }
 
 impl LibraryState {
@@ -56,10 +118,13 @@ impl LibraryState {
 #[derive(Debug)]
 pub enum HostError {
     /// Root path is not valid Unicode (the VFS is path-string based).
-    InvalidPath,
+    InvalidPath {
+        /// Lossy path plus the reason.
+        detail: String,
+    },
     /// The walk was cancelled.
     Cancelled,
-    /// Snapshot encode/decode failed.
+    /// Snapshot encode failed (load failures recover via a rescan).
     Snapshot(snapshot::SnapshotError),
     /// Config or cache write failed.
     Io(std::io::Error),
@@ -68,7 +133,7 @@ pub enum HostError {
 impl std::fmt::Display for HostError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            HostError::InvalidPath => write!(f, "library path is not valid Unicode"),
+            HostError::InvalidPath { detail } => write!(f, "{detail}"),
             HostError::Cancelled => write!(f, "scan cancelled"),
             HostError::Snapshot(e) => write!(f, "{e}"),
             HostError::Io(e) => write!(f, "{e}"),
@@ -106,15 +171,16 @@ pub fn open_library(
     cancel: &AtomicBool,
     on_progress: Option<&dyn Fn(&str, usize, usize)>,
 ) -> Result<LibraryState, HostError> {
-    let Some(root_str) = root.to_str() else {
-        return Err(HostError::InvalidPath);
-    };
+    let root_str = row::utf8_path(root).map_err(|e| HostError::InvalidPath {
+        detail: e.to_string(),
+    })?;
     if cancel.load(Ordering::Relaxed) {
         return Err(HostError::Cancelled);
     }
 
+    let _ = take_unsupported_names();
     let vfs = StdVfs;
-    let cached = load_snapshot_if_matching(root);
+    let (cached, snapshot_reuse) = load_snapshot_for(root);
     let cached_photos = cached
         .as_ref()
         .map(|s| {
@@ -174,7 +240,7 @@ pub fn open_library(
     persist_snapshot(root, root_folder.as_ref(), &photos, &sidecar_manifest)?;
 
     let mut cfg = Config::load();
-    cfg.library_root = Some(root_str.to_string());
+    cfg.library_root = Some(root.to_path_buf());
     cfg.save()?;
 
     Ok(LibraryState {
@@ -182,6 +248,8 @@ pub fn open_library(
         root_folder,
         index: LibraryIndex::build(photos),
         sidecar_manifest,
+        snapshot_reuse,
+        unsupported_names: take_unsupported_names(),
     })
 }
 
@@ -236,6 +304,8 @@ pub fn reapply_sidecars(
         root_folder,
         index: LibraryIndex::build(photos),
         sidecar_manifest: state.sidecar_manifest,
+        snapshot_reuse: state.snapshot_reuse,
+        unsupported_names: state.unsupported_names,
     })
 }
 
@@ -295,7 +365,7 @@ pub fn enrich_photo(vfs: &dyn Vfs, mut photo: PhotoFile) -> PhotoFile {
         photo.face_regions = meta.face_regions;
     }
     if let Some(wall) = meta.capture_wall_clock {
-        photo.date_taken = Some(civil_in_local_zone(wall));
+        photo.date_taken = Some(time::instant_from_local_wall(wall));
         photo.date_from_metadata = true;
     }
     photo.enriched_file_date = photo.file_modification_date.or_else(|| {
@@ -307,23 +377,6 @@ pub fn enrich_photo(vfs: &dyn Vfs, mut photo: PhotoFile) -> PhotoFile {
         ))
     });
     photo
-}
-
-/// Resolve a zone-less EXIF wall clock in the process local zone (`mktime`).
-fn civil_in_local_zone(c: CivilDateTime) -> AppleDate {
-    let mut tm = unsafe { std::mem::zeroed::<libc::tm>() };
-    tm.tm_sec = c.second as i32;
-    tm.tm_min = c.minute as i32;
-    tm.tm_hour = c.hour as i32;
-    tm.tm_mday = c.day as i32;
-    tm.tm_mon = c.month as i32 - 1;
-    tm.tm_year = c.year - 1900;
-    tm.tm_isdst = -1;
-    let unix = unsafe { libc::mktime(&mut tm) };
-    if unix < 0 {
-        return AppleDate::from_unix_secs_f64(c.as_naive_unix_secs() as f64);
-    }
-    AppleDate::from_unix_secs_f64(unix as f64)
 }
 
 /// Replace each tree photo with the enriched copy of the same path.
@@ -443,15 +496,35 @@ fn latest_taken(folder: &PhotoFolder) -> f64 {
         .fold(f64::NEG_INFINITY, f64::max)
 }
 
-fn load_snapshot_if_matching(root: &Path) -> Option<LibrarySnapshot> {
-    let bytes = std::fs::read(config::snapshot_path()).ok()?;
-    let snap = snapshot::load(&bytes).ok()?;
-    let snap_root = snap.root_folder.url.path();
-    let want = root.to_str()?;
-    if snap_root == want {
-        Some(snap)
-    } else {
-        None
+fn load_snapshot_for(root: &Path) -> (Option<LibrarySnapshot>, SnapshotReuse) {
+    let path = config::snapshot_path();
+    let bytes = match persist::read_private(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return (None, SnapshotReuse::Missing);
+        }
+        Err(e) => {
+            return (
+                None,
+                SnapshotReuse::Unreadable {
+                    detail: e.to_string(),
+                },
+            );
+        }
+    };
+    match snapshot::load(&bytes) {
+        Ok(snap) => {
+            if Path::new(snap.root_folder.url.path()) == root {
+                (Some(snap), SnapshotReuse::Hit)
+            } else {
+                (None, SnapshotReuse::RootMismatch)
+            }
+        }
+        Err(snapshot::SnapshotError::VersionMismatch { found, expected }) => {
+            (None, SnapshotReuse::VersionMismatch { found, expected })
+        }
+        Err(snapshot::SnapshotError::Corrupt(detail)) => (None, SnapshotReuse::Corrupt { detail }),
+        Err(snapshot::SnapshotError::Payload(detail)) => (None, SnapshotReuse::Payload { detail }),
     }
 }
 
@@ -471,17 +544,14 @@ fn persist_snapshot(
         sidecar_manifest: Some(manifest.to_vec()),
     })
     .map_err(HostError::Snapshot)?;
-    let path = config::snapshot_path();
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    std::fs::write(path, bytes)?;
+    persist::write_atomic(&config::snapshot_path(), &bytes)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::persist;
     use gallery_model::photo::{FileUrl, HierarchicalTag, PhotoFile, PhotoFolder, StableId};
     use gallery_vfs::MemVfs;
 
@@ -662,6 +732,8 @@ mod tests {
             root_folder: None,
             index: LibraryIndex::build(vec![photo]),
             sidecar_manifest: vec![],
+            snapshot_reuse: SnapshotReuse::Missing,
+            unsupported_names: vec![],
         };
         std::fs::write(
             path.with_extension("jpg.xmp"),
@@ -732,5 +804,107 @@ mod tests {
             !full.modified_paths.is_empty(),
             "full pass must observe the rewrite"
         );
+    }
+
+    struct PathGuard;
+    impl Drop for PathGuard {
+        fn drop(&mut self) {
+            crate::config::override_paths(None, None);
+        }
+    }
+
+    fn isolate_xdg() -> (tempfile::TempDir, PathGuard) {
+        let dir = tempfile::tempdir().unwrap();
+        crate::config::override_paths(
+            Some(dir.path().join("config.json")),
+            Some(dir.path().join("cache")),
+        );
+        (dir, PathGuard)
+    }
+
+    #[test]
+    fn corrupt_snapshot_is_reported_and_the_scan_recovers() {
+        let (_xdg, _guard) = isolate_xdg();
+        let lib = tempfile::tempdir().unwrap();
+        std::fs::write(lib.path().join("a.jpg"), b"not-a-jpeg").unwrap();
+        let snap = config::snapshot_path();
+        std::fs::create_dir_all(snap.parent().unwrap()).unwrap();
+        std::fs::write(&snap, b"not-json").unwrap();
+
+        let cancel = AtomicBool::new(false);
+        let state = open_library(lib.path(), &cancel, None).unwrap();
+        assert!(
+            matches!(state.snapshot_reuse, SnapshotReuse::Corrupt { .. }),
+            "{:?}",
+            state.snapshot_reuse
+        );
+        assert!(state
+            .snapshot_reuse
+            .recovery_message()
+            .unwrap()
+            .contains("corrupt"));
+        assert_eq!(state.index.photos().len(), 1);
+        assert_eq!(Config::load().library_root.as_deref(), Some(lib.path()));
+    }
+
+    #[test]
+    fn version_mismatch_is_not_reported_as_corruption() {
+        let (_xdg, _guard) = isolate_xdg();
+        let lib = tempfile::tempdir().unwrap();
+        std::fs::write(lib.path().join("a.jpg"), b"not-a-jpeg").unwrap();
+        let snap = config::snapshot_path();
+        std::fs::create_dir_all(snap.parent().unwrap()).unwrap();
+        std::fs::write(&snap, r#"{"version":19,"value":{}}"#).unwrap();
+
+        let cancel = AtomicBool::new(false);
+        let state = open_library(lib.path(), &cancel, None).unwrap();
+        assert!(
+            matches!(
+                state.snapshot_reuse,
+                SnapshotReuse::VersionMismatch { found: 19, .. }
+            ),
+            "{:?}",
+            state.snapshot_reuse
+        );
+        assert_eq!(state.index.photos().len(), 1);
+    }
+
+    #[test]
+    fn matching_snapshot_is_reused_and_written_privately() {
+        let (_xdg, _guard) = isolate_xdg();
+        let lib = tempfile::tempdir().unwrap();
+        std::fs::write(lib.path().join("a.jpg"), b"not-a-jpeg").unwrap();
+        let cancel = AtomicBool::new(false);
+        let first = open_library(lib.path(), &cancel, None).unwrap();
+        assert_eq!(first.snapshot_reuse, SnapshotReuse::Missing);
+        let second = open_library(lib.path(), &cancel, None).unwrap();
+        assert_eq!(second.snapshot_reuse, SnapshotReuse::Hit);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(config::snapshot_path())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, persist::FILE_MODE);
+            let dir_mode = std::fs::metadata(config::cache_dir())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(dir_mode, persist::DIR_MODE);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_root_is_a_diagnostic() {
+        use std::os::unix::ffi::OsStringExt;
+        let root = PathBuf::from(std::ffi::OsString::from_vec(vec![0xff, 0xfe]));
+        let err = open_library(&root, &AtomicBool::new(false), None).unwrap_err();
+        assert!(matches!(err, HostError::InvalidPath { .. }), "{err}");
+        assert!(err.to_string().contains("not valid UTF-8"));
     }
 }

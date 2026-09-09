@@ -26,7 +26,7 @@ use std::io::{Read, Seek};
 
 pub use error::{VfsError, VfsResult};
 pub use mem::MemVfs;
-pub use std_vfs::StdVfs;
+pub use std_vfs::{take_unsupported_names, StdVfs};
 
 /// Name of the temp file [`Vfs::write_atomic`] uses, so listings can skip it.
 pub const TEMP_PREFIX: &str = ".gallery-tmp-";

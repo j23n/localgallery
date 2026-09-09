@@ -16,7 +16,6 @@ use gtk::{Align, Orientation};
 
 use gallery_index::TagSuggestion;
 use gallery_meta::sidecar::{sidecar_exists, sidecar_path};
-use gallery_model::date::CivilDateTime;
 use gallery_model::photo::{FaceRegion, PhotoFile, PhotoFolder, StableId};
 use gallery_vfs::StdVfs;
 
@@ -30,8 +29,10 @@ use crate::host::{
     reapply_sidecars, CollectionGroup, LibraryAvailability, LibraryState,
 };
 use crate::ops::{apply_begin, apply_done, OpKind, OpLedger, OpToken, SurfaceFlags};
+use crate::row::PhotoRow;
+use crate::time;
 use crate::watch::{self, MuteGate, UnmuteAction, WatchHandle};
-use gallery_geo::{GeoCache, Nominatim};
+use gallery_geo::Nominatim;
 use gallery_session::{self as session, AnalysisSummary};
 
 const APP_TITLE: &str = "LocalGallery";
@@ -444,8 +445,11 @@ impl Window {
     }
 
     fn reload_from_config(&self) {
-        if let Some(root) = Config::load().library_root {
-            let path = PathBuf::from(root);
+        let loaded = Config::load_report();
+        if let Some(msg) = loaded.corruption_message() {
+            self.toast(&msg);
+        }
+        if let Some(path) = loaded.into_config().library_root {
             self.inner.root.replace(Some(path.clone()));
             if path.is_dir() {
                 self.start_scan(path);
@@ -569,6 +573,14 @@ impl Window {
                             Ok(state) => {
                                 this.finish_op(token, true);
                                 let n = state.index.photos().len();
+                                if let Some(msg) = state.snapshot_reuse.recovery_message() {
+                                    this.toast(&msg);
+                                }
+                                if let Some(msg) =
+                                    crate::row::unsupported_names_message(&state.unsupported_names)
+                                {
+                                    this.toast(&msg);
+                                }
                                 this.inner.state.replace(Some(state));
                                 this.rebuild_all();
                                 this.ensure_watch();
@@ -632,11 +644,14 @@ impl Window {
                 title: session::progress_title(&p),
             });
         });
-        let geo_path = config::geo_cache_path();
+        let (geo_cache, geo_note) = config::load_geo_cache();
+        if let Some(msg) = geo_note {
+            self.toast(&msg);
+        }
         let ml_cache = config::ml_cache_path();
         let endpoint = config::nominatim_endpoint();
         thread::spawn(move || {
-            let mut geo_cache = GeoCache::load(&geo_path);
+            let mut geo_cache = geo_cache;
             let geo = Nominatim::new(endpoint);
             let summary = session::run_analysis(
                 &photos,
@@ -648,7 +663,7 @@ impl Window {
                 &flag,
                 Some(on_progress),
             );
-            let _ = geo_cache.save(&geo_path);
+            let _ = config::save_geo_cache(&geo_cache);
             let library = if summary.written_paths.is_empty() {
                 None
             } else {
@@ -1003,14 +1018,9 @@ impl Window {
             return status_page("No Photos", "Nothing matches.", "image-x-generic-symbolic")
                 .upcast();
         }
-        let store = gio::ListStore::new::<gtk::StringObject>();
+        let store = gio::ListStore::new::<glib::BoxedAnyObject>();
         for (idx, photo) in photos.iter().enumerate() {
-            store.append(&gtk::StringObject::new(&format!(
-                "{idx}\t{}\t{}\t{}",
-                photo.path(),
-                photo.id,
-                u8::from(photo.is_video)
-            )));
+            store.append(&glib::BoxedAnyObject::new(PhotoRow::from_photo(idx, photo)));
         }
         let factory = gtk::SignalListItemFactory::new();
         let thumbs = self.inner.thumbs.clone();
@@ -1031,23 +1041,24 @@ impl Window {
                 .downcast_ref::<gtk::ListItem>()
                 .expect("factory item")
                 .clone();
-            let Some(s) = item.item().and_downcast::<gtk::StringObject>() else {
+            let Some(boxed) = item.item().and_downcast::<glib::BoxedAnyObject>() else {
                 return;
             };
             let Some(picture) = item.child().and_downcast::<gtk::Picture>() else {
                 return;
             };
-            let text = s.string();
-            let mut parts = text.split('\t');
-            let _idx = parts.next();
-            let Some(path) = parts.next() else { return };
-            let Some(id) = parts.next() else { return };
-            let is_video = parts.next() == Some("1");
-            if is_video {
+            let row = boxed.borrow::<PhotoRow>();
+            if row.is_video {
                 picture.set_alternative_text(Some("Video"));
                 picture.set_paintable(Option::<&gtk::gdk::Paintable>::None);
             } else {
-                thumbs.bind_grid(&picture, path, id, scale);
+                match row.utf8_path() {
+                    Ok(path) => thumbs.bind_grid(&picture, path, &row.id, scale),
+                    Err(err) => {
+                        picture.set_alternative_text(Some(&err.to_string()));
+                        picture.set_paintable(Option::<&gtk::gdk::Paintable>::None);
+                    }
+                }
             }
         });
         let thumbs_unbind = thumbs.clone();
@@ -2003,31 +2014,13 @@ fn scrolled(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
 }
 
 fn event_date_range(folder: &PhotoFolder) -> Option<String> {
-    let mut dates: Vec<CivilDateTime> = folder
-        .photos
-        .iter()
-        .filter_map(|p| p.date_taken)
-        .map(|d| CivilDateTime::from_unix_secs_f64(d.unix_secs_f64()))
-        .collect();
-    dates.sort_by_key(|d| (d.year, d.month, d.day));
-    let first = dates.first()?;
-    let last = dates.last()?;
-    let a = format!("{:04}-{:02}-{:02}", first.year, first.month, first.day);
-    let b = format!("{:04}-{:02}-{:02}", last.year, last.month, last.day);
-    if a == b {
-        Some(a)
-    } else {
-        Some(format!("{a} – {b}"))
-    }
+    time::format_local_day_range(folder.photos.iter().filter_map(|p| p.date_taken))
 }
 
 fn viewer_title(photo: &PhotoFile) -> String {
     photo
         .date_taken
-        .map(|d| {
-            let c = CivilDateTime::from_unix_secs_f64(d.unix_secs_f64());
-            format!("{:04}-{:02}-{:02}", c.year, c.month, c.day)
-        })
+        .map(time::format_local_day)
         .unwrap_or_else(|| photo.filename.clone())
 }
 
@@ -2042,13 +2035,7 @@ fn info_box(photo: &PhotoFile) -> gtk::Box {
     list.add_css_class("boxed-list");
     list.set_selection_mode(gtk::SelectionMode::None);
 
-    let date = photo.date_taken.map(|d| {
-        let c = CivilDateTime::from_unix_secs_f64(d.unix_secs_f64());
-        format!(
-            "{:04}-{:02}-{:02}  {:02}:{:02}",
-            c.year, c.month, c.day, c.hour, c.minute
-        )
-    });
+    let date = photo.date_taken.map(time::format_local_datetime);
     list.append(&info_row("Date", date.as_deref().unwrap_or("—")));
     list.append(&info_row("File", &photo.filename));
     if let (Some(lat), Some(lon)) = (photo.gps_latitude, photo.gps_longitude) {

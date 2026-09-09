@@ -1,10 +1,29 @@
 //! `std::fs`-backed [`Vfs`]. The only implementation the shipping app uses.
 
+use std::cell::RefCell;
+use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+thread_local! {
+    static UNSUPPORTED_NAMES: RefCell<Vec<OsString>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Drain names [`StdVfs::list`] skipped because they are not valid UTF-8.
+///
+/// The VFS trait still returns UTF-8 [`crate::Entry::name`] values — the scanner
+/// hashes those bytes — so non-UTF-8 names cannot become photos. Callers that
+/// need a diagnostic take them here instead of treating the skip as silence.
+pub fn take_unsupported_names() -> Vec<OsString> {
+    UNSUPPORTED_NAMES.with(|c| std::mem::take(&mut *c.borrow_mut()))
+}
+
+fn record_unsupported_name(name: OsString) {
+    UNSUPPORTED_NAMES.with(|c| c.borrow_mut().push(name));
+}
 
 use crate::{Entry, EntryKind, FileTime, ReadSeek, Stat, Vfs, VfsError, VfsResult, TEMP_PREFIX};
 
@@ -141,10 +160,12 @@ impl Vfs for StdVfs {
             // hazard the failed-directory carry-forward exists to prevent.
             // `contentsOfDirectory` never had this failure mode at all.
             let Ok(item) = item else { continue };
-            // Non-UTF-8 names are dropped rather than lossily converted: a
-            // replacement character would derive a stable id for a path that
-            // cannot be reopened. Vanishingly rare on APFS, which stores UTF-8.
+            // Non-UTF-8 names cannot become VFS entries: a replacement
+            // character would derive a stable id for a path that cannot be
+            // reopened. They are recorded for the host to surface, not dropped
+            // without a trace.
             let Ok(name) = item.file_name().into_string() else {
+                record_unsupported_name(item.file_name());
                 continue;
             };
             if name.starts_with(TEMP_PREFIX) {
@@ -558,5 +579,23 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .starts_with(".gallery-tmp-"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_reports_a_non_utf8_name_instead_of_omitting_it() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let _ = take_unsupported_names();
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("ok.jpg"), b"xx").unwrap();
+        let weird = std::ffi::OsString::from_vec(vec![0xff, 0xfe, b'.', b'j', b'p', b'g']);
+        fs::write(dir.path().join(&weird), b"yy").unwrap();
+
+        let listing = StdVfs.list(dir.path().to_str().unwrap()).unwrap();
+        assert_eq!(listing.len(), 1);
+        assert_eq!(listing[0].name, "ok.jpg");
+        let skipped = take_unsupported_names();
+        assert_eq!(skipped, vec![weird]);
     }
 }

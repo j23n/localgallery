@@ -209,7 +209,9 @@ extension GalleryStore {
             sidecarSync.plan(
                 manifest: result.sidecarManifest,
                 allPhotoIDs: allIDs,
-                autoApprove: false
+                autoApprove: false,
+                policy: .foreground,
+                listing: .from(failedDirectoryPaths: result.failedDirectoryPaths)
             )
 
             // Memory generation runs against the just-published `allPhotos`.
@@ -491,24 +493,17 @@ extension GalleryStore {
 
     /// Merge any `SidecarCacheStore` entry into a photo's runtime fields, so
     /// search/tags/country/face-regions surface for cloud photos before the
-    /// next sync completes. Cached fields lose to existing in-memory values
-    /// only when the photo already has them — fresh-from-disk metadata
-    /// (EXIF + sidecar, read by the core's `readImageMetadata`) wins on the
-    /// enrichment pass that runs after this.
+    /// next sync completes. A cache entry is the sidecar source of truth —
+    /// including an empty successful fetch, which retracts stale tags /
+    /// country / faces. A cache miss after a previous `.cached` status is
+    /// a confirmed deletion (GC after a complete listing) and also retracts.
+    /// Fresh-from-disk metadata still wins on the enrichment pass that
+    /// runs after this merge, because that pass publishes before the grid
+    /// sees the array.
     private func mergeCachedSidecars(into photos: [PhotoFile]) -> [PhotoFile] {
         var photos = photos
         for i in photos.indices {
-            guard let cached = sidecarCache.get(photos[i].id) else { continue }
-            if photos[i].hierarchicalTags.isEmpty {
-                photos[i].hierarchicalTags = cached.hierarchicalTags
-            }
-            if photos[i].countryCode == nil {
-                photos[i].countryCode = cached.countryCode
-            }
-            if photos[i].faceRegions.isEmpty {
-                photos[i].faceRegions = cached.faceRegions
-            }
-            photos[i].sidecarStatus = .cached(cached.version)
+            photos[i] = SidecarCacheMerge.apply(cached: sidecarCache.get(photos[i].id), to: photos[i])
         }
         return photos
     }
@@ -521,4 +516,25 @@ extension GalleryStore {
         return f
     }
 
+}
+
+/// How a `SidecarCacheStore` entry overlays a live `PhotoFile`. Extracted
+/// so tests can pin replacement (including empty retraction) without
+/// standing up a scan.
+enum SidecarCacheMerge {
+    static func apply(cached: SidecarCacheStore.CachedSidecar?, to photo: PhotoFile) -> PhotoFile {
+        var photo = photo
+        if let cached {
+            photo.hierarchicalTags = cached.hierarchicalTags
+            photo.countryCode = cached.countryCode
+            photo.faceRegions = cached.faceRegions
+            photo.sidecarStatus = .cached(cached.version)
+        } else if case .cached = photo.sidecarStatus {
+            photo.hierarchicalTags = []
+            photo.countryCode = nil
+            photo.faceRegions = []
+            photo.sidecarStatus = .absent
+        }
+        return photo
+    }
 }

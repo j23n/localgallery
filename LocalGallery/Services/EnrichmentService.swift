@@ -130,8 +130,12 @@ enum EnrichmentService {
 
         // EXIF date/GPS from the image; tags, country and faces from the
         // sidecar only. A photo with no sidecar is untagged until Scan
-        // writes one.
+        // writes one. `readImageMetadata` cannot tell an empty successful
+        // sidecar from a missing/unreadable one — both come back empty —
+        // so the sidecar document's `exists` + a byte read decide whether
+        // empty means retract or "keep what we already have".
         let metadata = readImageMetadata(path: photo.url.path)
+        let sidecar = SidecarDocument.read(imagePath: photo.url.path)
         let tags = metadata.hierarchicalTags.map {
             HierarchicalTag(fullPath: $0.fullPath, namespace: $0.namespace,
                             displayName: $0.displayName)
@@ -140,6 +144,15 @@ enum EnrichmentService {
             FaceRegion(name: $0.name, centerX: $0.centerX, centerY: $0.centerY,
                        width: $0.width, height: $0.height)
         }
+        let sidecarFields = resolvedSidecarFields(
+            existingTags: photo.hierarchicalTags,
+            existingCountry: photo.countryCode,
+            existingFaces: photo.faceRegions,
+            readTags: tags,
+            readCountry: metadata.countryCode,
+            readFaces: regions,
+            sidecarReadSucceeded: sidecarReadSucceeded(sidecar)
+        )
 
         var dateTaken = photo.dateTaken
         var dateFromMetadata = false
@@ -154,13 +167,40 @@ enum EnrichmentService {
             index: idx,
             dateTaken: dateTaken,
             dateFromMetadata: dateFromMetadata,
-            hierarchicalTags: tags.isEmpty ? photo.hierarchicalTags : tags,
-            countryCode: metadata.countryCode ?? photo.countryCode,
+            hierarchicalTags: sidecarFields.tags,
+            countryCode: sidecarFields.country,
             gpsLatitude: metadata.gpsLatitude ?? photo.gpsLatitude,
             gpsLongitude: metadata.gpsLongitude ?? photo.gpsLongitude,
             enrichedFileDate: modDate ?? Date(),
-            faceRegions: regions.isEmpty ? photo.faceRegions : regions
+            faceRegions: sidecarFields.faces
         )
+    }
+
+    /// A sidecar read succeeded when the file exists *and* its bytes can be
+    /// loaded. `SidecarDocument.exists` is true for an unreadable file as
+    /// well (the core still reports the path), so an empty document is not
+    /// enough to retract — a failed read must keep the in-memory fields.
+    static func sidecarReadSucceeded(_ doc: SidecarDocument) -> Bool {
+        guard doc.exists, let url = doc.url else { return false }
+        return (try? Data(contentsOf: url)) != nil
+    }
+
+    /// Sidecar-owned fields after one enrichment read. A successful empty
+    /// read retracts stale tags/country/faces; a failed or missing sidecar
+    /// leaves the existing values alone. GPS stays on the EXIF path.
+    static func resolvedSidecarFields(
+        existingTags: [HierarchicalTag],
+        existingCountry: String?,
+        existingFaces: [FaceRegion],
+        readTags: [HierarchicalTag],
+        readCountry: String?,
+        readFaces: [FaceRegion],
+        sidecarReadSucceeded: Bool
+    ) -> (tags: [HierarchicalTag], country: String?, faces: [FaceRegion]) {
+        if sidecarReadSucceeded {
+            return (readTags, readCountry, readFaces)
+        }
+        return (existingTags, existingCountry, existingFaces)
     }
 
     /// Per-photo enrichment payload. The detached task collects these in

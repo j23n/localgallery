@@ -200,8 +200,8 @@ final class GalleryStore {
     /// see `scanFolder`.
     @ObservationIgnored var activeScanTask: (url: URL, kind: ScanKind, startedAt: Date, task: Task<Void, Never>)?
     /// Most recent scanner-emitted sidecar manifest. `SidecarSyncService`
-    /// diffs it after every scan; `SidecarRefreshService` re-reads it on the
-    /// BG sidecar-refresh task.
+    /// diffs it after every scan; `SidecarRefreshService` re-probes each
+    /// URL on the BG sidecar-refresh task so it does not trust stale versions.
     ///
     /// Seeded from the persisted snapshot in `loadCache()`, *before*
     /// `restoreFolder` kicks off the launch `.auto` scan — without that, the

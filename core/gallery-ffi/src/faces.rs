@@ -199,7 +199,9 @@ impl From<MlError> for FaceError {
             },
             MlError::PackInvalid { detail } => FaceError::PackInvalid { detail },
             MlError::FaceModelsUnavailable => FaceError::ModelsUnavailable,
-            MlError::Cache { detail } => FaceError::Cache { detail },
+            MlError::Cache { detail } | MlError::CacheUnrecoverable { detail } => {
+                FaceError::Cache { detail }
+            }
             MlError::Inference { detail } => FaceError::Inference { detail },
             MlError::Preprocess { path, detail, .. } => FaceError::Io { path, detail },
             MlError::Vfs(v) => v.into(),

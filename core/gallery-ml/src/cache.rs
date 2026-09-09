@@ -70,12 +70,12 @@
 //! decoding or running inference.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, TransactionBehavior};
 
-use crate::error::{ErrorCode, MlResult};
+use crate::error::{ErrorCode, MlError, MlResult};
 
 /// Schema version stored in `meta`. Bump when [`MIGRATIONS`] grows.
 pub const SCHEMA_VERSION: u32 = 5;
@@ -545,32 +545,35 @@ impl CacheDb {
     /// `GalleryPaths` — so a missed injection fails loudly instead of writing
     /// somewhere plausible.
     pub fn open(path: impl AsRef<Path>) -> MlResult<CacheDb> {
-        if let Some(parent) = path.as_ref().parent() {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 let _ = std::fs::create_dir_all(parent);
             }
         }
-        let conn = Connection::open(path)?;
-        Self::from_connection(conn)
+        match Self::from_connection(Connection::open(path)?) {
+            Ok(db) => Ok(db),
+            Err(err) if matches!(err, MlError::CacheUnrecoverable { .. }) => {
+                // The handle is already dropped: `from_connection` returns
+                // before this match, so SQLite has released the file. Rename
+                // the derived cache (not sidecars) and open a fresh one.
+                quarantine_derived_cache(path, &err)?;
+                Self::from_connection(Connection::open(path)?)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     /// An in-memory database. Tests only; nothing persists.
+    ///
+    /// A migration failure here is [`MlError::CacheUnrecoverable`]: there is no
+    /// file to quarantine, and inventing one would be a lie.
     pub fn open_in_memory() -> MlResult<CacheDb> {
         Self::from_connection(Connection::open_in_memory()?)
     }
 
     fn from_connection(conn: Connection) -> MlResult<CacheDb> {
-        // `journal_mode` returns a row, so it needs `query_row`, not `execute`.
-        let _: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
-        conn.pragma_update(None, "foreign_keys", "ON")?;
-        // Two engines share this file — a tagging run and a face run are
-        // independently startable, and naming writes from the main actor. WAL
-        // lets readers and one writer coexist, but two writers still collide,
-        // and the default behaviour is to fail the statement instantly with
-        // SQLITE_BUSY. Every write here is a handful of small rows, so waiting
-        // is always the better answer than failing a photo.
-        conn.busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS))?;
+        apply_connection_pragmas(&conn).map_err(classify_open_sqlite)?;
 
         let db = CacheDb {
             conn: Mutex::new(conn),
@@ -587,36 +590,14 @@ impl CacheDb {
     }
 
     fn migrate(&self) -> MlResult<()> {
-        let conn = self.lock();
-        let current: u32 = conn
-            .query_row(
-                "SELECT value FROM meta WHERE key = ?1",
-                params![META_SCHEMA_VERSION],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()
-            // A brand-new file has no `meta` table at all; that read fails with
-            // "no such table", which is version 0 rather than an error.
-            .unwrap_or(None)
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
+        apply_migrations(&mut self.lock(), MIGRATIONS, SCHEMA_VERSION)
+    }
 
-        if current > SCHEMA_VERSION {
-            // A newer build wrote this file. Refuse rather than corrupt it —
-            // the caller can delete the cache, which costs only a re-run.
-            return Err(crate::error::MlError::Cache {
-                detail: format!("cache schema {current} is newer than {SCHEMA_VERSION}"),
-            });
-        }
-        for sql in MIGRATIONS.iter().skip(current as usize) {
-            conn.execute_batch(sql)?;
-        }
-        conn.execute(
-            "INSERT INTO meta (key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            params![META_SCHEMA_VERSION, SCHEMA_VERSION.to_string()],
-        )?;
-        Ok(())
+    /// Apply `migrations` up to `target_version` — tests inject a failing step
+    /// so rollback can be observed without shipping a broken schema.
+    #[cfg(test)]
+    fn migrate_with(&self, migrations: &[&str], target_version: u32) -> MlResult<()> {
+        apply_migrations(&mut self.lock(), migrations, target_version)
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
@@ -645,6 +626,193 @@ impl CacheDb {
         )?;
         Ok(())
     }
+}
+
+/// WAL + busy-timeout setup shared by file-backed and in-memory opens.
+///
+/// Two engines share one file — a tagging run and a face run are independently
+/// startable, and naming writes from the main actor. WAL lets readers and one
+/// writer coexist, but two writers still collide, and the default behaviour is
+/// to fail the statement instantly with `SQLITE_BUSY`. Every write here is a
+/// handful of small rows, so waiting is always the better answer than failing
+/// a photo.
+fn apply_connection_pragmas(conn: &Connection) -> rusqlite::Result<()> {
+    // `journal_mode` returns a row, so it needs `query_row`, not `execute`.
+    let _: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    conn.busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS))?;
+    Ok(())
+}
+
+fn current_schema_version(conn: &Connection) -> u32 {
+    conn.query_row(
+        "SELECT value FROM meta WHERE key = ?1",
+        params![META_SCHEMA_VERSION],
+        |r| r.get::<_, String>(0),
+    )
+    .optional()
+    // A brand-new file has no `meta` table at all; that read fails with
+    // "no such table", which is version 0 rather than an error.
+    .unwrap_or(None)
+    .and_then(|s| s.parse().ok())
+    .unwrap_or(0)
+}
+
+fn is_sqlite_busy(err: &rusqlite::Error) -> bool {
+    match err {
+        rusqlite::Error::SqliteFailure(info, _) => matches!(
+            info.code,
+            rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+        ),
+        _ => false,
+    }
+}
+
+fn is_sqlite_unusable(err: &rusqlite::Error) -> bool {
+    match err {
+        rusqlite::Error::SqliteFailure(info, _) => matches!(
+            info.code,
+            rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase
+        ),
+        _ => false,
+    }
+}
+
+/// Connection-setup failures: only a corrupt / non-database file is worth
+/// quarantining. Busy/locked is another writer; everything else stays `Cache`.
+fn classify_open_sqlite(err: rusqlite::Error) -> MlError {
+    if is_sqlite_busy(&err) {
+        return err.into();
+    }
+    if is_sqlite_unusable(&err) {
+        return MlError::CacheUnrecoverable {
+            detail: err.to_string(),
+        };
+    }
+    err.into()
+}
+
+/// Migration-step failures: busy/locked must not look like a broken file (that
+/// would quarantine a live cache the other engine is writing). Any other SQL
+/// error means the schema cannot be applied.
+fn classify_migration_sqlite(err: rusqlite::Error) -> MlError {
+    if is_sqlite_busy(&err) {
+        err.into()
+    } else {
+        MlError::CacheUnrecoverable {
+            detail: err.to_string(),
+        }
+    }
+}
+
+/// Apply every pending step and the `schema_version` write in one Immediate
+/// transaction. Interrupting mid-batch then rolls the DDL back with the
+/// version, so the next open does not replay a half-applied schema.
+fn apply_migrations(
+    conn: &mut Connection,
+    migrations: &[&str],
+    target_version: u32,
+) -> MlResult<()> {
+    let current = current_schema_version(conn);
+    if current > target_version {
+        // A newer build wrote this file. Refuse rather than corrupt it —
+        // the caller can delete the cache, which costs only a re-run.
+        return Err(MlError::Cache {
+            detail: format!("cache schema {current} is newer than {target_version}"),
+        });
+    }
+    if current == target_version {
+        return Ok(());
+    }
+
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(classify_migration_sqlite)?;
+    // Re-read under the write lock: a concurrent opener may have finished
+    // the same upgrade while we waited on `SQLITE_BUSY`.
+    let current = current_schema_version(&tx);
+    if current > target_version {
+        return Err(MlError::Cache {
+            detail: format!("cache schema {current} is newer than {target_version}"),
+        });
+    }
+    if current == target_version {
+        tx.commit().map_err(classify_migration_sqlite)?;
+        return Ok(());
+    }
+    for sql in migrations.iter().skip(current as usize) {
+        tx.execute_batch(sql).map_err(classify_migration_sqlite)?;
+    }
+    tx.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![META_SCHEMA_VERSION, target_version.to_string()],
+    )
+    .map_err(classify_migration_sqlite)?;
+    tx.commit().map_err(classify_migration_sqlite)?;
+    Ok(())
+}
+
+fn sqlite_wal_shm(path: &Path) -> [PathBuf; 2] {
+    let mut wal = path.as_os_str().to_os_string();
+    wal.push("-wal");
+    let mut shm = path.as_os_str().to_os_string();
+    shm.push("-shm");
+    [PathBuf::from(wal), PathBuf::from(shm)]
+}
+
+/// Rename a derived cache and its WAL/SHM companions. Sidecars sit next to
+/// photos, not next to this file; they are not on the move list.
+fn quarantine_derived_cache(path: &Path, cause: &MlError) -> MlResult<()> {
+    let id = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let mut sources = vec![path.to_path_buf()];
+    sources.extend(sqlite_wal_shm(path));
+
+    let mut moved = Vec::new();
+    for src in sources {
+        if !src.exists() {
+            continue;
+        }
+        let name = src.file_name().unwrap_or_default().to_string_lossy();
+        let dest = src.with_file_name(format!("{name}.corrupt-{id}"));
+        std::fs::rename(&src, &dest).map_err(|e| MlError::Cache {
+            detail: format!("quarantine {}: {e}", src.display()),
+        })?;
+        moved.push(dest);
+    }
+
+    if let Some(name) = path.file_name() {
+        let note = path.with_file_name(format!("{}.corrupt-{id}.txt", name.to_string_lossy()));
+        let listed = if moved.is_empty() {
+            "  (no files moved)\n".to_string()
+        } else {
+            moved
+                .iter()
+                .map(|p| format!("  {}\n", p.display()))
+                .collect()
+        };
+        let body = format!(
+            "The derived SQLite cache could not be migrated and was quarantined.\n\
+             \n\
+             Original: {}\n\
+             Cause: {cause}\n\
+             \n\
+             Photo sidecars (.xmp) were not modified. This cache holds only\n\
+             recomputable queues, embeddings, and clusters.\n\
+             Moved:\n{listed}",
+            path.display(),
+        );
+        let _ = std::fs::write(note, body);
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1976,9 +2144,7 @@ impl CacheDb {
              WHERE cluster_id IN ({placeholders})
              ORDER BY content_hash"
         ))?;
-        let rows = stmt.query_map(params_from_iter(ids.iter()), |r| {
-            r.get::<_, Vec<u8>>(0)
-        })?;
+        let rows = stmt.query_map(params_from_iter(ids.iter()), |r| r.get::<_, Vec<u8>>(0))?;
         Ok(rows
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
@@ -2347,10 +2513,213 @@ mod tests {
         let db = CacheDb::open(&path).unwrap();
         let row = db.cluster(3).unwrap().unwrap();
         assert_eq!(row.state, ClusterState::Rejected);
+        assert_eq!(db.meta(META_SCHEMA_VERSION).unwrap().as_deref(), Some("5"));
+    }
+
+    /// A step that fails after earlier DDL in the same batch must not leave
+    /// those statements applied or the version bumped: the next open would
+    /// otherwise replay and die on "already exists".
+    #[test]
+    fn a_failing_migration_rolls_back_ddl_and_the_version() {
+        let db = db();
+        let before = db.meta(META_SCHEMA_VERSION).unwrap();
+        assert_eq!(before.as_deref(), Some(SCHEMA_VERSION.to_string().as_str()));
+
+        let mut steps: Vec<&str> = MIGRATIONS.to_vec();
+        steps.push("CREATE TABLE migration_probe (id INTEGER);");
+        steps.push("ALTER TABLE definitely_missing ADD COLUMN x INTEGER;");
+
+        let err = db
+            .migrate_with(&steps, SCHEMA_VERSION + 2)
+            .expect_err("the missing-table step must fail");
+        assert!(matches!(err, MlError::CacheUnrecoverable { .. }), "{err:?}");
+
+        assert_eq!(db.meta(META_SCHEMA_VERSION).unwrap(), before);
+        let probe: i64 = db
+            .lock()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'migration_probe'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(probe, 0, "CREATE TABLE must roll back with the failed step");
+    }
+
+    /// Pathless connections have nothing to rename. Quarantine is a filesystem
+    /// move of a derived file; inventing one next to the test process would
+    /// be the wrong failure mode.
+    #[test]
+    fn an_in_memory_migration_failure_is_typed_and_does_not_quarantine() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = db();
+        let mut steps: Vec<&str> = MIGRATIONS.to_vec();
+        steps.push("ALTER TABLE definitely_missing ADD COLUMN x INTEGER;");
+        let err = db
+            .migrate_with(&steps, SCHEMA_VERSION + 1)
+            .expect_err("in-memory failure must surface");
+        assert!(matches!(err, MlError::CacheUnrecoverable { .. }), "{err:?}");
+        assert!(
+            std::fs::read_dir(dir.path()).unwrap().next().is_none(),
+            "pathless failure must not create quarantine files"
+        );
+    }
+
+    /// A file we cannot migrate is renamed aside and replaced by a fresh
+    /// cache. A sibling sidecar is user data and must stay put.
+    #[test]
+    fn a_file_backed_irrecoverable_cache_is_quarantined_and_recreated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gallery-cache.sqlite");
+        let sidecar = dir.path().join("photo.jpg.xmp");
+        std::fs::write(&sidecar, "<x:xmpmeta>keep-me</x:xmpmeta>").unwrap();
+
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(MIGRATIONS[0]).unwrap();
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?1, '1')",
+                params![META_SCHEMA_VERSION],
+            )
+            .unwrap();
+            // v2 adds `file_size`. Planting it first makes the pending step
+            // irrecoverable without touching user files.
+            conn.execute("ALTER TABLE ml_work ADD COLUMN file_size INTEGER", [])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO ml_work (path, state, updated_at) VALUES ('/old.jpg', 2, 0)",
+                [],
+            )
+            .unwrap();
+        }
+
+        let db = CacheDb::open(&path).unwrap();
         assert_eq!(
             db.meta(META_SCHEMA_VERSION).unwrap().as_deref(),
-            Some("5")
+            Some(SCHEMA_VERSION.to_string().as_str())
         );
+        assert!(db.item("/old.jpg").unwrap().is_none());
+        assert_eq!(db.enqueue(&["/fresh.jpg".into()]).unwrap(), 1);
+
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names
+                .iter()
+                .any(|n| n.starts_with("gallery-cache.sqlite.corrupt-") && !n.ends_with(".txt")),
+            "expected quarantined db in {names:?}"
+        );
+        assert!(
+            names
+                .iter()
+                .any(|n| n.starts_with("gallery-cache.sqlite.corrupt-") && n.ends_with(".txt")),
+            "expected diagnostic next to the quarantine in {names:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&sidecar).unwrap(),
+            "<x:xmpmeta>keep-me</x:xmpmeta>"
+        );
+    }
+
+    #[test]
+    fn quarantine_renames_the_db_and_wal_shm_and_leaves_sidecars() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gallery-cache.sqlite");
+        std::fs::write(&path, b"db-bytes").unwrap();
+        let [wal, shm] = sqlite_wal_shm(&path);
+        std::fs::write(&wal, b"wal-bytes").unwrap();
+        std::fs::write(&shm, b"shm-bytes").unwrap();
+        let sidecar = dir.path().join("photo.jpg.xmp");
+        std::fs::write(&sidecar, b"keep").unwrap();
+
+        quarantine_derived_cache(
+            &path,
+            &MlError::CacheUnrecoverable {
+                detail: "duplicate column".into(),
+            },
+        )
+        .unwrap();
+
+        assert!(!path.exists());
+        assert!(!wal.exists());
+        assert!(!shm.exists());
+        assert_eq!(std::fs::read(&sidecar).unwrap(), b"keep");
+
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(names
+            .iter()
+            .any(|n| n.starts_with("gallery-cache.sqlite.corrupt-")
+                && !n.contains("-wal")
+                && !n.contains("-shm")
+                && !n.ends_with(".txt")));
+        assert!(names
+            .iter()
+            .any(|n| n.starts_with("gallery-cache.sqlite-wal.corrupt-")));
+        assert!(names
+            .iter()
+            .any(|n| n.starts_with("gallery-cache.sqlite-shm.corrupt-")));
+        let note = names
+            .iter()
+            .find(|n| n.starts_with("gallery-cache.sqlite.corrupt-") && n.ends_with(".txt"))
+            .expect("diagnostic");
+        let text = std::fs::read_to_string(dir.path().join(note)).unwrap();
+        assert!(text.contains("duplicate column"));
+        assert!(text.contains("sidecars"));
+    }
+
+    #[test]
+    fn a_garbage_file_backed_cache_is_quarantined_and_recreated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gallery-cache.sqlite");
+        std::fs::write(&path, b"this is not sqlite").unwrap();
+        let sidecar = dir.path().join("photo.jpg.xmp");
+        std::fs::write(&sidecar, b"keep").unwrap();
+
+        let db = CacheDb::open(&path).unwrap();
+        assert_eq!(
+            db.meta(META_SCHEMA_VERSION).unwrap().as_deref(),
+            Some(SCHEMA_VERSION.to_string().as_str())
+        );
+        assert_eq!(std::fs::read(&sidecar).unwrap(), b"keep");
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names
+                .iter()
+                .any(|n| n.starts_with("gallery-cache.sqlite.corrupt-") && !n.ends_with(".txt")),
+            "expected quarantined garbage file in {names:?}"
+        );
+    }
+
+    #[test]
+    fn a_newer_schema_is_not_quarantined() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.sqlite");
+        {
+            let db = CacheDb::open(&path).unwrap();
+            db.set_meta(META_SCHEMA_VERSION, "999").unwrap();
+        }
+        assert!(CacheDb::open(&path).is_err());
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !names.iter().any(|n| n.contains("corrupt")),
+            "newer schema must stay put: {names:?}"
+        );
+        assert!(path.exists());
     }
 
     #[test]

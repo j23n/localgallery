@@ -142,7 +142,9 @@ impl From<MlError> for TaggingError {
             MlError::FaceModelsUnavailable => TaggingError::PackInvalid {
                 detail: MlError::FaceModelsUnavailable.to_string(),
             },
-            MlError::Cache { detail } => TaggingError::Cache { detail },
+            MlError::Cache { detail } | MlError::CacheUnrecoverable { detail } => {
+                TaggingError::Cache { detail }
+            }
             // Only the face surface can produce these; from a tagging call they
             // are the cluster table saying no, which is what `Cache` means.
             e @ (MlError::ClusterNotFound { .. }

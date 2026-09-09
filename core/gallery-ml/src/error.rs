@@ -58,6 +58,16 @@ pub enum MlError {
         /// The rusqlite message; for logs only.
         detail: String,
     },
+    /// Schema migration failed and this connection has no file to quarantine.
+    ///
+    /// File-backed opens close the handle, rename the derived cache (plus WAL
+    /// and SHM) aside, and create a fresh file. In-memory and other pathless
+    /// connections have nothing to move, so they surface this instead of
+    /// touching the filesystem.
+    CacheUnrecoverable {
+        /// Why the schema could not be applied; for logs only.
+        detail: String,
+    },
     /// The inference backend refused to load the model or run it.
     Inference {
         /// Backend message; for logs only.
@@ -150,6 +160,9 @@ impl fmt::Display for MlError {
             MlError::PackInvalid { detail } => write!(f, "invalid model pack: {detail}"),
             MlError::FaceModelsUnavailable => write!(f, "model pack ships no face models"),
             MlError::Cache { detail } => write!(f, "cache db: {detail}"),
+            MlError::CacheUnrecoverable { detail } => {
+                write!(f, "cache db unrecoverable: {detail}")
+            }
             MlError::Inference { detail } => write!(f, "inference: {detail}"),
             MlError::Preprocess { path, code, detail } => {
                 write!(f, "preprocess {path} ({code:?}): {detail}")
@@ -187,6 +200,7 @@ impl MlError {
             MlError::Meta(_) => ErrorCode::SidecarWrite,
             MlError::Inference { .. } => ErrorCode::Inference,
             MlError::Cache { .. }
+            | MlError::CacheUnrecoverable { .. }
             | MlError::ClusterNotFound { .. }
             | MlError::InvalidMerge { .. }
             | MlError::InvalidSplit { .. }
@@ -299,5 +313,14 @@ mod tests {
     fn vfs_not_found_maps_to_its_own_code() {
         let e = MlError::Vfs(VfsError::NotFound { path: "/x".into() });
         assert_eq!(e.error_code(), ErrorCode::NotFound);
+    }
+
+    #[test]
+    fn an_unrecoverable_cache_is_still_a_cache_code() {
+        let e = MlError::CacheUnrecoverable {
+            detail: "duplicate column name: file_size".into(),
+        };
+        assert_eq!(e.error_code(), ErrorCode::Cache);
+        assert!(e.to_string().contains("unrecoverable"));
     }
 }

@@ -17,7 +17,7 @@ mod nominatim;
 pub use cache::{GeoCache, GeoCacheEntry, CACHE_RADIUS_KM, DISK_CACHE_VERSION};
 pub use nominatim::{
     request_from_nominatim, Nominatim, NominatimAddress, DEFAULT_ENDPOINT, DEFAULT_USER_AGENT,
-    MIN_LOOKUP_INTERVAL,
+    MAX_RESPONSE_BYTES, MIN_LOOKUP_INTERVAL,
 };
 
 use std::sync::atomic::{AtomicBool, Ordering};

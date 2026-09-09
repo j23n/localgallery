@@ -14,6 +14,7 @@ enum RedactionKind: String, Sendable, CaseIterable {
     case trip
     case contact
     case filename
+    case place
     case other
 }
 
@@ -136,6 +137,13 @@ extension Log {
         static func contact(_ s: String) -> String { LogRedactor.shared.token(s, kind: .contact) }
         static func filename(_ s: String) -> String { LogRedactor.shared.token(s, kind: .filename) }
         static func other(_ s: String) -> String { LogRedactor.shared.token(s, kind: .other) }
+        /// `Places/Country/…` paths identify a home or a trip. Tokenize the
+        /// whole path; the in-app redaction key recovers it locally.
+        static func place(_ path: String) -> String { LogRedactor.shared.token(path, kind: .place) }
+        /// City-scale GPS (~1.1 km). Exact degrees never reach TeeLogger.
+        static func gps(_ latitude: Double, _ longitude: Double) -> String {
+            quantizedGPS(latitude: latitude, longitude: longitude)
+        }
         /// Errors: `localizedDescription` routinely embeds file names/paths
         /// (e.g. CocoaError "The file 'IMG_4032.jpg' couldn't be opened"), so
         /// the description is tokenized whole; the domain/code prefix carries
@@ -145,4 +153,13 @@ extension Log {
             return "\(ns.domain)#\(ns.code) \(LogRedactor.shared.token(ns.localizedDescription, kind: .other))"
         }
     }
+}
+
+/// Two decimal degrees (~1.1 km). Enough to tell Paris from Rome in a
+/// Places log line; not enough to pin a house.
+func quantizedGPS(latitude: Double, longitude: Double) -> String {
+    guard latitude.isFinite, longitude.isFinite else { return "lat=? lon=?" }
+    let lat = (latitude * 100).rounded() / 100
+    let lon = (longitude * 100).rounded() / 100
+    return String(format: "lat≈%.2f lon≈%.2f", lat, lon)
 }

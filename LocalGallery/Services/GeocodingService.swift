@@ -217,7 +217,7 @@ final class GeocodingService {
                 continue
             }
             Log.ml.info(
-                "Places photo \(summary.processed)/\(candidates.count) \(Log.r.path(photo.url)) lat=\(lat) lon=\(lon)"
+                "Places photo \(summary.processed)/\(candidates.count) \(Log.r.path(photo.url)) \(Log.r.gps(lat, lon))"
             )
             do {
                 let resolveAt = now()
@@ -235,7 +235,7 @@ final class GeocodingService {
                     place: place
                 )
                 Log.ml.info(
-                    "Places \(written ? "wrote" : "kept") \(place.path) \(Log.r.path(photo.url)) resolve=\(Self.ms(since: resolveAt))ms write=\(Self.ms(since: writeAt))ms"
+                    "Places \(written ? "wrote" : "kept") \(Log.r.place(place.path)) \(Log.r.path(photo.url)) resolve=\(Self.ms(since: resolveAt))ms write=\(Self.ms(since: writeAt))ms"
                 )
                 if written {
                     summary.written += 1
@@ -275,7 +275,7 @@ final class GeocodingService {
     func resolve(latitude: Double, longitude: Double) async throws -> CacheEntry? {
         if let hit = nearest(latitude: latitude, longitude: longitude) {
             Log.ml.debug(
-                "Places cache hit \(hit.path) lat=\(latitude) lon=\(longitude) cache=\(cache.count)"
+                "Places cache hit \(Log.r.place(hit.path)) \(Log.r.gps(latitude, longitude)) cache=\(cache.count)"
             )
             return hit
         }
@@ -284,7 +284,7 @@ final class GeocodingService {
             return nil
         }
         Log.ml.info(
-                "Places cache miss lat=\(latitude) lon=\(longitude) cache=\(cache.count) — live Nominatim"
+            "Places cache miss \(Log.r.gps(latitude, longitude)) cache=\(cache.count) — live Nominatim"
         )
         guard let entry = try await lookupLive(
             latitude: latitude,
@@ -312,31 +312,32 @@ final class GeocodingService {
             lastLiveLookupAt = now()
             let attemptAt = now()
             Log.ml.info(
-                "Places Nominatim attempt \(attempt + 1)/\(Self.maxLookupAttempts) lat=\(latitude) lon=\(longitude)"
+                "Places Nominatim attempt \(attempt + 1)/\(Self.maxLookupAttempts) \(Log.r.gps(latitude, longitude))"
             )
             do {
                 let entry = try await lookup(latitude, longitude)
+                let path = entry.map { Log.r.place($0.path) } ?? "nil"
                 Log.ml.info(
-                    "Places Nominatim returned in \(Self.ms(since: attemptAt))ms path=\(entry?.path ?? "nil")"
+                    "Places Nominatim returned in \(Self.ms(since: attemptAt))ms path=\(path)"
                 )
                 return entry
             } catch {
                 attempt += 1
                 let retriesLeft = Self.maxLookupAttempts - attempt
                 Log.ml.error(
-                    "Places Nominatim error attempt \(attempt) after \(Self.ms(since: attemptAt))ms: \(error.localizedDescription) retryable=\(Self.isRetryable(error))"
+                    "Places Nominatim error attempt \(attempt) after \(Self.ms(since: attemptAt))ms: \(Log.r.error(error)) retryable=\(Self.isRetryable(error))"
                 )
                 if Self.isRetryable(error), retriesLeft > 0, !cancelRequested {
                     let backoff = Self.backoff(afterFailures: attempt)
                     Log.ml.info(
-                        "Geocode lookup retry \(attempt)/\(Self.maxLookupAttempts - 1) in \(Int(backoff.rounded()))s (\(error.localizedDescription))"
+                        "Geocode lookup retry \(attempt)/\(Self.maxLookupAttempts - 1) in \(Int(backoff.rounded()))s (\(Log.r.error(error)))"
                     )
                     await pause(backoff)
                     continue
                 }
                 if Self.isRetryable(error) {
                     Log.ml.error(
-                        "Geocode lookup failed after \(attempt) attempts: \(error.localizedDescription)"
+                        "Geocode lookup failed after \(attempt) attempts: \(Log.r.error(error))"
                     )
                 }
                 throw error
@@ -450,7 +451,7 @@ final class GeocodingService {
         let started = Date()
         let timeout = lookupTimeout
         Log.ml.info(
-            "Places Nominatim starting lat=\(latitude) lon=\(longitude) timeout=\(Int(timeout))s"
+            "Places Nominatim starting \(Log.r.gps(latitude, longitude)) timeout=\(Int(timeout))s"
         )
         do {
             return try await withThrowingTaskGroup(of: CacheEntry?.self) { group in
@@ -464,25 +465,25 @@ final class GeocodingService {
                         try await Task.sleep(for: .seconds(step))
                         waited += step
                         Log.ml.info(
-                            "Places Nominatim still waiting \(waited)s lat=\(latitude) lon=\(longitude)"
+                            "Places Nominatim still waiting \(waited)s \(Log.r.gps(latitude, longitude))"
                         )
                     }
                     try await Task.sleep(for: .seconds(timeout - Double(waited)))
                     Log.ml.error(
-                        "Places Nominatim timed out after \(Int(timeout))s lat=\(latitude) lon=\(longitude)"
+                        "Places Nominatim timed out after \(Int(timeout))s \(Log.r.gps(latitude, longitude))"
                     )
                     throw LookupError.timedOut
                 }
                 let first = try await group.next()!
                 group.cancelAll()
                 Log.ml.info(
-                    "Places Nominatim finished in \(Self.ms(since: started))ms lat=\(latitude) lon=\(longitude)"
+                    "Places Nominatim finished in \(Self.ms(since: started))ms \(Log.r.gps(latitude, longitude))"
                 )
                 return first
             }
         } catch {
             Log.ml.error(
-                "Places Nominatim failed in \(Self.ms(since: started))ms: \(error.localizedDescription)"
+                "Places Nominatim failed in \(Self.ms(since: started))ms: \(Log.r.error(error))"
             )
             throw error
         }

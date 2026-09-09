@@ -11,6 +11,13 @@ import os
 /// `Log.memory` where the `.debug(...)` sites dump trip-cluster scoring per
 /// candidate. Set `minLevel: .info` to drop those without touching call
 /// sites or paying their string-interpolation cost.
+///
+/// The message is already a flattened `String` (call sites interpolate
+/// first, including `Log.r.*` tokens). OSLog therefore marks the whole
+/// string `.private`: Unified Logging must not re-publish values the
+/// redactor already replaced, or a coordinate a call site forgot to
+/// quantize. `LogStore` still receives the same string the in-app viewer
+/// shows.
 struct TeeLogger: Sendable {
     let logger: Logger
     let category: String
@@ -19,14 +26,14 @@ struct TeeLogger: Sendable {
     func debug(_ message: @autoclosure () -> String) {
         guard minLevel <= .debug else { return }
         let s = message()
-        logger.debug("\(s, privacy: .public)")
+        logger.debug("\(s, privacy: .private)")
         LogStore.shared.append(level: .debug, category: category, message: s)
     }
 
     func info(_ message: @autoclosure () -> String) {
         guard minLevel <= .info else { return }
         let s = message()
-        logger.info("\(s, privacy: .public)")
+        logger.info("\(s, privacy: .private)")
         LogStore.shared.append(level: .info, category: category, message: s)
     }
 
@@ -35,21 +42,21 @@ struct TeeLogger: Sendable {
     func notice(_ message: @autoclosure () -> String) {
         guard minLevel <= .info else { return }
         let s = message()
-        logger.notice("\(s, privacy: .public)")
+        logger.notice("\(s, privacy: .private)")
         LogStore.shared.append(level: .info, category: category, message: s)
     }
 
     func warning(_ message: @autoclosure () -> String) {
         guard minLevel <= .warning else { return }
         let s = message()
-        logger.warning("\(s, privacy: .public)")
+        logger.warning("\(s, privacy: .private)")
         LogStore.shared.append(level: .warning, category: category, message: s)
     }
 
     func error(_ message: @autoclosure () -> String) {
         // .error is the highest level — never gated.
         let s = message()
-        logger.error("\(s, privacy: .public)")
+        logger.error("\(s, privacy: .private)")
         LogStore.shared.append(level: .error, category: category, message: s)
     }
 }

@@ -1,43 +1,46 @@
 //! Grid tiles come from the XDG thumbnail cache. The viewer decodes the file.
+//! Decode runs on a bounded pool; the same key is never in flight twice.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::thread;
+use std::sync::mpsc::Receiver;
 
 use gtk::gdk_pixbuf::{Colorspace, Pixbuf};
 use gtk::prelude::*;
 use gtk::{gdk, glib, Picture};
 
-use crate::decode::{decode_limited, RgbFrame};
+use crate::decode::RgbFrame;
 use crate::display::grid_thumb_size;
-use crate::faces::crop_region;
-use crate::xdg_thumb;
+use crate::thumbs::{
+    complete_action, frame_cost, job_key, result_channel, CompleteAction, DecodePool, FlightBook,
+    PoolJob, PoolKind, PoolResult, ReadyCache, DEFAULT_WORKERS,
+};
 use gallery_model::photo::FaceRegion;
-
-struct ThumbMsg {
-    key: String,
-    frame: RgbFrame,
-}
 
 /// Shared decode queue. Poll [`Self::drain`] on the GTK thread.
 #[derive(Clone)]
 pub struct ThumbCache {
-    tx: Sender<ThumbMsg>,
-    rx: Rc<RefCell<Receiver<ThumbMsg>>>,
+    pool: Rc<DecodePool>,
+    rx: Rc<RefCell<Receiver<PoolResult>>>,
+    flight: Rc<RefCell<FlightBook>>,
     waiting: Rc<RefCell<HashMap<String, Vec<Picture>>>>,
-    ready: Rc<RefCell<HashMap<String, gdk::Texture>>>,
+    ready: Rc<RefCell<ReadyCache<gdk::Texture>>>,
 }
 
 impl ThumbCache {
     pub fn new() -> Self {
-        let (tx, rx) = mpsc::channel();
+        Self::with_workers(DEFAULT_WORKERS)
+    }
+
+    fn with_workers(workers: usize) -> Self {
+        let (tx, rx) = result_channel();
         ThumbCache {
-            tx,
+            pool: Rc::new(DecodePool::spawn(workers, tx)),
             rx: Rc::new(RefCell::new(rx)),
+            flight: Rc::new(RefCell::new(FlightBook::new(workers))),
             waiting: Rc::new(RefCell::new(HashMap::new())),
-            ready: Rc::new(RefCell::new(HashMap::new())),
+            ready: Rc::new(RefCell::new(ReadyCache::product())),
         }
     }
 
@@ -46,13 +49,25 @@ impl ThumbCache {
         let mut progressed = false;
         while let Ok(msg) = self.rx.borrow().try_recv() {
             progressed = true;
-            if let Some(pixbuf) = pixbuf_from_rgb(&msg.frame) {
-                let tex = gdk::Texture::for_pixbuf(&pixbuf);
-                self.ready.borrow_mut().insert(msg.key.clone(), tex.clone());
-                if let Some(pictures) = self.waiting.borrow_mut().remove(&msg.key) {
-                    for picture in pictures {
-                        picture.set_paintable(Some(&tex));
-                    }
+            self.flight.borrow_mut().finish(&msg.key);
+            let waiters = self
+                .waiting
+                .borrow_mut()
+                .remove(&msg.key)
+                .unwrap_or_default();
+            let Some(frame) = msg.frame else {
+                continue;
+            };
+            let Some(pixbuf) = pixbuf_from_rgb(&frame) else {
+                continue;
+            };
+            let tex = gdk::Texture::for_pixbuf(&pixbuf);
+            self.ready
+                .borrow_mut()
+                .insert(msg.key.clone(), tex.clone(), frame_cost(&frame));
+            if complete_action(waiters.len()) == CompleteAction::Deliver {
+                for picture in waiters {
+                    picture.set_paintable(Some(&tex));
                 }
             }
         }
@@ -62,12 +77,17 @@ impl ThumbCache {
     /// Gallery tile: XDG `large` (1×) or `x-large` (2×).
     pub fn bind_grid(&self, picture: &Picture, path: &str, id: &str, scale: u32) {
         let size = grid_thumb_size(scale);
-        self.enqueue(picture, path, id, Job::Grid { size });
+        self.enqueue(picture, path, id, PoolKind::Grid { size });
     }
 
     /// Viewer: original file, long side = window × scale, at most 2000.
     pub fn bind_viewer(&self, picture: &Picture, path: &str, id: &str, max_side: u32) {
-        self.enqueue(picture, path, id, Job::Viewer { max_side });
+        self.enqueue(picture, path, id, PoolKind::Viewer { max_side });
+    }
+
+    /// Drop waiters for a recycled list item so a late decode cannot paint it.
+    pub fn unbind(&self, picture: &Picture) {
+        self.detach(picture);
     }
 
     /// Face crop from the display thumbnail + an MWG rectangle.
@@ -83,7 +103,7 @@ impl ThumbCache {
             picture,
             path,
             id,
-            Job::Face {
+            PoolKind::Face {
                 size: grid_thumb_size(scale),
                 region: region.clone(),
             },
@@ -91,33 +111,11 @@ impl ThumbCache {
     }
 }
 
-#[derive(Clone)]
-enum Job {
-    Grid {
-        size: crate::xdg_thumb::ThumbSize,
-    },
-    Viewer {
-        max_side: u32,
-    },
-    Face {
-        size: crate::xdg_thumb::ThumbSize,
-        region: FaceRegion,
-    },
-}
-
 impl ThumbCache {
-    fn enqueue(&self, picture: &Picture, path: &str, id: &str, job: Job) {
-        let key = match &job {
-            Job::Grid { size } => format!("{id}:xdg:{}", size.dir_name()),
-            Job::Viewer { max_side } => format!("{id}:view:{max_side}"),
-            Job::Face { size, region } => format!(
-                "{id}:face:{}:{:.3}:{:.3}",
-                size.dir_name(),
-                region.center_x,
-                region.center_y
-            ),
-        };
-        if let Some(tex) = self.ready.borrow().get(&key).cloned() {
+    fn enqueue(&self, picture: &Picture, path: &str, id: &str, kind: PoolKind) {
+        let key = job_key(id, &kind);
+        self.detach(picture);
+        if let Some(tex) = self.ready.borrow_mut().get_cloned(&key) {
             picture.set_paintable(Some(&tex));
             return;
         }
@@ -127,23 +125,20 @@ impl ThumbCache {
             .entry(key.clone())
             .or_default()
             .push(picture.clone());
-        let tx = self.tx.clone();
-        let path = path.to_string();
-        thread::spawn(move || {
-            let frame = match job {
-                Job::Grid { size } => {
-                    xdg_thumb::load_or_make(&xdg_thumb::cache_root(), &path, size)
-                }
-                Job::Viewer { max_side } => decode_limited(&path, max_side),
-                Job::Face { size, region } => {
-                    xdg_thumb::load_or_make(&xdg_thumb::cache_root(), &path, size)
-                        .and_then(|frame| crop_region(&frame, &region))
-                }
-            };
-            if let Some(frame) = frame {
-                let _ = tx.send(ThumbMsg { key, frame });
-            }
+        if !self.flight.borrow_mut().try_start(&key) {
+            return;
+        }
+        self.pool.submit(PoolJob {
+            key,
+            path: path.to_string(),
+            kind,
         });
+    }
+
+    fn detach(&self, picture: &Picture) {
+        for waiters in self.waiting.borrow_mut().values_mut() {
+            waiters.retain(|p| p != picture);
+        }
     }
 }
 

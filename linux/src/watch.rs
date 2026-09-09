@@ -1,6 +1,9 @@
 //! Directory-only library watch. Sidecar writes from Scan Photos look like
 //! mutations, so the host mutes this for the length of a walk or analysis
 //! run — same rule as iOS `LibraryRootMonitor.shouldIgnoreEvents`.
+//!
+//! Mute does not drop the fact that *something* happened: a dirty bit is
+//! kept, and unmuting triggers exactly one reconciliation.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -14,6 +17,69 @@ use gallery_model::photo::PhotoFolder;
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 
 pub use gallery_session::watch::{should_note, REFRESH_INTERVAL};
+
+/// Mute flag plus the dirty bit retained while events are suppressed.
+#[derive(Debug, Default)]
+pub struct MuteGate {
+    muted: AtomicBool,
+    dirty: AtomicBool,
+}
+
+/// What to do with a filesystem event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventAction {
+    /// Not muted — coalesce / fire as usual.
+    Coalesce,
+    /// Muted — remember that a pass is needed after unmute.
+    MarkDirty,
+}
+
+/// What unmuting should do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnmuteAction {
+    /// Nothing happened while muted (or we just muted).
+    Idle,
+    /// At least one event was suppressed — run one reconciliation.
+    ReconcileOnce,
+}
+
+impl MuteGate {
+    /// Shared gate for the watcher thread and the GTK host.
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Whether events are currently suppressed.
+    pub fn is_muted(&self) -> bool {
+        self.muted.load(Ordering::Acquire)
+    }
+
+    /// Whether a suppressed event is waiting for unmute.
+    pub fn is_dirty(&self) -> bool {
+        self.dirty.load(Ordering::Acquire)
+    }
+
+    /// Note a disk event. Muted events set the dirty bit and are not fired.
+    pub fn note_event(&self) -> EventAction {
+        if self.is_muted() {
+            self.dirty.store(true, Ordering::Release);
+            EventAction::MarkDirty
+        } else {
+            EventAction::Coalesce
+        }
+    }
+
+    /// Mute or unmute. Unmuting with a dirty bit returns
+    /// [`UnmuteAction::ReconcileOnce`] exactly once (the bit is cleared).
+    pub fn set_muted(&self, muted: bool) -> UnmuteAction {
+        let was = self.muted.swap(muted, Ordering::AcqRel);
+        if was && !muted && self.dirty.swap(false, Ordering::AcqRel) {
+            UnmuteAction::ReconcileOnce
+        } else {
+            UnmuteAction::Idle
+        }
+    }
+}
 
 /// Root plus every folder in the last published tree, de-duplicated.
 /// Directories only — photo files are not watched.
@@ -49,9 +115,9 @@ impl Drop for WatchHandle {
 }
 
 /// Watch `root` recursively. Events are coalesced and sent as `()` on the
-/// returned receiver. `mute` drops events while the host is writing sidecars
-/// or walking the tree.
-pub fn start(root: PathBuf, mute: Arc<AtomicBool>) -> std::io::Result<(WatchHandle, Receiver<()>)> {
+/// returned receiver. `mute` retains a dirty bit while the host is writing
+/// sidecars or walking the tree; the host reconciles once on unmute.
+pub fn start(root: PathBuf, mute: Arc<MuteGate>) -> std::io::Result<(WatchHandle, Receiver<()>)> {
     let (raw_tx, raw_rx) = mpsc::channel::<()>();
     let mut watcher = RecommendedWatcher::new(
         move |res: Result<Event, notify::Error>| {
@@ -83,7 +149,7 @@ pub fn start(root: PathBuf, mute: Arc<AtomicBool>) -> std::io::Result<(WatchHand
 fn coalesce_loop(
     raw: Receiver<()>,
     out: mpsc::Sender<()>,
-    mute: Arc<AtomicBool>,
+    mute: Arc<MuteGate>,
     stop: Arc<AtomicBool>,
 ) {
     let mut pending: Option<Instant> = None;
@@ -95,16 +161,20 @@ fn coalesce_loop(
             .map(|t| REFRESH_INTERVAL.saturating_sub(t.elapsed()))
             .unwrap_or(Duration::from_millis(200));
         match raw.recv_timeout(timeout) {
-            Ok(()) => {
-                if should_note(true, mute.load(Ordering::Relaxed)) {
-                    pending = Some(Instant::now());
-                }
-            }
+            Ok(()) => match mute.note_event() {
+                EventAction::Coalesce => pending = Some(Instant::now()),
+                EventAction::MarkDirty => {}
+            },
             Err(RecvTimeoutError::Timeout) => {
                 if pending.is_some_and(|t| t.elapsed() >= REFRESH_INTERVAL) {
                     pending = None;
-                    if should_note(true, mute.load(Ordering::Relaxed)) && out.send(()).is_err() {
-                        return;
+                    match mute.note_event() {
+                        EventAction::Coalesce => {
+                            if out.send(()).is_err() {
+                                return;
+                            }
+                        }
+                        EventAction::MarkDirty => {}
                     }
                 }
             }
@@ -153,5 +223,26 @@ mod tests {
         assert!(should_note(true, false));
         assert!(!should_note(true, true));
         assert!(!should_note(false, false));
+    }
+
+    #[test]
+    fn muted_events_set_dirty_and_unmute_reconciles_once() {
+        let gate = MuteGate::new();
+        assert_eq!(gate.note_event(), EventAction::Coalesce);
+        assert_eq!(gate.set_muted(true), UnmuteAction::Idle);
+        assert_eq!(gate.note_event(), EventAction::MarkDirty);
+        assert_eq!(gate.note_event(), EventAction::MarkDirty);
+        assert!(gate.is_dirty());
+        assert_eq!(gate.set_muted(false), UnmuteAction::ReconcileOnce);
+        assert!(!gate.is_dirty());
+        assert_eq!(gate.set_muted(false), UnmuteAction::Idle);
+        assert_eq!(gate.note_event(), EventAction::Coalesce);
+    }
+
+    #[test]
+    fn unmute_without_events_does_not_reconcile() {
+        let gate = MuteGate::new();
+        assert_eq!(gate.set_muted(true), UnmuteAction::Idle);
+        assert_eq!(gate.set_muted(false), UnmuteAction::Idle);
     }
 }

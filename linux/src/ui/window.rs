@@ -29,7 +29,8 @@ use crate::host::{
     collection_groups, event_folders, find_folder, leaf_tags, library_availability,
     reapply_sidecars, CollectionGroup, LibraryAvailability, LibraryState,
 };
-use crate::watch::{self, WatchHandle};
+use crate::ops::{apply_begin, apply_done, OpKind, OpLedger, OpToken, SurfaceFlags};
+use crate::watch::{self, MuteGate, UnmuteAction, WatchHandle};
 use gallery_geo::{GeoCache, Nominatim};
 use gallery_session::{self as session, AnalysisSummary};
 
@@ -58,7 +59,9 @@ struct Inner {
     state: RefCell<Option<LibraryState>>,
     root: RefCell<Option<PathBuf>>,
     cancel: RefCell<Option<Arc<AtomicBool>>>,
-    mute_watch: Arc<AtomicBool>,
+    ops: RefCell<OpLedger>,
+    surface: RefCell<SurfaceFlags>,
+    mute_watch: Arc<MuteGate>,
     watch: RefCell<Option<WatchHandle>>,
     watch_rx: RefCell<Option<Receiver<()>>>,
     watch_root: RefCell<Option<PathBuf>>,
@@ -191,7 +194,9 @@ impl Window {
             state: RefCell::new(None),
             root: RefCell::new(None),
             cancel: RefCell::new(None),
-            mute_watch: Arc::new(AtomicBool::new(false)),
+            ops: RefCell::new(OpLedger::default()),
+            surface: RefCell::new(SurfaceFlags::idle()),
+            mute_watch: MuteGate::new(),
             watch: RefCell::new(None),
             watch_rx: RefCell::new(None),
             watch_root: RefCell::new(None),
@@ -299,7 +304,7 @@ impl Window {
                     None => false,
                 }
             };
-            if hit && this.inner.cancel.borrow().is_none() {
+            if hit && this.inner.ops.borrow().current().is_none() {
                 this.reload_current();
             }
             glib::ControlFlow::Continue
@@ -307,7 +312,29 @@ impl Window {
     }
 
     fn set_watch_muted(&self, muted: bool) {
-        self.inner.mute_watch.store(muted, Ordering::Relaxed);
+        if self.inner.mute_watch.set_muted(muted) == UnmuteAction::ReconcileOnce
+            && self.inner.ops.borrow().current().is_none()
+        {
+            self.reload_current();
+        }
+    }
+
+    /// Apply a completion only when `token` is still the live generation.
+    /// Stale callbacks leave the banner, cancel flag, mute, and library as-is.
+    fn finish_op(&self, token: OpToken, publish: bool) -> bool {
+        if !self.inner.ops.borrow().is_current(token) {
+            return false;
+        }
+        apply_done(
+            &mut self.inner.ops.borrow_mut(),
+            &mut self.inner.surface.borrow_mut(),
+            token,
+            publish,
+        );
+        self.inner.banner.set_revealed(false);
+        self.inner.cancel.replace(None);
+        self.set_watch_muted(false);
+        true
     }
 
     fn ensure_watch(&self) {
@@ -388,9 +415,7 @@ impl Window {
                 .header
                 .set_title_widget(Some(&self.inner.switcher));
         }
-        self.inner
-            .switcher_bar
-            .set_reveal(compact && !viewing);
+        self.inner.switcher_bar.set_reveal(compact && !viewing);
         if self.inner.short.get() && self.inner.banner.is_revealed() {
             self.inner.search_bar.set_search_mode(false);
         }
@@ -477,6 +502,11 @@ impl Window {
         if let Some(flag) = self.inner.cancel.borrow().as_ref() {
             flag.store(true, Ordering::Relaxed);
         }
+        let token = apply_begin(
+            &mut self.inner.ops.borrow_mut(),
+            &mut self.inner.surface.borrow_mut(),
+            OpKind::Scan,
+        );
         let flag = Arc::new(AtomicBool::new(false));
         self.inner.cancel.replace(Some(flag.clone()));
         self.set_watch_muted(true);
@@ -493,13 +523,17 @@ impl Window {
                 &flag,
                 Some(&|msg, done, total| {
                     let _ = progress_tx.send(ScanEvent::Progress {
+                        token,
                         msg: msg.to_string(),
                         done,
                         total,
                     });
                 }),
             );
-            let _ = tx.send(ScanEvent::Done(result.map_err(|e| e.to_string())));
+            let _ = tx.send(ScanEvent::Done {
+                token,
+                result: result.map_err(|e| e.to_string()),
+            });
         });
 
         let this = self.clone();
@@ -507,7 +541,15 @@ impl Window {
             let mut keep = true;
             while let Ok(ev) = rx.try_recv() {
                 match ev {
-                    ScanEvent::Progress { msg, done, total } => {
+                    ScanEvent::Progress {
+                        token,
+                        msg,
+                        done,
+                        total,
+                    } => {
+                        if !this.inner.ops.borrow().is_current(token) {
+                            continue;
+                        }
                         if total > 0 {
                             this.inner
                                 .banner
@@ -518,20 +560,28 @@ impl Window {
                             this.inner.banner.set_title(&msg);
                         }
                     }
-                    ScanEvent::Done(result) => {
-                        this.inner.banner.set_revealed(false);
-                        this.inner.cancel.replace(None);
-                        this.set_watch_muted(false);
+                    ScanEvent::Done { token, result } => {
+                        let live = this.inner.ops.borrow().is_current(token);
+                        if !live {
+                            continue;
+                        }
                         match result {
                             Ok(state) => {
+                                this.finish_op(token, true);
                                 let n = state.index.photos().len();
                                 this.inner.state.replace(Some(state));
                                 this.rebuild_all();
                                 this.ensure_watch();
                                 this.toast(&format!("Found {n} photos"));
                             }
-                            Err(e) if e.contains("cancel") => this.toast("Scan cancelled"),
-                            Err(e) => this.toast(&e),
+                            Err(e) if e.contains("cancel") => {
+                                this.finish_op(token, false);
+                                this.toast("Scan cancelled");
+                            }
+                            Err(e) => {
+                                this.finish_op(token, false);
+                                this.toast(&e);
+                            }
                         }
                         this.sync_chrome();
                         keep = false;
@@ -548,7 +598,7 @@ impl Window {
     }
 
     fn start_analysis(&self) {
-        if self.inner.cancel.borrow().is_some() {
+        if self.inner.ops.borrow().current().is_some() {
             self.toast("A scan is already running");
             return;
         }
@@ -562,6 +612,11 @@ impl Window {
             return;
         }
         let pack = session::discover_pack();
+        let token = apply_begin(
+            &mut self.inner.ops.borrow_mut(),
+            &mut self.inner.surface.borrow_mut(),
+            OpKind::Analysis,
+        );
         let flag = Arc::new(AtomicBool::new(false));
         self.inner.cancel.replace(Some(flag.clone()));
         self.set_watch_muted(true);
@@ -572,7 +627,10 @@ impl Window {
         let (tx, rx) = std::sync::mpsc::channel::<AnalysisEvent>();
         let progress_tx = tx.clone();
         let on_progress: session::ProgressFn = Arc::new(move |p| {
-            let _ = progress_tx.send(AnalysisEvent::Progress(session::progress_title(&p)));
+            let _ = progress_tx.send(AnalysisEvent::Progress {
+                token,
+                title: session::progress_title(&p),
+            });
         });
         let geo_path = config::geo_cache_path();
         let ml_cache = config::ml_cache_path();
@@ -598,6 +656,7 @@ impl Window {
                     Ok(next) => Some(next),
                     Err(e) => {
                         let _ = tx.send(AnalysisEvent::Done {
+                            token,
                             summary,
                             library: None,
                             refresh_error: Some(e.to_string()),
@@ -607,6 +666,7 @@ impl Window {
                 }
             };
             let _ = tx.send(AnalysisEvent::Done {
+                token,
                 summary,
                 library,
                 refresh_error: None,
@@ -618,15 +678,22 @@ impl Window {
             let mut keep = true;
             while let Ok(ev) = rx.try_recv() {
                 match ev {
-                    AnalysisEvent::Progress(title) => this.inner.banner.set_title(&title),
+                    AnalysisEvent::Progress { token, title } => {
+                        if this.inner.ops.borrow().is_current(token) {
+                            this.inner.banner.set_title(&title);
+                        }
+                    }
                     AnalysisEvent::Done {
+                        token,
                         summary,
                         library,
                         refresh_error,
                     } => {
-                        this.inner.banner.set_revealed(false);
-                        this.inner.cancel.replace(None);
-                        this.set_watch_muted(false);
+                        if !this.inner.ops.borrow().is_current(token) {
+                            continue;
+                        }
+                        let publish = library.is_some();
+                        this.finish_op(token, publish);
                         this.inner.last_analysis.replace(Some(summary.clone()));
                         if let Some(state) = library {
                             this.inner.state.replace(Some(state));
@@ -983,6 +1050,16 @@ impl Window {
                 thumbs.bind_grid(&picture, path, id, scale);
             }
         });
+        let thumbs_unbind = thumbs.clone();
+        factory.connect_unbind(move |_, obj| {
+            let item = obj
+                .downcast_ref::<gtk::ListItem>()
+                .expect("factory item")
+                .clone();
+            if let Some(picture) = item.child().and_downcast::<gtk::Picture>() {
+                thumbs_unbind.unbind(&picture);
+            }
+        });
         let sel = gtk::NoSelection::new(Some(store));
         let grid = gtk::GridView::new(Some(sel), Some(factory));
         grid.set_min_columns(2);
@@ -1115,40 +1192,91 @@ impl Window {
     }
 
     fn filmstrip(&self, photos: &Rc<Vec<PhotoFile>>, idx: usize) -> gtk::Widget {
-        let row = gtk::Box::new(Orientation::Horizontal, 4);
-        row.set_margin_start(8);
-        row.set_margin_end(8);
-        row.set_margin_top(6);
-        row.set_margin_bottom(6);
-        let scale = self.scale_factor();
+        let store = gio::ListStore::new::<gtk::StringObject>();
         for (i, photo) in photos.iter().enumerate() {
+            store.append(&gtk::StringObject::new(&format!(
+                "{i}\t{}\t{}\t{}\t{}",
+                photo.path(),
+                photo.id,
+                u8::from(photo.is_video),
+                u8::from(i == idx)
+            )));
+        }
+        let factory = gtk::SignalListItemFactory::new();
+        let thumbs = self.inner.thumbs.clone();
+        let scale = self.scale_factor();
+        factory.connect_setup(move |_, obj| {
+            let item = obj
+                .downcast_ref::<gtk::ListItem>()
+                .expect("factory item")
+                .clone();
             let picture = gtk::Picture::new();
             picture.set_content_fit(gtk::ContentFit::Cover);
             picture.set_size_request(48, 48);
-            if !photo.is_video {
-                self.inner
-                    .thumbs
-                    .bind_grid(&picture, photo.path(), &photo.id.to_string(), scale);
+            item.set_child(Some(&picture));
+        });
+        factory.connect_bind(move |_, obj| {
+            let item = obj
+                .downcast_ref::<gtk::ListItem>()
+                .expect("factory item")
+                .clone();
+            let Some(s) = item.item().and_downcast::<gtk::StringObject>() else {
+                return;
+            };
+            let Some(picture) = item.child().and_downcast::<gtk::Picture>() else {
+                return;
+            };
+            let text = s.string();
+            let mut parts = text.split('\t');
+            let _i = parts.next();
+            let Some(path) = parts.next() else { return };
+            let Some(id) = parts.next() else { return };
+            let is_video = parts.next() == Some("1");
+            let current = parts.next() == Some("1");
+            if current {
+                picture.add_css_class("suggested-action");
+            } else {
+                picture.remove_css_class("suggested-action");
             }
-            let btn = gtk::Button::new();
-            btn.set_child(Some(&picture));
-            btn.add_css_class("flat");
-            btn.add_css_class("osd");
-            if i == idx {
-                btn.add_css_class("suggested-action");
+            if is_video {
+                picture.set_paintable(Option::<&gdk::Paintable>::None);
+            } else {
+                thumbs.bind_grid(&picture, path, id, scale);
             }
-            let this = self.clone();
-            let photos = photos.clone();
-            btn.connect_clicked(move |_| this.replace_viewer(&photos, i));
-            row.append(&btn);
-        }
+        });
+        let thumbs_unbind = thumbs.clone();
+        factory.connect_unbind(move |_, obj| {
+            let item = obj
+                .downcast_ref::<gtk::ListItem>()
+                .expect("factory item")
+                .clone();
+            if let Some(picture) = item.child().and_downcast::<gtk::Picture>() {
+                thumbs_unbind.unbind(&picture);
+            }
+        });
+        let sel = gtk::SingleSelection::new(Some(store));
+        sel.set_selected(idx as u32);
+        let list = gtk::ListView::new(Some(sel), Some(factory));
+        list.set_orientation(Orientation::Horizontal);
+        list.set_single_click_activate(true);
+        list.add_css_class("osd");
+        let this = self.clone();
+        let photos = photos.clone();
+        list.connect_activate(move |_, pos| {
+            this.replace_viewer(&photos, pos as usize);
+        });
+        let list_scroll = list.clone();
+        let target = idx as u32;
+        glib::idle_add_local_once(move || {
+            list_scroll.scroll_to(target, gtk::ListScrollFlags::NONE, None::<gtk::ScrollInfo>);
+        });
         let sw = gtk::ScrolledWindow::new();
         sw.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
         sw.set_propagate_natural_height(true);
         sw.set_halign(Align::Fill);
         sw.set_valign(Align::End);
         sw.add_css_class("osd");
-        sw.set_child(Some(&row));
+        sw.set_child(Some(&list));
         sw.upcast()
     }
 
@@ -1225,7 +1353,11 @@ impl Window {
         }
 
         if !events.is_empty() {
-            let shown: Vec<PhotoFolder> = events.iter().take(if compact { 6 } else { 12 }).cloned().collect();
+            let shown: Vec<PhotoFolder> = events
+                .iter()
+                .take(if compact { 6 } else { 12 })
+                .cloned()
+                .collect();
             col.append(&cards::section_header(
                 "Events",
                 &format!("{}", events.len()),
@@ -1499,9 +1631,13 @@ impl Window {
                 let picture = gtk::Picture::new();
                 picture.set_size_request(48, 48);
                 picture.set_content_fit(gtk::ContentFit::Cover);
-                self.inner
-                    .thumbs
-                    .bind_face(&picture, &face.path, &face.photo_id, scale, &face.region);
+                self.inner.thumbs.bind_face(
+                    &picture,
+                    &face.path,
+                    &face.photo_id,
+                    scale,
+                    &face.region,
+                );
                 row.add_prefix(&picture);
                 list.append(&row);
             }
@@ -1517,11 +1653,7 @@ impl Window {
                     .activatable(true)
                     .build();
                 if let Some(thumb) = thumb {
-                    let region = face_region_from_bbox(
-                        thumb.bbox,
-                        thumb.image_w,
-                        thumb.image_h,
-                    );
+                    let region = face_region_from_bbox(thumb.bbox, thumb.image_w, thumb.image_h);
                     let picture = gtk::Picture::new();
                     picture.set_size_request(48, 48);
                     picture.set_content_fit(gtk::ContentFit::Cover);
@@ -1732,16 +1864,24 @@ impl Window {
 
 enum ScanEvent {
     Progress {
+        token: OpToken,
         msg: String,
         done: usize,
         total: usize,
     },
-    Done(Result<LibraryState, String>),
+    Done {
+        token: OpToken,
+        result: Result<LibraryState, String>,
+    },
 }
 
 enum AnalysisEvent {
-    Progress(String),
+    Progress {
+        token: OpToken,
+        title: String,
+    },
     Done {
+        token: OpToken,
         summary: AnalysisSummary,
         library: Option<LibraryState>,
         refresh_error: Option<String>,

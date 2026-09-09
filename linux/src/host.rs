@@ -132,11 +132,7 @@ pub fn open_library(
         .map(|row| (row.photo_id, row))
         .collect();
 
-    let input = ScanInput {
-        reuse_cached: cached.is_some(),
-        cached_photos,
-        cached_sidecar_manifest,
-    };
+    let input = scan_input_for_open(cached_photos, cached_sidecar_manifest);
 
     if let Some(cb) = on_progress {
         cb("Scanning…", 0, 0);
@@ -187,6 +183,24 @@ pub fn open_library(
         index: LibraryIndex::build(photos),
         sidecar_manifest,
     })
+}
+
+/// Scanner input for an open / reload.
+///
+/// Always a **full** pass (`reuse_cached: false`) so an in-place edit is
+/// visible on the next walk. Cached rows still carry tags and dates for
+/// unchanged files — that is the scanner's full-mode carry-forward, not the
+/// light-scan blind spot that would make edits invisible until something
+/// else forced a cold walk.
+pub fn scan_input_for_open(
+    cached_photos: HashMap<String, PhotoFile>,
+    cached_sidecar_manifest: HashMap<StableId, SidecarCandidate>,
+) -> ScanInput {
+    ScanInput {
+        reuse_cached: false,
+        cached_photos,
+        cached_sidecar_manifest,
+    }
 }
 
 /// Re-read sidecar fields for photos whose `.xmp` changed. The image file
@@ -388,7 +402,9 @@ pub fn leaf_tags(tags: &[TagSuggestion]) -> Vec<TagSuggestion> {
     tags.iter()
         .filter(|tag| {
             let prefix = format!("{}/", tag.full_path);
-            !tags.iter().any(|other| other.full_path.starts_with(&prefix))
+            !tags
+                .iter()
+                .any(|other| other.full_path.starts_with(&prefix))
         })
         .cloned()
         .collect()
@@ -664,6 +680,57 @@ mod tests {
         assert_eq!(
             next.index.photos()[0].hierarchical_tags[0].full_path,
             "Places/France/Paris"
+        );
+    }
+
+    #[test]
+    fn scan_input_for_open_never_enables_light_reuse() {
+        let mut photos = HashMap::new();
+        photos.insert("/a.jpg".into(), PhotoFile::new("/a.jpg", "a", 1));
+        let input = scan_input_for_open(photos, HashMap::new());
+        assert!(!input.reuse_cached);
+        assert!(input.cached_photos.contains_key("/a.jpg"));
+    }
+
+    #[test]
+    fn full_pass_with_cache_sees_an_in_place_edit() {
+        use gallery_scan::scan;
+        use gallery_vfs::StdVfs;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.jpg");
+        std::fs::write(&path, crate::decode::tests_jpeg()).unwrap();
+        let root = dir.path().to_str().unwrap();
+        let vfs = StdVfs;
+        let cold = scan(&vfs, root, &ScanInput::default());
+        assert_eq!(cold.flat_photos.len(), 1);
+        let mut cached = HashMap::new();
+        cached.insert(
+            cold.flat_photos[0].path().to_string(),
+            cold.flat_photos[0].clone(),
+        );
+
+        let mut bigger = crate::decode::tests_jpeg().to_vec();
+        bigger.extend_from_slice(&[0xFFu8; 128]);
+        std::fs::write(&path, bigger).unwrap();
+
+        let light = scan(
+            &vfs,
+            root,
+            &ScanInput {
+                reuse_cached: true,
+                cached_photos: cached.clone(),
+                cached_sidecar_manifest: HashMap::new(),
+            },
+        );
+        let full = scan(&vfs, root, &scan_input_for_open(cached, HashMap::new()));
+        assert!(
+            light.modified_paths.is_empty(),
+            "light reuse hides the edit (the old host bug)"
+        );
+        assert!(
+            !full.modified_paths.is_empty(),
+            "full pass must observe the rewrite"
         );
     }
 }

@@ -5,6 +5,8 @@ pub mod decode;
 pub mod display;
 pub mod faces;
 pub mod host;
+pub mod ops;
+pub mod thumbs;
 pub mod watch;
 pub mod xdg_thumb;
 
@@ -14,5 +16,6 @@ pub mod ui;
 pub use config::Config;
 pub use host::{
     collection_groups, event_folders, find_folder, leaf_tags, library_availability, patch_tree,
-    reapply_sidecars, CollectionGroup, HostError, LibraryAvailability, LibraryState,
+    reapply_sidecars, scan_input_for_open, CollectionGroup, HostError, LibraryAvailability,
+    LibraryState,
 };

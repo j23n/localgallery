@@ -1,8 +1,9 @@
 //! Same-directory temp write + flush/sync + rename for app JSON.
 //!
 //! Config, the library snapshot, and the geocode cache all go through here so
-//! a crash cannot leave a half-written file under the real name. Directories
-//! are created `0700` and files land `0600`; existing wider modes are tightened.
+//! a crash cannot leave a half-written file under the real name. New
+//! directories are created `0700` and files land `0600`. An existing app-owned
+//! directory is tightened; existing parent XDG directories are not.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -20,23 +21,67 @@ pub const FILE_MODE: u32 = 0o600;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Create `dir` (and missing parents) at [`DIR_MODE`], and tighten an
-/// already-present directory to that mode.
+/// Create `dir` (and missing parents) at [`DIR_MODE`].
+///
+/// An already-present `dir` is tightened to [`DIR_MODE`] (the app-owned
+/// cache/config folder). Existing ancestors — `~/.cache`, `~/.config`,
+/// `/tmp`, or whatever XDG parent already existed — are left untouched.
 pub fn ensure_private_dir(dir: &Path) -> io::Result<()> {
-    if !dir.as_os_str().is_empty() && !dir.exists() {
-        if let Some(parent) = dir.parent().filter(|p| !p.as_os_str().is_empty()) {
-            ensure_private_dir(parent)?;
-        }
-        #[cfg(unix)]
-        {
-            fs::DirBuilder::new().mode(DIR_MODE).create(dir)?;
-        }
-        #[cfg(not(unix))]
-        {
-            fs::create_dir(dir)?;
+    if dir.as_os_str().is_empty() {
+        return Ok(());
+    }
+    if dir.exists() {
+        return tighten_dir_mode(dir);
+    }
+    if let Some(parent) = dir.parent().filter(|p| !p.as_os_str().is_empty()) {
+        create_missing_private_ancestors(parent)?;
+    }
+    create_private_dir(dir, true)
+}
+
+/// Create missing ancestors at [`DIR_MODE`] without chmod of a directory
+/// that already exists.
+fn create_missing_private_ancestors(dir: &Path) -> io::Result<()> {
+    if dir.as_os_str().is_empty() || dir.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = dir.parent().filter(|p| !p.as_os_str().is_empty()) {
+        create_missing_private_ancestors(parent)?;
+    }
+    create_private_dir(dir, false)
+}
+
+/// Create `dir` at [`DIR_MODE`]. `AlreadyExists` is ignored; the target
+/// (`tighten_if_exists`) is the only existing directory we will chmod.
+fn create_private_dir(dir: &Path, tighten_if_exists: bool) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        match fs::DirBuilder::new().mode(DIR_MODE).create(dir) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                if tighten_if_exists {
+                    tighten_dir_mode(dir)
+                } else {
+                    Ok(())
+                }
+            }
+            Err(e) => Err(e),
         }
     }
-    tighten_dir_mode(dir)
+    #[cfg(not(unix))]
+    {
+        match fs::create_dir(dir) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                if tighten_if_exists {
+                    tighten_dir_mode(dir)
+                } else {
+                    Ok(())
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
 }
 
 /// Force an existing directory to [`DIR_MODE`]. Missing paths are ignored.
@@ -157,6 +202,11 @@ mod tests {
         fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 
+    #[cfg(unix)]
+    fn mode_full(path: &Path) -> u32 {
+        fs::metadata(path).unwrap().permissions().mode() & 0o7777
+    }
+
     #[test]
     fn write_atomic_replaces_and_leaves_no_temp() {
         let dir = tempfile::tempdir().unwrap();
@@ -204,6 +254,51 @@ mod tests {
         fs::set_permissions(&nested, fs::Permissions::from_mode(0o755)).unwrap();
         ensure_private_dir(&nested).unwrap();
         assert_eq!(mode(&nested), DIR_MODE);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_private_dir_does_not_chmod_an_existing_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let xdg = dir.path().join("cache");
+        fs::create_dir(&xdg).unwrap();
+        fs::set_permissions(&xdg, fs::Permissions::from_mode(0o755)).unwrap();
+        let app = xdg.join("localgallery");
+        ensure_private_dir(&app).unwrap();
+        assert_eq!(mode(&app), DIR_MODE);
+        assert_eq!(mode(&xdg), 0o755, "existing XDG parent must stay 0755");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_private_dir_creates_a_private_chain_without_touching_an_ancestor() {
+        let dir = tempfile::tempdir().unwrap();
+        let ancestor = dir.path().join("tmp-like");
+        fs::create_dir(&ancestor).unwrap();
+        fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o1777)).unwrap();
+        let nested = ancestor.join("xdg").join("localgallery");
+        ensure_private_dir(&nested).unwrap();
+        assert_eq!(mode(&nested), DIR_MODE);
+        assert_eq!(mode(&ancestor.join("xdg")), DIR_MODE);
+        assert_eq!(
+            mode_full(&ancestor),
+            0o1777,
+            "existing /tmp-like ancestor must stay world-writable"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_does_not_chmod_an_existing_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let xdg = dir.path().join("config");
+        fs::create_dir(&xdg).unwrap();
+        fs::set_permissions(&xdg, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = xdg.join("localgallery").join("config.json");
+        write_atomic(&path, b"{}").unwrap();
+        assert_eq!(mode(&xdg), 0o755);
+        assert_eq!(mode(path.parent().unwrap()), DIR_MODE);
+        assert_eq!(mode(&path), FILE_MODE);
     }
 
     #[cfg(unix)]

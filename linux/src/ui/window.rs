@@ -25,8 +25,9 @@ use crate::config::{self, Config};
 use crate::display::viewer_long_side;
 use crate::faces::{self, UnnamedFace};
 use crate::host::{
-    collection_groups, event_folders, find_folder, leaf_tags, library_availability,
-    reapply_sidecars, CollectionGroup, LibraryAvailability, LibraryState,
+    collection_groups, commit_analysis_state, event_folders, find_folder, leaf_tags,
+    library_availability, overlay_sidecars, reapply_sidecars, CollectionGroup, LibraryAvailability,
+    LibraryState,
 };
 use crate::ops::{apply_begin, apply_done, OpKind, OpLedger, OpToken, SurfaceFlags};
 use crate::row::PhotoRow;
@@ -520,9 +521,10 @@ impl Window {
 
         let (tx, rx) = std::sync::mpsc::channel::<ScanEvent>();
         let root_thread = root.clone();
+        let ops = self.inner.ops.borrow().clone();
         thread::spawn(move || {
             let progress_tx = tx.clone();
-            let result = crate::host::open_library(
+            let result = crate::host::open_library_with_commit(
                 &root_thread,
                 &flag,
                 Some(&|msg, done, total| {
@@ -533,6 +535,7 @@ impl Window {
                         total,
                     });
                 }),
+                Some((&ops, token)),
             );
             let _ = tx.send(ScanEvent::Done {
                 token,
@@ -650,6 +653,7 @@ impl Window {
         }
         let ml_cache = config::ml_cache_path();
         let endpoint = config::nominatim_endpoint();
+        let ops = self.inner.ops.borrow().clone();
         thread::spawn(move || {
             let mut geo_cache = geo_cache;
             let geo = Nominatim::new(endpoint);
@@ -663,11 +667,10 @@ impl Window {
                 &flag,
                 Some(on_progress),
             );
-            let _ = config::save_geo_cache(&geo_cache);
             let library = if summary.written_paths.is_empty() {
                 None
             } else {
-                match reapply_sidecars(state, Some(&summary.written_paths)) {
+                match overlay_sidecars(state, Some(&summary.written_paths)) {
                     Ok(next) => Some(next),
                     Err(e) => {
                         let _ = tx.send(AnalysisEvent::Done {
@@ -680,6 +683,16 @@ impl Window {
                     }
                 }
             };
+            if let Err(e) = commit_analysis_state(&geo_cache, library.as_ref(), &flag, &ops, token)
+            {
+                let _ = tx.send(AnalysisEvent::Done {
+                    token,
+                    summary,
+                    library: None,
+                    refresh_error: Some(e.to_string()),
+                });
+                return;
+            }
             let _ = tx.send(AnalysisEvent::Done {
                 token,
                 summary,

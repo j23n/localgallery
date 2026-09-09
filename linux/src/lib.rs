@@ -18,8 +18,9 @@ pub mod ui;
 
 pub use config::{Config, ConfigLoad};
 pub use host::{
-    collection_groups, event_folders, find_folder, leaf_tags, library_availability, patch_tree,
-    reapply_sidecars, scan_input_for_open, CollectionGroup, HostError, LibraryAvailability,
-    LibraryState, SnapshotReuse,
+    collection_groups, commit_analysis_state, event_folders, find_folder, leaf_tags,
+    library_availability, open_library, open_library_with_commit, overlay_sidecars, patch_tree,
+    reapply_sidecars, reapply_sidecars_with_commit, scan_input_for_open, CollectionGroup,
+    HostError, LibraryAvailability, LibraryState, SnapshotReuse,
 };
 pub use row::{PhotoRow, UnsupportedPath};

@@ -1,6 +1,6 @@
 //! Library session: walk, enrich, index. No GTK.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,6 +14,7 @@ use gallery_scan::{scan_with_progress, ScanInput, ScanOutcome};
 use gallery_vfs::{take_unsupported_names, StdVfs, Vfs};
 
 use crate::config::{self, Config};
+use crate::ops::{OpLedger, OpToken};
 use crate::persist;
 use crate::row;
 use crate::time;
@@ -165,11 +166,25 @@ pub fn library_availability(
     }
 }
 
+/// Scan / enrich progress: stage label, completed count, total.
+type OpenProgress = dyn Fn(&str, usize, usize);
+
 /// Walk `root`, enrich stale photos, rebuild the index, persist the snapshot.
 pub fn open_library(
     root: &Path,
     cancel: &AtomicBool,
-    on_progress: Option<&dyn Fn(&str, usize, usize)>,
+    on_progress: Option<&OpenProgress>,
+) -> Result<LibraryState, HostError> {
+    open_library_with_commit(root, cancel, on_progress, None)
+}
+
+/// [`open_library`] that writes the snapshot and `Config.library_root` only
+/// while `commit` is still the live generation.
+pub fn open_library_with_commit(
+    root: &Path,
+    cancel: &AtomicBool,
+    on_progress: Option<&OpenProgress>,
+    commit: Option<(&OpLedger, OpToken)>,
 ) -> Result<LibraryState, HostError> {
     let root_str = row::utf8_path(root).map_err(|e| HostError::InvalidPath {
         detail: e.to_string(),
@@ -190,7 +205,7 @@ pub fn open_library(
                 .collect()
         })
         .unwrap_or_default();
-    let cached_sidecar_manifest = cached
+    let cached_sidecar_manifest: HashMap<StableId, SidecarCandidate> = cached
         .as_ref()
         .and_then(|s| s.sidecar_manifest.clone())
         .unwrap_or_default()
@@ -198,7 +213,7 @@ pub fn open_library(
         .map(|row| (row.photo_id, row))
         .collect();
 
-    let input = scan_input_for_open(cached_photos, cached_sidecar_manifest);
+    let input = scan_input_for_open(cached_photos, cached_sidecar_manifest.clone());
 
     if let Some(cb) = on_progress {
         cb("Scanning…", 0, 0);
@@ -235,13 +250,35 @@ pub fn open_library(
         }
     }
 
-    let root_folder = outcome.root_folder.map(|f| patch_tree(f, &photos));
     let sidecar_manifest = outcome.sidecar_manifest;
-    persist_snapshot(root, root_folder.as_ref(), &photos, &sidecar_manifest)?;
+    let sidecar_changed = sidecar_listing_changed(&sidecar_manifest, &cached_sidecar_manifest);
+    if !sidecar_changed.is_empty() {
+        if let Some(cb) = on_progress {
+            cb("Reading sidecars…", 0, sidecar_changed.len());
+        }
+        for (done, photo) in photos.iter_mut().enumerate() {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(HostError::Cancelled);
+            }
+            if photo.is_video || !sidecar_changed.contains(&photo.id) {
+                continue;
+            }
+            *photo = refresh_sidecar_fields(&vfs, photo.clone());
+            if let Some(cb) = on_progress {
+                cb("Reading sidecars…", done + 1, sidecar_changed.len());
+            }
+        }
+    }
 
-    let mut cfg = Config::load();
-    cfg.library_root = Some(root.to_path_buf());
-    cfg.save()?;
+    let root_folder = outcome.root_folder.map(|f| patch_tree(f, &photos));
+    persist_open_library(
+        root,
+        root_folder.as_ref(),
+        &photos,
+        &sidecar_manifest,
+        cancel,
+        commit,
+    )?;
 
     Ok(LibraryState {
         root: root.to_path_buf(),
@@ -276,6 +313,48 @@ pub fn reapply_sidecars(
     state: LibraryState,
     only_paths: Option<&[String]>,
 ) -> Result<LibraryState, HostError> {
+    reapply_sidecars_with_commit(state, only_paths, None)
+}
+
+/// Overlay current sidecar bytes onto `state` without writing the snapshot.
+///
+/// Analysis persists the result through [`commit_analysis_state`] so a
+/// superseded generation cannot clobber a newer library snapshot.
+pub fn overlay_sidecars(
+    state: LibraryState,
+    only_paths: Option<&[String]>,
+) -> Result<LibraryState, HostError> {
+    overlay_sidecar_state(state, only_paths)
+}
+
+/// [`reapply_sidecars`] that writes the snapshot only while `commit` is live.
+pub fn reapply_sidecars_with_commit(
+    state: LibraryState,
+    only_paths: Option<&[String]>,
+    commit: Option<(&OpLedger, OpToken)>,
+) -> Result<LibraryState, HostError> {
+    let cancel = AtomicBool::new(false);
+    let next = overlay_sidecar_state(state, only_paths)?;
+    persist_library_state(&next, &cancel, commit)?;
+    Ok(next)
+}
+
+/// Persist geocode cache and an optional refreshed library only while
+/// `token` is still the live generation.
+pub fn commit_analysis_state(
+    geo_cache: &gallery_geo::GeoCache,
+    state: Option<&LibraryState>,
+    cancel: &AtomicBool,
+    ledger: &OpLedger,
+    token: OpToken,
+) -> Result<bool, HostError> {
+    persist_analysis_artifacts(geo_cache, state, cancel, Some((ledger, token)))
+}
+
+fn overlay_sidecar_state(
+    state: LibraryState,
+    only_paths: Option<&[String]>,
+) -> Result<LibraryState, HostError> {
     let vfs = StdVfs;
     let filter: Option<HashMap<&str, ()>> =
         only_paths.map(|paths| paths.iter().map(|p| (p.as_str(), ())).collect());
@@ -292,12 +371,6 @@ pub fn reapply_sidecars(
         *photo = refresh_sidecar_fields(&vfs, photo.clone());
     }
     let root_folder = state.root_folder.map(|f| patch_tree(f, &photos));
-    persist_snapshot(
-        &state.root,
-        root_folder.as_ref(),
-        &photos,
-        &state.sidecar_manifest,
-    )?;
     Ok(LibraryState {
         root: state.root,
         root_folder,
@@ -309,19 +382,43 @@ pub fn reapply_sidecars(
 }
 
 /// Overlay the current sidecar onto an already-enriched row.
+///
+/// Fields are replaced, not merged, so a deleted sidecar retracts tags,
+/// country, GPS, and face regions that the listing no longer supports.
 fn refresh_sidecar_fields(vfs: &dyn Vfs, mut photo: PhotoFile) -> PhotoFile {
     let path = photo.path().to_string();
     let meta = read_image_metadata(vfs, &path);
     photo.hierarchical_tags = meta.hierarchical_tags;
     photo.country_code = meta.country_code;
-    if meta.gps_latitude.is_some() {
-        photo.gps_latitude = meta.gps_latitude;
-    }
-    if meta.gps_longitude.is_some() {
-        photo.gps_longitude = meta.gps_longitude;
-    }
+    photo.gps_latitude = meta.gps_latitude;
+    photo.gps_longitude = meta.gps_longitude;
     photo.face_regions = meta.face_regions;
     photo
+}
+
+/// Photo ids whose current sidecar listing row differs from the cached
+/// manifest, including ids whose sidecar was deleted.
+fn sidecar_listing_changed(
+    current: &[SidecarCandidate],
+    cached: &HashMap<StableId, SidecarCandidate>,
+) -> HashSet<StableId> {
+    let mut changed = HashSet::new();
+    let mut seen = HashSet::new();
+    for row in current {
+        seen.insert(row.photo_id);
+        match cached.get(&row.photo_id) {
+            Some(old) if old == row => {}
+            _ => {
+                changed.insert(row.photo_id);
+            }
+        }
+    }
+    for id in cached.keys() {
+        if !seen.contains(id) {
+            changed.insert(*id);
+        }
+    }
+    changed
 }
 
 /// Apply enrichment fields the scanner leaves empty (sidecar tags, EXIF date).
@@ -399,7 +496,7 @@ fn patch_folder(mut folder: PhotoFolder, by_path: &HashMap<&str, &PhotoFile>) ->
 }
 
 /// Depth-first lookup by folder id.
-pub fn find_folder<'a>(folder: &'a PhotoFolder, id: StableId) -> Option<&'a PhotoFolder> {
+pub fn find_folder(folder: &PhotoFolder, id: StableId) -> Option<&PhotoFolder> {
     if folder.id == id {
         return Some(folder);
     }
@@ -545,6 +642,82 @@ fn persist_snapshot(
     .map_err(HostError::Snapshot)?;
     persist::write_atomic(&config::snapshot_path(), &bytes)?;
     Ok(())
+}
+
+fn persist_open_library(
+    root: &Path,
+    tree: Option<&PhotoFolder>,
+    photos: &[PhotoFile],
+    manifest: &[SidecarCandidate],
+    cancel: &AtomicBool,
+    commit: Option<(&OpLedger, OpToken)>,
+) -> Result<bool, HostError> {
+    let write = || {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(HostError::Cancelled);
+        }
+        persist_snapshot(root, tree, photos, manifest)?;
+        let mut cfg = Config::load();
+        cfg.library_root = Some(root.to_path_buf());
+        cfg.save()?;
+        Ok(())
+    };
+    commit_write(commit, write)
+}
+
+fn persist_library_state(
+    state: &LibraryState,
+    cancel: &AtomicBool,
+    commit: Option<(&OpLedger, OpToken)>,
+) -> Result<bool, HostError> {
+    let write = || {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(HostError::Cancelled);
+        }
+        persist_snapshot(
+            &state.root,
+            state.root_folder.as_ref(),
+            state.index.photos(),
+            &state.sidecar_manifest,
+        )
+    };
+    commit_write(commit, write)
+}
+
+fn persist_analysis_artifacts(
+    geo_cache: &gallery_geo::GeoCache,
+    state: Option<&LibraryState>,
+    cancel: &AtomicBool,
+    commit: Option<(&OpLedger, OpToken)>,
+) -> Result<bool, HostError> {
+    let write = || {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(HostError::Cancelled);
+        }
+        config::save_geo_cache(geo_cache)?;
+        if let Some(state) = state {
+            persist_snapshot(
+                &state.root,
+                state.root_folder.as_ref(),
+                state.index.photos(),
+                &state.sidecar_manifest,
+            )?;
+        }
+        Ok(())
+    };
+    commit_write(commit, write)
+}
+
+/// Run `write` always when `commit` is `None`; otherwise only if the token
+/// is still the live generation. The ledger lock is held across the write.
+fn commit_write(
+    commit: Option<(&OpLedger, OpToken)>,
+    write: impl FnOnce() -> Result<(), HostError>,
+) -> Result<bool, HostError> {
+    match commit {
+        Some((ledger, token)) => Ok(ledger.commit(token, write)?.is_some()),
+        None => write().map(|()| true),
+    }
 }
 
 #[cfg(test)]
@@ -905,5 +1078,172 @@ mod tests {
         let err = open_library(&root, &AtomicBool::new(false), None).unwrap_err();
         assert!(matches!(err, HostError::InvalidPath { .. }), "{err}");
         assert!(err.to_string().contains("not valid UTF-8"));
+    }
+
+    fn write_tag_xmp(path: &Path, tag: &str) {
+        std::fs::write(
+            path,
+            format!(
+                r#"<x:xmpmeta xmlns:x="adobe:ns:meta/">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description xmlns:digiKam="http://www.digikam.org/ns/1.0/">
+      <digiKam:TagsList>
+        <rdf:Seq><rdf:li>{tag}</rdf:li></rdf:Seq>
+      </digiKam:TagsList>
+    </rdf:Description>
+  </rdf:RDF>
+</x:xmpmeta>"#
+            ),
+        )
+        .unwrap();
+    }
+
+    fn photo_tags(state: &LibraryState) -> Vec<String> {
+        state
+            .index
+            .photos()
+            .iter()
+            .flat_map(|p| p.hierarchical_tags.iter().map(|t| t.full_path.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn open_library_rereads_an_external_xmp_edit() {
+        let (_xdg, _guard) = isolate_xdg();
+        let lib = tempfile::tempdir().unwrap();
+        std::fs::write(lib.path().join("a.jpg"), b"not-a-jpeg").unwrap();
+        write_tag_xmp(&lib.path().join("a.jpg.xmp"), "Places/France/Paris");
+        let cancel = AtomicBool::new(false);
+        let first = open_library(lib.path(), &cancel, None).unwrap();
+        assert_eq!(photo_tags(&first), vec!["Places/France/Paris".to_string()]);
+
+        write_tag_xmp(&lib.path().join("a.jpg.xmp"), "Places/Italy/Rome");
+        let second = open_library(lib.path(), &cancel, None).unwrap();
+        assert_eq!(second.snapshot_reuse, SnapshotReuse::Hit);
+        assert_eq!(photo_tags(&second), vec!["Places/Italy/Rome".to_string()]);
+    }
+
+    #[test]
+    fn open_library_retracts_fields_when_the_sidecar_is_deleted() {
+        let (_xdg, _guard) = isolate_xdg();
+        let lib = tempfile::tempdir().unwrap();
+        std::fs::write(lib.path().join("a.jpg"), b"not-a-jpeg").unwrap();
+        write_tag_xmp(&lib.path().join("a.jpg.xmp"), "Objects/Cat");
+        let cancel = AtomicBool::new(false);
+        let first = open_library(lib.path(), &cancel, None).unwrap();
+        assert_eq!(photo_tags(&first), vec!["Objects/Cat".to_string()]);
+        assert_eq!(first.sidecar_manifest.len(), 1);
+
+        std::fs::remove_file(lib.path().join("a.jpg.xmp")).unwrap();
+        let second = open_library(lib.path(), &cancel, None).unwrap();
+        assert_eq!(second.snapshot_reuse, SnapshotReuse::Hit);
+        assert!(photo_tags(&second).is_empty(), "{:?}", photo_tags(&second));
+        assert!(
+            second.sidecar_manifest.is_empty(),
+            "{:?}",
+            second.sidecar_manifest
+        );
+    }
+
+    #[test]
+    fn superseded_open_does_not_persist_snapshot_or_library_root() {
+        let (_xdg, _guard) = isolate_xdg();
+        let lib_a = tempfile::tempdir().unwrap();
+        let lib_b = tempfile::tempdir().unwrap();
+        std::fs::write(lib_a.path().join("a.jpg"), b"not-a-jpeg").unwrap();
+        std::fs::write(lib_b.path().join("b.jpg"), b"not-a-jpeg").unwrap();
+        let ledger = crate::ops::OpLedger::default();
+        let stale = ledger.begin(crate::ops::OpKind::Scan);
+        let live = ledger.begin(crate::ops::OpKind::Scan);
+        let cancel = AtomicBool::new(false);
+
+        open_library_with_commit(lib_b.path(), &cancel, None, Some((&ledger, live))).unwrap();
+        assert_eq!(Config::load().library_root.as_deref(), Some(lib_b.path()));
+
+        open_library_with_commit(lib_a.path(), &cancel, None, Some((&ledger, stale))).unwrap();
+        assert_eq!(
+            Config::load().library_root.as_deref(),
+            Some(lib_b.path()),
+            "stale scan must not clobber library_root"
+        );
+        let bytes = persist::read_private(&config::snapshot_path()).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains("b.jpg"), "{text}");
+        assert!(!text.contains("a.jpg"), "{text}");
+    }
+
+    #[test]
+    fn superseded_reapply_and_analysis_do_not_persist() {
+        let (_xdg, _guard) = isolate_xdg();
+        let lib = tempfile::tempdir().unwrap();
+        let path = lib.path().join("a.jpg");
+        std::fs::write(&path, b"not-a-jpeg").unwrap();
+        write_tag_xmp(&lib.path().join("a.jpg.xmp"), "Places/France/Paris");
+        let cancel = AtomicBool::new(false);
+        let first = open_library(lib.path(), &cancel, None).unwrap();
+        assert_eq!(photo_tags(&first), vec!["Places/France/Paris".to_string()]);
+
+        write_tag_xmp(&lib.path().join("a.jpg.xmp"), "Places/Italy/Rome");
+        let ledger = crate::ops::OpLedger::default();
+        let stale = ledger.begin(crate::ops::OpKind::Analysis);
+        let live = ledger.begin(crate::ops::OpKind::Analysis);
+        let refreshed =
+            overlay_sidecars(first.clone(), Some(&[path.to_str().unwrap().to_string()])).unwrap();
+        assert_eq!(
+            photo_tags(&refreshed),
+            vec!["Places/Italy/Rome".to_string()]
+        );
+
+        let mut geo = gallery_geo::GeoCache::new();
+        geo.insert(gallery_geo::GeoCacheEntry {
+            latitude: 48.8,
+            longitude: 2.3,
+            path: "Places/France/Paris".into(),
+            country: Some("France".into()),
+            state: None,
+            city: Some("Paris".into()),
+            sublocation: None,
+            country_code: Some("FR".into()),
+        });
+        let wrote = commit_analysis_state(&geo, Some(&refreshed), &cancel, &ledger, stale).unwrap();
+        assert!(!wrote);
+
+        let bytes = persist::read_private(&config::snapshot_path()).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains("Places/France/Paris"), "{text}");
+        assert!(!text.contains("Places/Italy/Rome"), "{text}");
+        assert!(
+            !config::geo_cache_path().exists(),
+            "stale analysis must not write the geocode cache"
+        );
+
+        let wrote = commit_analysis_state(&geo, Some(&refreshed), &cancel, &ledger, live).unwrap();
+        assert!(wrote);
+        assert!(config::geo_cache_path().exists());
+        let bytes = persist::read_private(&config::snapshot_path()).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains("Places/Italy/Rome"), "{text}");
+    }
+
+    #[test]
+    fn sidecar_listing_changed_includes_edits_and_deletions() {
+        use gallery_model::snapshot::{ContentVersion, DownloadStatus};
+
+        let id = StableId::for_photo("/lib/a.jpg");
+        let row = |size: i64| SidecarCandidate {
+            photo_id: id,
+            sidecar_url: FileUrl::new("/lib/a.jpg.xmp"),
+            current_version: ContentVersion {
+                content_identifier: None,
+                modification_date: None,
+                size: Some(size),
+            },
+            download_status: DownloadStatus::Local,
+        };
+        let cached = HashMap::from([(id, row(5))]);
+        assert!(sidecar_listing_changed(&[row(5)], &cached).is_empty());
+        assert_eq!(sidecar_listing_changed(&[row(50)], &cached).len(), 1);
+        assert_eq!(sidecar_listing_changed(&[], &cached).len(), 1);
+        assert_eq!(sidecar_listing_changed(&[row(5)], &HashMap::new()).len(), 1);
     }
 }

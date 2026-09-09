@@ -56,7 +56,7 @@ endpoint). There is no LocalGallery account or telemetry backend.
 ## Build (iOS)
 
 ```bash
-brew install xcodegen          # if needed
+brew install xcodegen          # CI pins 2.46.0; see scripts/install_xcodegen.sh
 ./scripts/build_core.sh        # UniFFI Swift + GalleryCore.xcframework
 # Optional: stage a model pack (tagging/faces). Without one, those
 # features stay off. xcodegen still needs the build/pack directory:
@@ -107,8 +107,9 @@ HEIC does not use libheif/libde265 (LGPL-3.0). The decode seam is
 ## Tests
 
 ```bash
+# Any available iPhone simulator (iOS 18+). Helper: scripts/pick_ios_simulator.sh
 xcodebuild test -project LocalGallery.xcodeproj -scheme LocalGallery \
-  -destination "platform=iOS Simulator,name=iPhone 17 Pro" \
+  -destination "platform=iOS Simulator,name=$(./scripts/pick_ios_simulator.sh)" \
   -testLanguage en -testRegion US
 
 cd core && cargo test --workspace

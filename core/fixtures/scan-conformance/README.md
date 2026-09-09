@@ -60,14 +60,14 @@ xcodegen
 #    copy already inside the built test bundle.
 TEST_RUNNER_CONFORMANCE_REGEN=1 xcodebuild test \
   -project LocalGallery.xcodeproj -scheme LocalGallery \
-  -destination "platform=iOS Simulator,name=iPhone 17 Pro" \
+  -destination "platform=iOS Simulator,name=$(./scripts/pick_ios_simulator.sh)" \
   -only-testing:LocalGalleryTests/MetadataConformanceTests \
   -only-testing:LocalGalleryTests/ScannerConformanceTests \
   -only-testing:LocalGalleryTests/LibrarySnapshotFixtureTests
 
 # 4. run it again without the flag — now it must be green
 xcodebuild test -project LocalGallery.xcodeproj -scheme LocalGallery \
-  -destination "platform=iOS Simulator,name=iPhone 17 Pro"
+  -destination "platform=iOS Simulator,name=$(./scripts/pick_ios_simulator.sh)"
 
 # 5. and the Rust side
 cd core && cargo test --workspace

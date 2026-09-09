@@ -22,8 +22,20 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   RUST_VERSION: "1.97.1"
+  # macos-26 runner default as of 2026-07-21 (actions/runner-images#14344).
+  XCODE_VERSION: "26.6"
+  # yonaskolb/XcodeGen 2.46.0 xcodegen.zip — GitHub release API digest.
+  XCODEGEN_VERSION: "2.46.0"
+  XCODEGEN_SHA256: "4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806"
   # cargo-audit release used by the audit job (crates.io, --locked).
   CARGO_AUDIT_VERSION: "0.22.1"
+  CARGO_DENY_VERSION: "0.20.2"
+  # cargo-deny 0.20.2 x86_64-unknown-linux-musl — GitHub release API digest.
+  CARGO_DENY_SHA256: "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f"
+  PIP_AUDIT_VERSION: "2.10.1"
+  # rhysd/actionlint v1.7.12 linux_amd64 — GitHub release API digest.
+  ACTIONLINT_VERSION: "1.7.12"
+  ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
 
 defaults:
   run:
@@ -41,8 +53,9 @@ jobs:
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
       - name: Rust toolchain
-        uses: dtolnay/rust-toolchain@1.97.1
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master 2026-09-03
         with:
+          toolchain: "1.97.1"
           components: rustfmt
 
       - name: cargo fmt --check (core)
@@ -63,8 +76,9 @@ jobs:
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
       - name: Rust toolchain
-        uses: dtolnay/rust-toolchain@1.97.1
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master 2026-09-03
         with:
+          toolchain: "1.97.1"
           components: clippy
 
       - name: OS dependencies (OpenSSL, GTK)
@@ -98,7 +112,9 @@ jobs:
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
       - name: Rust toolchain
-        uses: dtolnay/rust-toolchain@1.97.1
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master 2026-09-03
+        with:
+          toolchain: "1.97.1"
 
       - name: OS dependencies (OpenSSL)
         run: |
@@ -133,7 +149,9 @@ jobs:
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
       - name: Rust toolchain
-        uses: dtolnay/rust-toolchain@1.97.1
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master 2026-09-03
+        with:
+          toolchain: "1.97.1"
 
       - name: OS dependencies (OpenSSL, GTK)
         run: |
@@ -172,10 +190,46 @@ jobs:
       - name: Checkout
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
-      - name: Install shellcheck
+      - name: Install shellcheck and YAML tools
         run: |
           sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends shellcheck
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            shellcheck \
+            python3-yaml \
+            yamllint
+
+      - name: Install actionlint
+        run: |
+          URL="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl --fail --location --retry 5 --output /tmp/actionlint.tgz "${URL}"
+          echo "${ACTIONLINT_SHA256}  /tmp/actionlint.tgz" | sha256sum -c -
+          tar -xzf /tmp/actionlint.tgz -C /tmp actionlint
+          sudo install -m 0755 /tmp/actionlint /usr/local/bin/actionlint
+          actionlint --version
+
+      - name: Parse workflow YAML
+        run: |
+          python3 - <<'PY'
+          import sys
+          from pathlib import Path
+          import yaml
+          files = sorted(Path(".github").rglob("*.yml")) + sorted(Path(".github").rglob("*.yaml"))
+          if not files:
+              raise SystemExit("no workflow YAML found")
+          for path in files:
+              with path.open() as fh:
+                  docs = list(yaml.safe_load_all(fh))
+              if not docs or docs[0] is None:
+                  raise SystemExit(f"empty YAML: {path}")
+              print(f"ok parse {path}")
+          PY
+          yamllint -d "{extends: relaxed, rules: {line-length: disable, document-start: disable}}" \
+            .github/workflows/test.yml \
+            .github/workflows/build.yml \
+            .github/dependabot.yml
+
+      - name: actionlint
+        run: actionlint -color .github/workflows/test.yml .github/workflows/build.yml
 
       - name: shellcheck scripts
         run: |
@@ -184,6 +238,9 @@ jobs:
 
       - name: prepare_pack smoke tests
         run: /bin/bash scripts/tests/prepare_pack_smoke.sh
+
+      - name: supply-chain helper smoke
+        run: /bin/bash scripts/tests/supply_chain_smoke.sh
 
       - name: Upload shellcheck / smoke output
         if: always()
@@ -204,7 +261,9 @@ jobs:
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
 
       - name: Rust toolchain
-        uses: dtolnay/rust-toolchain@1.97.1
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master 2026-09-03
+        with:
+          toolchain: "1.97.1"
 
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked --version "${CARGO_AUDIT_VERSION}" --force
@@ -217,11 +276,47 @@ jobs:
         working-directory: linux
         run: cargo audit --file Cargo.lock
 
-      - name: Verify model-pack requirement hashes
+      - name: Install cargo-deny
+        run: |
+          URL="https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          curl --fail --location --retry 5 --output /tmp/cargo-deny.tgz "${URL}"
+          echo "${CARGO_DENY_SHA256}  /tmp/cargo-deny.tgz" | sha256sum -c -
+          mkdir -p /tmp/cargo-deny-out
+          tar -xzf /tmp/cargo-deny.tgz -C /tmp/cargo-deny-out
+          DENY_BIN="$(find /tmp/cargo-deny-out -type f -name cargo-deny -print -quit)"
+          [[ -n "${DENY_BIN}" ]]
+          sudo install -m 0755 "${DENY_BIN}" /usr/local/bin/cargo-deny
+          cargo deny --version
+
+      - name: cargo deny (core)
+        run: cargo deny --manifest-path core/Cargo.toml --config deny.toml check
+
+      - name: cargo deny (linux)
+        run: cargo deny --manifest-path linux/Cargo.toml --config deny.toml check
+
+      - name: Verify model-pack direct-artifact inventory
         run: python3 scripts/build_model_pack/lock_requirements.py --check
 
-      - name: Verify taxonomy provenance pin
-        run: python3 scripts/build_model_pack/lock_taxonomy.py --check
+      - name: Install pip-audit (venv)
+        run: |
+          python3 -m venv /tmp/pack-audit
+          /tmp/pack-audit/bin/pip install -U pip
+          /tmp/pack-audit/bin/pip install \
+            "pip-audit==${PIP_AUDIT_VERSION}" \
+            "pyyaml==6.0.3"
+          /tmp/pack-audit/bin/pip-audit --version
+
+      - name: pip-audit model-pack pins
+        run: /tmp/pack-audit/bin/pip-audit --strict -r scripts/build_model_pack/requirements.txt
+
+      - name: Generate CycloneDX SBOM
+        run: python3 scripts/generate_sbom.py --out "${GITHUB_WORKSPACE}/sbom.cdx.json"
+
+      - name: Verify taxonomy path pin
+        run: python3 scripts/build_model_pack/lock_taxonomy.py --check-paths
+
+      - name: Verify taxonomy source provenance
+        run: /tmp/pack-audit/bin/python scripts/build_model_pack/lock_taxonomy.py --check
 
       - name: Upload audit logs
         if: always()
@@ -233,6 +328,7 @@ jobs:
             linux/Cargo.lock
             scripts/build_model_pack/requirements.lock
             scripts/build_model_pack/taxonomy.lock.json
+            sbom.cdx.json
           if-no-files-found: ignore
           retention-days: 7
 
@@ -249,9 +345,15 @@ jobs:
           # set_build_number.sh stamps CFBundleVersion from `git rev-list --count`.
           fetch-depth: 0
 
-      - name: Rust toolchain (iOS targets)
-        uses: dtolnay/rust-toolchain@1.97.1
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1.7.0
         with:
+          xcode-version: "${{ env.XCODE_VERSION }}"
+
+      - name: Rust toolchain (iOS targets)
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master 2026-09-03
+        with:
+          toolchain: "1.97.1"
           components: rustfmt, clippy
           targets: aarch64-apple-darwin,aarch64-apple-ios,aarch64-apple-ios-sim
 
@@ -264,7 +366,7 @@ jobs:
           git rev-list --count HEAD
 
       - name: Install XcodeGen
-        run: brew install xcodegen
+        run: /bin/bash scripts/install_xcodegen.sh
 
       # Clean-checkout order: optional pack (xcodegen needs build/pack), then
       # Rust bindings/xcframework, then xcodegen. A missing pack is not fatal
@@ -281,12 +383,7 @@ jobs:
       - name: Pick a simulator
         id: pick
         run: |
-          NAME=$(xcrun simctl list devices available -j \
-            | jq -r '.devices | to_entries
-                     | map(select(.key | contains("iOS")))
-                     | sort_by(.key) | reverse | .[0].value
-                     | map(select(.name | startswith("iPhone")))
-                     | sort_by(.name) | reverse | .[0].name')
+          NAME="$(/bin/bash scripts/pick_ios_simulator.sh)"
           echo "device_name=$NAME" >> "$GITHUB_OUTPUT"
           echo "using simulator: $NAME"
 

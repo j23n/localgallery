@@ -2,6 +2,10 @@
 # the pack ships, and the manifest hashes are what the app verifies, so they
 # are pinned rather than bounded.
 #
+# This file is the install input and the pip-audit advisory input.
+# requirements.lock is a direct-artifact hash inventory only — not complete
+# enough for `pip install --require-hashes`.
+#
 #   python3 -m venv .venv
 #   .venv/bin/pip install -r requirements.txt
 #

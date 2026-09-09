@@ -37,6 +37,5 @@ the app with tagging" without a licensed pack policy.
 - `project.yml` still lists `build/pack` as a resource path; operators
   create or stage that directory before `xcodegen`. Absence of models
   is a runtime feature gap, not a failed product.
-- Workflow changes that would upload artifacts are out of scope for
-  documentation; they must follow this ADR when those files are
-  edited.
+- `.github/workflows/build.yml` archives unsigned and checks layout.
+  It must not assemble, upload, or publish an IPA.

@@ -58,7 +58,7 @@ xcodegen
 #    built test bundle.
 TEST_RUNNER_CONFORMANCE_REGEN=1 xcodebuild test \
   -project LocalGallery.xcodeproj -scheme LocalGallery \
-  -destination "platform=iOS Simulator,name=iPhone 17 Pro" \
+  -destination "platform=iOS Simulator,name=$(./scripts/pick_ios_simulator.sh)" \
   -testLanguage en -testRegion US \
   -only-testing:LocalGalleryTests/SeededRNGConformanceTests \
   -only-testing:LocalGalleryTests/MemoryEngineConformanceTests \
@@ -67,7 +67,7 @@ TEST_RUNNER_CONFORMANCE_REGEN=1 xcodebuild test \
 
 # 3. run it again without the regen flag — now it must be green
 xcodebuild test -project LocalGallery.xcodeproj -scheme LocalGallery \
-  -destination "platform=iOS Simulator,name=iPhone 17 Pro" \
+  -destination "platform=iOS Simulator,name=$(./scripts/pick_ios_simulator.sh)" \
   -testLanguage en -testRegion US
 
 # 4. and the Rust side

@@ -12,7 +12,8 @@ another `xcodebuild`.
 ```
 ./scripts/prepare_pack.sh        # newest build/model_packs/<version> → build/pack/<version> (bundled resource)
 xcodegen                         # generates LocalGallery.xcodeproj
-xcodebuild test -project LocalGallery.xcodeproj -scheme LocalGallery -destination "platform=iOS Simulator,name=iPhone 17 Pro" -testLanguage en -testRegion US
+# Any available iPhone simulator (iOS 18+): scripts/pick_ios_simulator.sh
+xcodebuild test -project LocalGallery.xcodeproj -scheme LocalGallery -destination "platform=iOS Simulator,name=$(./scripts/pick_ios_simulator.sh)" -testLanguage en -testRegion US
 ```
 
 `-testLanguage en -testRegion US` is part of the command, not a flourish: the

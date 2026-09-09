@@ -1,11 +1,14 @@
-# Hashed pins for the direct model-pack dependencies in requirements.txt.
+# Direct-artifact inventory for requirements.txt. NOT a pip hash lock.
 # Generated from PyPI file metadata (sha256 of each published artifact).
 #
-# This lock lists *direct* deps only. `pip install --require-hashes` also
-# demands hashes for every transitive wheel, which is platform-specific.
-# Install with `pip install -r requirements.txt`, then verify artifacts:
-#   python3 lock_requirements.py --check
-# or install one package from this file with --no-deps --require-hashes.
+# Do not `pip install --require-hashes -r requirements.lock`.
+# pip --require-hashes needs every transitive wheel (platform-specific).
+# A complete hash lock was not generated: torch/torchvision wheels differ
+# by OS/CPython and this tree must stay installable on the pack-build Mac.
+#
+# Install:  pip install -r requirements.txt
+# Advisory: pip-audit -r requirements.txt
+# Verify:   python3 lock_requirements.py --check
 #
 # torchvision 0.29.0 is the first PyPI release past CVE-2026-65918
 # (0.28.0 and earlier). It requires torch 2.14.0.

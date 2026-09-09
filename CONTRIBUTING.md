@@ -24,8 +24,9 @@ iOS (Apple Silicon Mac, Xcode that provides an iPhone simulator):
 ./scripts/build_core.sh
 ./scripts/prepare_pack.sh          # optional; needs a built pack
 xcodegen
+# Any available iPhone simulator (iOS 18+). Helper: scripts/pick_ios_simulator.sh
 xcodebuild test -project LocalGallery.xcodeproj -scheme LocalGallery \
-  -destination "platform=iOS Simulator,name=iPhone 17 Pro" \
+  -destination "platform=iOS Simulator,name=$(./scripts/pick_ios_simulator.sh)" \
   -testLanguage en -testRegion US
 ```
 

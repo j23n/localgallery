@@ -11,6 +11,11 @@ There is no App Store pipeline in this repository.
    compile, archive if configured, and run tests.
 3. Stop. Do not attach `LocalGallery.ipa` to a GitHub Release.
 
+`.github/workflows/build.yml` is unsigned archive validation: it
+archives the app, checks the `.app` layout, and **fails if an IPA is
+present**. It does not export, upload, or publish an IPA. Release
+tokens are not used.
+
 Human distribution, if any, is a local archive or sideload you produce
 on a signing-capable Mac. That process is outside this repo.
 
@@ -25,8 +30,9 @@ cd scripts/build_model_pack
 cd ../..
 PACK_VARIANT=tagging ./scripts/prepare_pack.sh
 xcodegen
+# Any available iPhone simulator (iOS 18+). Helper: scripts/pick_ios_simulator.sh
 xcodebuild test -project LocalGallery.xcodeproj -scheme LocalGallery \
-  -destination "platform=iOS Simulator,name=iPhone 17 Pro" \
+  -destination "platform=iOS Simulator,name=$(./scripts/pick_ios_simulator.sh)" \
   -testLanguage en -testRegion US
 cd core && cargo test --workspace
 cd ../linux && cargo test --no-default-features
@@ -52,9 +58,3 @@ locally (see [linux/INSTALL.md](../linux/INSTALL.md)).
 - App: [MPL-2.0](../LICENSE) ([ADR 0004](adr/0004-mpl-licensing.md)).
 - Model weights: separate. Do not ship `buffalo_sc` faces.
 - HEIC: ImageIO on iOS analysis; software path elsewhere. No libheif.
-
-## Known gap
-
-`.github/workflows/build.yml` still contains an IPA upload step. That
-workflow is not part of this documentation change. Treat the upload as
-non-compliant with this runbook until the workflow slice lands.

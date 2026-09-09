@@ -22,7 +22,7 @@
 torch==2.14.0
 torchvision==0.29.0          # open_clip's preprocessing transforms; CVE-2026-65918
 open_clip_torch==3.3.0       # MobileCLIP-S2 config, weights fetch, tokenizer
-timm==1.0.28                 # fastvit_mci2 trunk + reparameterize_model
+timm==1.0.29                 # fastvit_mci2 trunk + reparameterize_model
 onnx==1.22.0
 onnxscript==0.7.1            # torch.onnx.export's opset library
 

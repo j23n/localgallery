@@ -58,3 +58,17 @@ locally (see [linux/INSTALL.md](../linux/INSTALL.md)).
 - App: [MPL-2.0](../LICENSE) ([ADR 0004](adr/0004-mpl-licensing.md)).
 - Model weights: separate. Do not ship `buffalo_sc` faces.
 - HEIC: ImageIO on iOS analysis; software path elsewhere. No libheif.
+
+## Taxonomy provenance (manual gate)
+
+`scripts/build_model_pack/taxonomy.lock.json` pins the derived
+Objects/Scenes path list (`taxonomy_paths.txt` and
+`taxonomy_paths_sha256`). CI requires that path/hash check.
+
+The declared source repository
+`https://github.com/j23n/photo-tools` is currently not publicly
+fetchable (private or 404). Until a verified commit whose mapping
+reproduces `taxonomy_paths_sha256` can be supplied,
+`lock_taxonomy.py --check` reports unresolved provenance as a warning
+(exit 2) and CI does not fail on that step. Do not invent a source
+commit.

@@ -77,6 +77,14 @@ Every distinct `Objects/*` and `Scenes/*` target path in photo-tools'
 376 Scenes), sorted by path. Deriving rather than curating means every tag the
 core can write is one photo-tools already knows how to read.
 
+`taxonomy_paths.txt` and `taxonomy.lock.json` pin that path list and its
+hash. `lock_taxonomy.py --check-paths` is required in CI. Live
+source-provenance against `https://github.com/j23n/photo-tools` is a
+manual gate: that repository is currently private or returns 404, so
+`--check` warns (exit 2) rather than failing the job. A git commit is
+recorded only when a mapping at that commit reproduces
+`taxonomy_paths_sha256`. Do not invent one.
+
 `People/*` is excluded (face recognition); `Landmarks/*` and
 `Places/*` are excluded (Nominatim / Places pass).
 

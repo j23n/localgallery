@@ -127,6 +127,13 @@ Pull requests and tags **validate** the tree (generate, compile, test).
 They do not publish an IPA. See [docs/release.md](docs/release.md) and
 [ADR 0003](docs/adr/0003-validation-only-release.md).
 
+The committed taxonomy path list and `taxonomy_paths_sha256` are required
+checks. Live source-provenance against
+[j23n/photo-tools](https://github.com/j23n/photo-tools) is a **manual
+gate**: that repository is currently private or returns 404, so CI warns
+and continues rather than staying red. A git commit is recorded only when
+a mapping at that commit reproduces the pinned hash. Do not invent one.
+
 ## Setup
 
 On first launch, pick (or create) a folder of photos. Syncthing and

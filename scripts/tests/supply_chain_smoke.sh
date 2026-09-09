@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # Parse/run the supply-chain helpers added for CI. Does not need PyPI or
-# photo-tools: path inventory must pass; provenance is expected to fail
-# unresolved until a reproducing commit is pinned.
+# photo-tools: path inventory must pass; unresolved source provenance is
+# an explicit warning / manual gate (exit 2), not a red CI condition.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -32,7 +32,7 @@ if [[ "$rc" -eq 0 ]]; then
 elif [[ "$rc" -eq 2 ]]; then
     grep -q "unresolved taxonomy provenance" "$TMPDIR/tax.err" \
         || fail "exit 2 without unresolved provenance message"
-    pass "taxonomy provenance unresolved (explicit fail)"
+    pass "taxonomy provenance unresolved (manual gate / warning)"
 else
     cat "$TMPDIR/tax.err" >&2
     fail "lock_taxonomy.py --check exited $rc"

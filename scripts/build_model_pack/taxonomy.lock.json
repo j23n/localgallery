@@ -10,7 +10,7 @@
   },
   "source": {
     "commit": null,
-    "note": "Declared public repo https://github.com/j23n/photo-tools did not yield a commit whose mapping reproduces taxonomy_paths_sha256 from this environment. lock_taxonomy.py --check must fail (exit 2) until a matching commit is pinned.",
+    "note": "Declared public repo https://github.com/j23n/photo-tools is currently private or returns 404, so no commit whose mapping reproduces taxonomy_paths_sha256 can be verified from this environment. Path/hash pins remain required. Source-provenance verification is a manual gate (warning, non-blocking in CI) until a matching commit is pinned. Do not invent a source commit.",
     "path": "src/photo_tools/data/ram_tag_mapping.yaml",
     "repository": "https://github.com/j23n/photo-tools",
     "status": "unresolved"

@@ -316,7 +316,19 @@ jobs:
         run: python3 scripts/build_model_pack/lock_taxonomy.py --check-paths
 
       - name: Verify taxonomy source provenance
-        run: /tmp/pack-audit/bin/python scripts/build_model_pack/lock_taxonomy.py --check
+        run: |
+          set +e
+          /tmp/pack-audit/bin/python scripts/build_model_pack/lock_taxonomy.py --check
+          rc=$?
+          set -e
+          if [[ "${rc}" -eq 0 ]]; then
+            exit 0
+          fi
+          if [[ "${rc}" -eq 2 ]]; then
+            echo "::warning::Taxonomy source provenance is unresolved. https://github.com/j23n/photo-tools is not publicly fetchable from this environment (private or 404). Path/hash pins remain required. Pin a verified commit manually; do not invent one."
+            exit 0
+          fi
+          exit "${rc}"
 
       - name: Upload audit logs
         if: always()

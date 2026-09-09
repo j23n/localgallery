@@ -10,9 +10,14 @@ Does not vendor the yaml or any pack binary. Writes/checks:
     python3 lock_taxonomy.py --check-paths     # committed path list only
     python3 lock_taxonomy.py --write --photo-tools /path/to/photo-tools
 
-`--check` queries the declared public repository and pins a commit only
-when that mapping reproduces taxonomy_paths_sha256. Otherwise it exits 2
-(unresolved provenance) rather than treating a missing commit as a pin.
+`--check-paths` is required: a drifted path list or hash is a hard fail.
+
+`--check` also queries the declared source repository. A git commit is
+recorded only when that mapping reproduces taxonomy_paths_sha256. Unresolved
+source provenance (private/404 repo, or no verified commit yet) is a
+warning and exits 2 — a manual gate, not a CI-red condition. A pinned
+commit that fetches and fails to reproduce the hash is a hard fail.
+Do not invent a source commit.
 """
 
 from __future__ import annotations
@@ -218,12 +223,19 @@ def _fetch_mapping(repository: str, path: str, commit: str) -> bytes | None:
     return None
 
 
+def _fail(reason: str) -> int:
+    print(f"error: taxonomy provenance check failed: {reason}", file=sys.stderr)
+    return 1
+
+
 def _unresolved(reason: str) -> int:
-    print(f"error: unresolved taxonomy provenance: {reason}", file=sys.stderr)
+    print(f"warning: unresolved taxonomy provenance: {reason}", file=sys.stderr)
     print(
-        "error: refusing to treat the label set as git-pinned; "
-        "query https://github.com/j23n/photo-tools and pin a commit "
-        "only if its Objects/Scenes mapping reproduces taxonomy_paths_sha256",
+        "warning: source-provenance verification is a manual gate until a "
+        "verified commit can be supplied. Path/hash pins remain required. "
+        "Do not invent a source commit. Query https://github.com/j23n/photo-tools "
+        "and pin a commit only if its Objects/Scenes mapping reproduces "
+        "taxonomy_paths_sha256.",
         file=sys.stderr,
     )
     return UNRESOLVED
@@ -239,23 +251,24 @@ def check_provenance() -> int:
     commit = source.get("commit")
 
     if not expected:
-        return _unresolved("lock is missing derived.taxonomy_paths_sha256")
+        return _fail("lock is missing derived.taxonomy_paths_sha256")
 
     if commit:
         if not re.fullmatch(r"[0-9a-f]{40}", str(commit)):
-            return _unresolved(f"source.commit is not a 40-char git sha ({commit!r})")
+            return _fail(f"source.commit is not a 40-char git sha ({commit!r})")
         data = _fetch_mapping(repository, path, commit)
         if not data:
             return _unresolved(
-                f"could not fetch {path} at {commit} from {repository}"
+                f"could not fetch {path} at {commit} from {repository} "
+                "(repository may be private or 404)"
             )
         try:
             paths = _paths_from_mapping_bytes(data)
         except (ValueError, KeyError, TypeError) as exc:
-            return _unresolved(f"mapping at {commit} did not parse: {exc}")
+            return _fail(f"mapping at {commit} did not parse: {exc}")
         digest = _paths_digest(paths)
         if digest != expected:
-            return _unresolved(
+            return _fail(
                 f"commit {commit} mapping digest {digest} != pinned {expected}"
             )
         print(f"ok: photo-tools {commit} reproduces taxonomy_paths_sha256")

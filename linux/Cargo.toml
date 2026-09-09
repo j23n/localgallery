@@ -34,7 +34,7 @@ dirs = "5"
 libc = "0.2"
 notify = "6"
 image = { version = "=0.25.10", default-features = false, features = ["jpeg", "png"] }
-md-5 = "0.10"
+md-5 = "0.11"
 png = "0.18"
 gtk = { package = "gtk4", version = "0.8", features = ["v4_14"], optional = true }
 adw = { package = "libadwaita", version = "0.6", features = ["v1_5"], optional = true }

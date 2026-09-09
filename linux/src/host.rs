@@ -255,11 +255,10 @@ pub fn open_library(
 
 /// Scanner input for an open / reload.
 ///
-/// Always a **full** pass (`reuse_cached: false`) so an in-place edit is
-/// visible on the next walk. Cached rows still carry tags and dates for
-/// unchanged files — that is the scanner's full-mode carry-forward, not the
-/// light-scan blind spot that would make edits invisible until something
-/// else forced a cold walk.
+/// Always a **full** pass (`reuse_cached: false`) so every `PhotoFile` is
+/// rebuilt from the listing (cached tags and dates still carry forward).
+/// Light scans now see size/mtime changes too; open stays on the full path
+/// so a listing match cannot reuse a stale row verbatim.
 pub fn scan_input_for_open(
     cached_photos: HashMap<String, PhotoFile>,
     cached_sidecar_manifest: HashMap<StableId, SidecarCandidate>,
@@ -797,8 +796,8 @@ mod tests {
         );
         let full = scan(&vfs, root, &scan_input_for_open(cached, HashMap::new()));
         assert!(
-            light.modified_paths.is_empty(),
-            "light reuse hides the edit (the old host bug)"
+            !light.modified_paths.is_empty(),
+            "light compares listing size/mtime, so a rewrite is visible"
         );
         assert!(
             !full.modified_paths.is_empty(),

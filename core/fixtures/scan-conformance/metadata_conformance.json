@@ -739,14 +739,11 @@
       ],
       "hasSidecar" : true,
       "hierarchicalTags" : [
-        {
-          "displayName" : "Boat",
-          "fullPath" : "Objects/Boat",
-          "namespace" : "Objects"
-        }
+
       ],
       "notes" : [
-        "Country comes from the sidecar."
+        "Country comes from the sidecar.",
+        "The JPEG embeds Objects/Boat; the sidecar-only reader ignores embedded TagsList, so hierarchicalTags stays empty."
       ],
       "path" : "sidecar/country_gap.jpg",
       "scannerKind" : "image"

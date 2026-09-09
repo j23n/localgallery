@@ -65,11 +65,13 @@ pub struct PhotoToolsFields {
 }
 
 /// The core's sentinel: who tagged, with which model pack, when, and what
-/// Objects/Scenes this write left behind.
+/// Objects/Scenes this write inserted and may therefore retract.
 ///
-/// `TaggerVersion` is the skip key. `CoreTags` mirrors the replace set.
-/// `CoreSubjects` still records leaves we introduced, so a human keyword
-/// that shares a leaf is not deleted when the path comes out.
+/// `TaggerVersion` is the skip key. `CoreTags` records values we actually
+/// inserted — never a pre-existing digiKam / photo-tools / Lightroom path
+/// that merely shares a name. `CoreSubjects` still records leaves we
+/// introduced, so a human keyword that shares a leaf is not deleted when
+/// the path comes out.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CoreSentinel {
     /// `photo-tools:CoreAgent`, e.g. `localgallery-core`.

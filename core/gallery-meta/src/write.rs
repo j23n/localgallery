@@ -1,5 +1,4 @@
-//! The sidecar write path: read-modify-write with prefix-replace for
-//! Objects/Scenes.
+//! The sidecar write path: read-modify-write that retracts only what we own.
 //!
 //! # What the core owns
 //!
@@ -24,20 +23,30 @@
 //! request carries a vector; a reader treats a mismatched `CLIPModel` as
 //! a miss.
 //!
-//! # Retraction
+//! # Ownership and retraction
 //!
-//! Objects/ and Scenes/ are a **replace set**. Whatever those roots already
-//! hold — this agent, photo-tools, an older 2-segment path — is removed and
-//! the request's list is written. `photo-tools:TaggerVersion` is the skip
-//! key: a sidecar stamped with the running pack is left alone. People/,
-//! Places/, Landmarks/ and bare human keywords are not in the replace set.
+//! LocalGallery may retract only values recorded as LocalGallery-owned in
+//! the sentinel, **including** under `Objects/*` and `Scenes/*`. Each XMP
+//! property is planned independently: a pre-existing digiKam `TagsList`
+//! entry, Lightroom `hierarchicalSubject` path, or `dc:subject` keyword is
+//! neither claimed nor removed just because this request names the same
+//! path. Ownership is recorded only for values this write actually inserts.
 //!
-//! `dc:subject` leaves of a removed path come out only when no surviving
-//! tag still needs them. `lr:hierarchicalSubject` follows the same paths.
+//! Duplicate occurrences of a property (split `rdf:Description` blocks)
+//! are swept only for those owned values. Comparisons against bytes already
+//! in the file are NFC (and case-insensitive for `dc:subject`); existing
+//! NFD spellings are matched, not rewritten.
+//!
+//! People/, Places/, Landmarks/ and bare human keywords are not requested
+//! by the tagger. `photo-tools:TaggerVersion` is the skip key: a sidecar
+//! already stamped with the running pack and whose owned set matches is
+//! left alone.
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::BTreeSet;
+use std::hash::{Hash, Hasher};
 
-use gallery_vfs::Vfs;
+use gallery_vfs::{Vfs, VfsError};
 
 use crate::edit::{self, NodePath};
 use crate::error::{MetaError, MetaResult};
@@ -198,55 +207,40 @@ pub struct WriteOutcome {
 /// is lost. The alt file is left untouched — it is not ours to delete — which
 /// does mean it becomes shadowed for readers that prefer the canonical name.
 ///
-/// Nothing is written when the sidecar already says exactly what this request
-/// says: re-running the tagger must not churn mtimes and wake the sidecar sync.
+/// Nothing is written when the *canonical* sidecar already says exactly what
+/// this request says: re-running the tagger must not churn mtimes and wake the
+/// sidecar sync. A missing canonical file is still created even when a matching
+/// alt seeded the merge — the app reads the canonical name.
 ///
 /// # Concurrency
 ///
 /// This is a read-modify-write over a file other programs also write. If the
 /// sidecar changes between the read and the rename, the rename would discard
 /// the other writer's work wholesale — digiKam's new face tag, Lightroom's new
-/// keyword, gone with no trace. The file is re-stat'd immediately before the
-/// write and a mismatch returns [`MetaError::ConcurrentModification`] with
-/// nothing written; the caller retries, which re-reads and re-merges.
+/// keyword, gone with no trace. Immediately before the atomic replace the
+/// canonical file is re-read and compared by content identity (a digest of the
+/// bytes we actually parsed). A mismatch returns
+/// [`MetaError::ConcurrentModification`] with nothing written; the caller
+/// retries, which re-reads and re-merges.
 ///
-/// The check compares size and whole-second mtime, so it cannot see a
-/// same-size write landing inside the same second as ours. Closing that window
-/// needs an exchange-with-verification primitive the `Vfs` trait does not have
-/// (`renameatx_np(RENAME_EXCL)` on Darwin); the check as it stands turns the
-/// common case — a human editing in another app while a tagging run is in
-/// flight — from silent data loss into a retry.
+/// The `Vfs` trait has no compare-and-swap / exclusive-rename primitive, so a
+/// write that lands in the gap after that re-read can still win. The content
+/// check closes the same-size, same-second window that a size/mtime token
+/// cannot see. Inaccessible files are reported as I/O errors rather than
+/// treated as absent.
 pub fn write_tags(
     vfs: &dyn Vfs,
     image_path: &str,
     request: &TagWriteRequest,
 ) -> MetaResult<WriteOutcome> {
     let target = sidecar_path(image_path);
-
-    // Snapshot of the canonical sidecar as it stood when we read it.
-    let before = stat_token(vfs, &target);
-
-    let existing = if before.is_some() {
-        Some(vfs.read(&target)?)
-    } else {
-        match alt_sidecar_path(image_path) {
-            Some(alt) if vfs.exists(&alt) => Some(vfs.read(&alt)?),
-            _ => None,
-        }
-    };
-
-    let applied = apply_tags(existing.as_deref(), request)?;
-    // `AppliedTags::created` means "there were no bytes to start from"; the
-    // *file* is new whenever the canonical path was absent, which also covers
-    // the case where the seeding alt sidecar already said everything we want.
-    let created = before.is_none();
+    let seed = load_sidecar_for_write(vfs, image_path)?;
+    let applied = apply_tags(seed.existing.as_deref(), request)?;
+    let created = seed.canonical.is_none();
     let written = applied.changed || created;
 
     if written {
-        if stat_token(vfs, &target) != before {
-            return Err(MetaError::ConcurrentModification { path: target });
-        }
-        vfs.write_atomic(&target, &applied.bytes)?;
+        commit_sidecar_write(vfs, &target, seed.canonical.as_deref(), &applied.bytes)?;
     }
 
     Ok(WriteOutcome {
@@ -259,14 +253,85 @@ pub fn write_tags(
     })
 }
 
-/// Cheap identity of a file's current contents: `None` when absent, otherwise
-/// `(size, whole-second mtime)`.
+/// Bytes used to start a sidecar write, plus the canonical file's identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SidecarSeed {
+    /// Canonical sidecar bytes when that path existed. `None` means absent.
+    pub canonical: Option<Vec<u8>>,
+    /// Bytes to parse: the canonical file, or the Lightroom alt, or nothing.
+    pub existing: Option<Vec<u8>>,
+}
+
+/// Read the canonical sidecar, falling back to the Lightroom-style alt.
 ///
-/// Not a content hash on purpose — this runs twice per photo across a whole
-/// library, and the failure it guards against (another program writing the
-/// same sidecar mid-run) reliably changes one or both.
-fn stat_token(vfs: &dyn Vfs, path: &str) -> Option<(u64, Option<i64>)> {
-    vfs.stat(path).ok().map(|s| (s.size, s.modified_unix))
+/// [`VfsError::NotFound`] is absence. Every other filesystem error — including
+/// permission denied — is returned, so an inaccessible sidecar is never
+/// treated as a file we may create or replace.
+pub(crate) fn load_sidecar_for_write(vfs: &dyn Vfs, image_path: &str) -> MetaResult<SidecarSeed> {
+    let target = sidecar_path(image_path);
+    match read_present(vfs, &target)? {
+        Some(bytes) => Ok(SidecarSeed {
+            canonical: Some(bytes.clone()),
+            existing: Some(bytes),
+        }),
+        None => {
+            let existing = match alt_sidecar_path(image_path) {
+                Some(alt) => read_present(vfs, &alt)?,
+                None => None,
+            };
+            Ok(SidecarSeed {
+                canonical: None,
+                existing,
+            })
+        }
+    }
+}
+
+/// Re-read the canonical sidecar and write only if its bytes still match
+/// `expected` (`None` means the path must still be absent).
+pub(crate) fn commit_sidecar_write(
+    vfs: &dyn Vfs,
+    target: &str,
+    expected: Option<&[u8]>,
+    bytes: &[u8],
+) -> MetaResult<()> {
+    let now = read_present(vfs, target)?;
+    if content_identity(now.as_deref()) != content_identity(expected) {
+        return Err(MetaError::ConcurrentModification {
+            path: target.to_string(),
+        });
+    }
+    vfs.write_atomic(target, bytes)?;
+    Ok(())
+}
+
+/// `Ok(None)` when `path` is absent; I/O errors other than not-found propagate.
+fn read_present(vfs: &dyn Vfs, path: &str) -> MetaResult<Option<Vec<u8>>> {
+    match vfs.stat(path) {
+        Ok(_) => match vfs.read(path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(VfsError::NotFound { .. }) => Err(MetaError::ConcurrentModification {
+                path: path.to_string(),
+            }),
+            Err(e) => Err(e.into()),
+        },
+        Err(VfsError::NotFound { .. }) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Content identity of a sidecar snapshot. `None` is "file absent".
+///
+/// Sidecars are small; the digest is only an identity token compared inside
+/// one process, so a stable-enough hasher is enough. Comparing the digest
+/// rather than holding a second copy of the bytes keeps the concurrent-check
+/// path on the `Vfs` read primitive (no extra trait methods).
+fn content_identity(bytes: Option<&[u8]>) -> Option<u64> {
+    bytes.map(|b| {
+        let mut hasher = DefaultHasher::new();
+        b.hash(&mut hasher);
+        hasher.finish()
+    })
 }
 
 /// Everything the edit pass needs, computed before any mutation.
@@ -290,10 +355,10 @@ struct Plan {
     clip_is_current: bool,
 }
 
-    impl Plan {
+impl Plan {
     fn build(view: &SidecarView, requested: &[String], request: &TagWriteRequest) -> Plan {
-        // Only Objects/Scenes are a replace set. People/Places/Landmarks and
-        // anything else stay. `requested` is already NFC.
+        // Only Objects/Scenes are requested by the tagger. People/Places/
+        // Landmarks stay unless a later agent owns them. `requested` is NFC.
         let requested: Vec<String> = requested
             .iter()
             .filter(|t| is_content_tag(t))
@@ -301,14 +366,18 @@ struct Plan {
             .collect();
         let requested_set: BTreeSet<String> = requested.iter().cloned().collect();
 
-        let existing_tags: Vec<String> = view.tags_list.iter().map(|t| nfc(t)).collect();
-        let existing_machine: BTreeSet<String> = existing_tags
+        let existing_tags: BTreeSet<String> = view.tags_list.iter().map(|t| nfc(t)).collect();
+        let previously_owned_tags: BTreeSet<String> = view
+            .core
+            .tags
             .iter()
+            .map(|t| nfc(t))
             .filter(|t| is_content_tag(t))
-            .cloned()
             .collect();
 
-        let mut tags_to_remove: Vec<String> = existing_machine
+        // Retract only what the sentinel says we inserted, and only when this
+        // request no longer names it. Foreign Objects/Scenes stay.
+        let mut tags_to_remove: Vec<String> = previously_owned_tags
             .iter()
             .filter(|t| !requested_set.contains(*t))
             .cloned()
@@ -316,26 +385,33 @@ struct Plan {
         tags_to_remove.sort();
         let tags_to_add: Vec<String> = requested
             .iter()
-            .filter(|t| !existing_machine.contains(*t))
+            .filter(|t| !existing_tags.contains(*t))
             .cloned()
             .collect();
-        let owned_tags = requested.clone();
-
-        let retained: BTreeSet<String> = existing_tags
+        let mut owned_tags: Vec<String> = previously_owned_tags
             .iter()
-            .filter(|t| !is_content_tag(t))
+            .filter(|t| requested_set.contains(*t))
             .cloned()
-            .chain(requested.iter().cloned())
+            .chain(tags_to_add.iter().cloned())
             .collect();
-        let retained_leaves: BTreeSet<String> = retained
-            .iter()
-            .map(|t| nfc_lower(leaf_of(t)))
-            .collect();
+        owned_tags.sort();
+        owned_tags.dedup();
 
-        // `dc:subject` is lossy: a human "Dog" and `Objects/Animal/Dog` share
-        // one leaf. Retract only leaves we introduced and that nothing
-        // surviving still needs. Machine paths themselves are prefix-replaced
-        // above; this is just the flat projection.
+        let tags_to_remove_set: BTreeSet<String> = tags_to_remove.iter().cloned().collect();
+        let retained: BTreeSet<String> = view
+            .tags_list
+            .iter()
+            .map(|t| nfc(t))
+            .filter(|t| !tags_to_remove_set.contains(t))
+            .chain(tags_to_add.iter().cloned())
+            .collect();
+        let retained_leaves: BTreeSet<String> =
+            retained.iter().map(|t| nfc_lower(leaf_of(t))).collect();
+
+        // Each keyword property is planned on its own. A pre-existing
+        // `dc:subject` leaf is not claimed just because we requested a path
+        // that shares it; we only retract leaves the sentinel says we wrote
+        // and that nothing surviving still needs.
         let existing_subjects_lower: BTreeSet<String> =
             view.subject.iter().map(|s| nfc_lower(s)).collect();
         let mut subjects_to_remove: Vec<String> = view
@@ -350,7 +426,7 @@ struct Plan {
 
         let mut subjects_to_add: Vec<String> = Vec::new();
         let mut pending_lower: BTreeSet<String> = BTreeSet::new();
-        for tag in &tags_to_add {
+        for tag in &requested {
             let leaf = leaf_of(tag).to_string();
             let lower = nfc_lower(&leaf);
             if existing_subjects_lower.contains(&lower) || pending_lower.contains(&lower) {
@@ -376,19 +452,39 @@ struct Plan {
 
         let existing_lr: BTreeSet<String> =
             view.hierarchical_subject.iter().map(|p| nfc(p)).collect();
-        let lr_to_add: Vec<String> = tags_to_add
-            .iter()
-            .map(|t| to_lr_path(t))
-            .filter(|p| !existing_lr.contains(p))
-            .collect();
-        let mut lr_to_remove: Vec<String> = tags_to_remove.iter().map(|t| to_lr_path(t)).collect();
-        lr_to_remove.sort();
-        let mut owned_hierarchical: Vec<String> = owned_tags.iter().map(|t| to_lr_path(t)).collect();
-        owned_hierarchical.sort();
+        let previously_owned_lr: BTreeSet<String> =
+            view.core.hierarchical.iter().map(|p| nfc(p)).collect();
+        let requested_lr: BTreeSet<String> = requested.iter().map(|t| to_lr_path(t)).collect();
 
+        let lr_to_add: Vec<String> = requested_lr
+            .iter()
+            .filter(|p| !existing_lr.contains(*p))
+            .cloned()
+            .collect();
+        let mut lr_to_remove: Vec<String> = previously_owned_lr
+            .iter()
+            .filter(|p| !requested_lr.contains(*p))
+            .cloned()
+            .collect();
+        lr_to_remove.sort();
+        let mut owned_hierarchical: Vec<String> = previously_owned_lr
+            .iter()
+            .filter(|p| requested_lr.contains(*p))
+            .cloned()
+            .chain(lr_to_add.iter().cloned())
+            .collect();
+        owned_hierarchical.sort();
+        owned_hierarchical.dedup();
+
+        let keywords_unchanged = tags_to_add.is_empty()
+            && tags_to_remove.is_empty()
+            && subjects_to_add.is_empty()
+            && subjects_to_remove.is_empty()
+            && lr_to_add.is_empty()
+            && lr_to_remove.is_empty();
         let sentinel_is_current = view.photo_tools.tagger_version.as_deref()
             == Some(request.model_pack.as_str())
-            && existing_machine == requested_set;
+            && keywords_unchanged;
 
         let clip_is_current = match (
             &request.clip_embedding,
@@ -542,11 +638,9 @@ fn apply_plan(doc: &mut Document, root: &NodePath, plan: &Plan) {
         &plan.owned_hierarchical,
     );
 
-    if let (Some(embedding), Some(model), Some(timestamp)) = (
-        &plan.clip_embedding,
-        &plan.clip_model,
-        &plan.clip_timestamp,
-    ) {
+    if let (Some(embedding), Some(model), Some(timestamp)) =
+        (&plan.clip_embedding, &plan.clip_model, &plan.clip_timestamp)
+    {
         scalar(doc, PROP_CLIP_EMBEDDING, embedding);
         scalar(doc, PROP_CLIP_MODEL, model);
         scalar(doc, PROP_CLIP_TIMESTAMP, timestamp);
@@ -611,11 +705,12 @@ pub(crate) fn edit_list_ignore_case(
 /// Remove then append entries in one list property, creating it only if there
 /// is something to add.
 ///
-/// Removals sweep **every** occurrence of the property; additions go to the
-/// first. A property split across two `rdf:Description` blocks is legal RDF and
-/// occurs in the wild, and a remove pass that only saw the first occurrence
-/// would drop the entry from `CoreSubjects`/`CoreTags` while leaving it in the
-/// file — the sentinel and the file would then disagree forever.
+/// Removals sweep **every** occurrence of the property, but only the values
+/// the planner marked as owned (the `remove` list). Foreign entries in a
+/// later `rdf:Description` are left alone. Additions go to the first
+/// occurrence. A property split across two blocks is legal RDF and occurs in
+/// the wild; a remove pass that only saw the first occurrence would drop an
+/// owned entry from the sentinel while leaving it in the file.
 #[allow(clippy::too_many_arguments)]
 fn edit_list(
     doc: &mut Document,

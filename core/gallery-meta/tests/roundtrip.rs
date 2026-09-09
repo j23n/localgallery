@@ -142,38 +142,34 @@ fn writing_tags_leaves_every_foreign_field_alone() {
 }
 
 #[test]
-fn people_places_and_landmarks_survive_a_write() {
+fn people_places_landmarks_and_foreign_objects_scenes_survive_a_write() {
     for name in FIXTURES {
         let original = fixture(name);
         let before = read_view(&original).unwrap();
         let after = read_view(&apply(&original, &["Objects/Animal/Dog"])).unwrap();
         for tag in &before.tags_list {
-            if gallery_meta::is_content_tag(tag) {
-                continue;
-            }
             assert!(after.tags_list.contains(tag), "{name}: lost tag {tag}");
         }
         for subject in &before.subject {
-            let from_machine = before
-                .tags_list
-                .iter()
-                .any(|t| gallery_meta::is_content_tag(t) && t.ends_with(subject));
-            if from_machine {
-                continue;
-            }
             assert!(
                 after.subject.contains(subject),
                 "{name}: lost subject {subject}"
             );
         }
         for lr in &before.hierarchical_subject {
-            if gallery_meta::is_content_tag(lr) {
-                continue;
-            }
             assert!(
                 after.hierarchical_subject.contains(lr),
                 "{name}: lost hierarchicalSubject {lr}"
             );
+        }
+        // Pre-existing Objects/Scenes were never ours to claim.
+        for tag in &before.tags_list {
+            if gallery_meta::is_content_tag(tag) {
+                assert!(
+                    !after.core.tags.iter().any(|t| t == tag),
+                    "{name}: claimed foreign tag {tag}"
+                );
+            }
         }
     }
 }
@@ -346,32 +342,51 @@ fn a_retracted_tag_is_removed_from_all_three_fields() {
 }
 
 #[test]
-fn objects_and_scenes_are_replaced_including_photo_tools() {
+fn foreign_objects_and_scenes_are_preserved_and_only_owned_ones_are_replaced() {
     let base = fixture("phototools.jpg.xmp");
     let first = apply_tags(Some(&base), &request(&["Objects/Animal/Dog"])).unwrap();
     let view = read_view(&first.bytes).unwrap();
-    assert_eq!(
+    assert!(view.tags_list.contains(&"Objects/Animal/Dog".to_string()));
+    assert!(
         view.tags_list
-            .iter()
-            .filter(|t| gallery_meta::is_content_tag(t))
-            .cloned()
-            .collect::<Vec<_>>(),
-        vec!["Objects/Animal/Dog"]
+            .contains(&"Objects/Structure/Balustrade".to_string()),
+        "photo-tools Objects/* must survive: {:?}",
+        view.tags_list
+    );
+    assert!(
+        view.tags_list
+            .contains(&"Scenes/Urban/Building".to_string()),
+        "photo-tools Scenes/* must survive: {:?}",
+        view.tags_list
     );
     assert!(view
         .tags_list
         .contains(&"Places/Italy/Lazio/Rome/Municipio Roma I".to_string()));
     assert!(view.tags_list.contains(&"Landmarks/Colosseum".to_string()));
+    assert_eq!(view.core.tags, vec!["Objects/Animal/Dog"]);
+    assert!(
+        !view
+            .core
+            .tags
+            .iter()
+            .any(|t| t.contains("Balustrade") || t.contains("Building")),
+        "foreign Objects/Scenes must not be claimed: {:?}",
+        view.core.tags
+    );
 
     let second = apply(&first.bytes, &[]);
     let view = read_view(&second).unwrap();
-    assert!(!view
+    assert!(!view.tags_list.contains(&"Objects/Animal/Dog".to_string()));
+    assert!(view
         .tags_list
-        .iter()
-        .any(|t| gallery_meta::is_content_tag(t)));
+        .contains(&"Objects/Structure/Balustrade".to_string()));
+    assert!(view
+        .tags_list
+        .contains(&"Scenes/Urban/Building".to_string()));
     assert!(view
         .tags_list
         .contains(&"Places/Italy/Lazio/Rome/Municipio Roma I".to_string()));
+    assert!(view.core.tags.is_empty());
 }
 
 #[test]
@@ -414,30 +429,19 @@ fn a_leaf_shared_by_two_owned_tags_survives_retracting_only_one() {
 }
 
 #[test]
-fn retracting_everything_keeps_non_machine_tags() {
+fn retracting_everything_keeps_every_tag_we_did_not_insert() {
     let base = fixture("phototools.jpg.xmp");
     let before = read_view(&base).unwrap();
     let tagged = apply(&base, &["Objects/Animal/Dog"]);
     let cleared = apply(&tagged, &[]);
     let view = read_view(&cleared).unwrap();
-    let kept: Vec<_> = before
-        .tags_list
-        .iter()
-        .filter(|t| !gallery_meta::is_content_tag(t))
-        .cloned()
-        .collect();
-    assert_eq!(
-        view.tags_list
-            .iter()
-            .filter(|t| !gallery_meta::is_content_tag(t))
-            .cloned()
-            .collect::<Vec<_>>(),
-        kept
-    );
-    assert!(!view
-        .tags_list
-        .iter()
-        .any(|t| gallery_meta::is_content_tag(t)));
+    for tag in &before.tags_list {
+        assert!(
+            view.tags_list.contains(tag),
+            "retraction deleted a foreign tag: {tag}"
+        );
+    }
+    assert!(!view.tags_list.contains(&"Objects/Animal/Dog".to_string()));
     assert!(view.core.tags.is_empty());
 }
 
@@ -837,14 +841,17 @@ fn writing_migrates_an_attribute_form_list_instead_of_duplicating_it() {
 // ---------------------------------------------------------------------------
 
 /// `Café` with a precomposed `é` (NFC) and with `e` + combining acute (NFD).
-const NFC_CAFE: &str = "Places/Caf\u{e9}";
-const NFD_CAFE: &str = "Places/Cafe\u{301}";
+/// Objects/Scenes so the tagger planner actually sees the path; Places is
+/// not a tagging write.
+const NFC_CAFE: &str = "Objects/Caf\u{e9}";
+const NFD_CAFE: &str = "Objects/Cafe\u{301}";
 
 #[test]
 fn an_nfd_tag_already_in_the_file_is_matched_not_duplicated() {
     // macOS hands NFD out of its filesystem APIs, so a tagger that lifted a
     // keyword from a filename really does write the decomposed form. Adding the
-    // composed spelling of the same word must not produce a second entry.
+    // composed spelling of the same word must not produce a second entry, and
+    // a pre-existing value must not be claimed.
     let base = packet(&format!(
         " <rdf:Description rdf:about=''\n  xmlns:digiKam='http://www.digikam.org/ns/1.0/'>\n\
   <digiKam:TagsList>\n   <rdf:Seq>\n    <rdf:li>{NFD_CAFE}</rdf:li>\n\
@@ -864,7 +871,7 @@ fn an_nfd_tag_already_in_the_file_is_matched_not_duplicated() {
     let text = String::from_utf8(out).unwrap();
     assert!(text.contains(NFD_CAFE), "existing bytes were re-normalized");
 
-    // And it survives a full retraction.
+    // And it survives a full retraction — we never owned it.
     let cleared = apply(&text.into_bytes(), &[]);
     assert_eq!(read_view(&cleared).unwrap().tags_list, vec![NFD_CAFE]);
 }
@@ -877,6 +884,28 @@ fn a_requested_tag_is_normalized_to_nfc_on_the_way_in() {
     assert_eq!(view.core.tags, vec![NFC_CAFE]);
     // Both spellings of the same request produce the same bytes.
     assert_eq!(apply(&fixture("minimal.jpg.xmp"), &[NFC_CAFE]), out);
+}
+
+#[test]
+fn an_owned_nfd_entry_is_retracted_without_rewriting_its_neighbors() {
+    // We wrote NFC; another tool re-spelled our entry as NFD. Retraction
+    // must still match, using the same NFC comparison the claim used.
+    let tagged = apply(&fixture("minimal.jpg.xmp"), &[NFC_CAFE]);
+    let drifted = String::from_utf8(tagged)
+        .unwrap()
+        .replace(NFC_CAFE, NFD_CAFE);
+    assert_eq!(
+        read_view(drifted.as_bytes()).unwrap().tags_list,
+        vec![NFD_CAFE]
+    );
+
+    let cleared = apply(drifted.as_bytes(), &[]);
+    let view = read_view(&cleared).unwrap();
+    assert!(
+        view.tags_list.is_empty(),
+        "the owned NFD entry survived: {view:?}"
+    );
+    assert!(view.core.tags.is_empty());
 }
 
 #[test]

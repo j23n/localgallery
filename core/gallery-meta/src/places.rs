@@ -24,9 +24,12 @@ use crate::error::{MetaError, MetaResult};
 use crate::model::SidecarView;
 use crate::read::view_of;
 use crate::schema::*;
-use crate::sidecar::{alt_sidecar_path, sidecar_path};
+use crate::sidecar::sidecar_path;
 use crate::tags::{leaf_of, nfc, nfc_lower, normalize_tag, to_lr_path, PLACES_ROOT};
-use crate::write::{edit_list_exact, edit_list_ignore_case, WriteOutcome};
+use crate::write::{
+    commit_sidecar_write, edit_list_exact, edit_list_ignore_case, load_sidecar_for_write,
+    WriteOutcome,
+};
 use crate::xml::{parse, serialize, Document};
 
 /// What to write into a sidecar for one reverse-geocoded photo.
@@ -90,7 +93,11 @@ pub fn places_depth(tag: &str) -> Option<usize> {
 ///
 /// No Places tag ⇒ needed. A path of depth ≥ [`PLACES_FINISHED_DEPTH`] ⇒ done.
 pub fn places_still_needed(tags: impl IntoIterator<Item = impl AsRef<str>>) -> bool {
-    match tags.into_iter().filter_map(|t| places_depth(t.as_ref())).max() {
+    match tags
+        .into_iter()
+        .filter_map(|t| places_depth(t.as_ref()))
+        .max()
+    {
         None => true,
         Some(depth) => depth < PLACES_FINISHED_DEPTH,
     }
@@ -242,33 +249,23 @@ fn unchanged(doc: &Document, created: bool) -> crate::write::AppliedTags {
 ///
 /// Same sidecar selection, same atomicity and the same
 /// [`MetaError::ConcurrentModification`] retry contract as
-/// [`crate::write_tags`].
+/// [`crate::write_tags`]. A missing canonical sidecar is created even when
+/// a Lightroom-style alt already carried the place — otherwise
+/// `created: true, written: false` would claim a file that was never
+/// written, and readers that only look at the canonical name would miss it.
 pub fn write_places(
     vfs: &dyn Vfs,
     image_path: &str,
     request: &PlaceWriteRequest,
 ) -> MetaResult<WriteOutcome> {
     let target = sidecar_path(image_path);
-    let before = stat_token(vfs, &target);
-
-    let existing = if before.is_some() {
-        Some(vfs.read(&target)?)
-    } else {
-        match alt_sidecar_path(image_path) {
-            Some(alt) if vfs.exists(&alt) => Some(vfs.read(&alt)?),
-            _ => None,
-        }
-    };
-
-    let applied = apply_places(existing.as_deref(), request)?;
-    let created = before.is_none();
-    let written = applied.changed;
+    let seed = load_sidecar_for_write(vfs, image_path)?;
+    let applied = apply_places(seed.existing.as_deref(), request)?;
+    let created = seed.canonical.is_none();
+    let written = applied.changed || created;
 
     if written {
-        if stat_token(vfs, &target) != before {
-            return Err(MetaError::ConcurrentModification { path: target });
-        }
-        vfs.write_atomic(&target, &applied.bytes)?;
+        commit_sidecar_write(vfs, &target, seed.canonical.as_deref(), &applied.bytes)?;
     }
 
     Ok(WriteOutcome {
@@ -520,10 +517,6 @@ fn fill_scalar(
     edit::set_scalar(doc, root, uri, prefix, local, value);
 }
 
-fn stat_token(vfs: &dyn Vfs, path: &str) -> Option<(u64, Option<i64>)> {
-    vfs.stat(path).ok().map(|s| (s.size, s.modified_unix))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -621,14 +614,34 @@ mod tests {
     fn a_second_write_is_a_no_op() {
         let vfs = MemVfs::new();
         vfs.insert("/lib/a.jpg", b"jpeg".to_vec());
-        assert!(write_places(&vfs, "/lib/a.jpg", &req("Places/Italy/Rome"))
-            .unwrap()
-            .written);
+        assert!(
+            write_places(&vfs, "/lib/a.jpg", &req("Places/Italy/Rome"))
+                .unwrap()
+                .written
+        );
         let first = vfs.read("/lib/a.jpg.xmp").unwrap();
-        assert!(!write_places(&vfs, "/lib/a.jpg", &req("Places/Italy/Rome"))
-            .unwrap()
-            .written);
+        assert!(
+            !write_places(&vfs, "/lib/a.jpg", &req("Places/Italy/Rome"))
+                .unwrap()
+                .written
+        );
         assert_eq!(vfs.read("/lib/a.jpg.xmp").unwrap(), first);
+    }
+
+    #[test]
+    fn a_matching_alt_sidecar_still_creates_the_canonical_file() {
+        let vfs = MemVfs::new();
+        vfs.insert("/lib/a.jpg", b"jpeg".to_vec());
+        let seeded = apply_places(None, &req("Places/Italy/Rome")).unwrap().bytes;
+        vfs.insert("/lib/a.xmp", seeded);
+        let outcome = write_places(&vfs, "/lib/a.jpg", &req("Places/Italy/Rome")).unwrap();
+        assert!(outcome.created, "{outcome:?}");
+        assert!(outcome.written, "{outcome:?}");
+        assert!(vfs.exists("/lib/a.jpg.xmp"));
+        assert!(
+            vfs.exists("/lib/a.xmp"),
+            "the alt file is not ours to delete"
+        );
     }
 
     #[test]
@@ -653,9 +666,11 @@ mod tests {
             country_code: Some("FR".into()),
             ..Default::default()
         };
-        assert!(write_places(&vfs, "/lib/eiffel.jpg", &country)
-            .unwrap()
-            .written);
+        assert!(
+            write_places(&vfs, "/lib/eiffel.jpg", &country)
+                .unwrap()
+                .written
+        );
 
         let with_city = PlaceWriteRequest {
             path: "Places/France/Île-de-France/Paris".into(),
@@ -665,15 +680,14 @@ mod tests {
             country_code: Some("FR".into()),
             ..Default::default()
         };
-        assert!(write_places(&vfs, "/lib/eiffel.jpg", &with_city)
-            .unwrap()
-            .written);
+        assert!(
+            write_places(&vfs, "/lib/eiffel.jpg", &with_city)
+                .unwrap()
+                .written
+        );
 
         let view = crate::read_view(&vfs.read("/lib/eiffel.jpg.xmp").unwrap()).unwrap();
-        assert_eq!(
-            view.tags_list,
-            vec!["Places/France/Île-de-France/Paris"]
-        );
+        assert_eq!(view.tags_list, vec!["Places/France/Île-de-France/Paris"]);
         assert!(!view.tags_list.iter().any(|t| t == "Places/France"));
         assert_eq!(view.subject, vec!["Paris"]);
     }
@@ -729,14 +743,8 @@ mod tests {
 
     #[test]
     fn place_from_parts_collapses_duplicate_levels() {
-        let singapore = place_from_parts(
-            Some("Singapore"),
-            None,
-            Some("Singapore"),
-            None,
-            Some("sg"),
-        )
-        .unwrap();
+        let singapore =
+            place_from_parts(Some("Singapore"), None, Some("Singapore"), None, Some("sg")).unwrap();
         assert_eq!(singapore.path, "Places/Singapore");
         assert_eq!(singapore.country_code.as_deref(), Some("SG"));
         assert!(singapore.city.is_none());

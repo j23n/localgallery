@@ -46,9 +46,10 @@ use gallery_meta::MetaError;
 use gallery_ml::cache::{FaceKey, FaceThumb};
 use gallery_ml::engine::iso8601_utc_now;
 use gallery_ml::face::{
-    FaceAssignmentRecord as CoreFaceAssignmentRecord, FaceEngine, FacePhotoRecord as CoreFacePhotoRecord,
-    FaceProgress, FaceRunOptions, FaceRunSummary as CoreFaceRunSummary,
-    ReclusterSummary as CoreReclusterSummary, SidecarWritePlan,
+    FaceAssignmentRecord as CoreFaceAssignmentRecord, FaceEngine,
+    FacePhotoRecord as CoreFacePhotoRecord, FaceProgress, FaceRunOptions,
+    FaceRunSummary as CoreFaceRunSummary, ReclusterSummary as CoreReclusterSummary,
+    SidecarWritePlan,
 };
 use gallery_ml::{ClusterState as CoreClusterState, MlError};
 use gallery_vfs::{StdVfs, VfsError};
@@ -347,9 +348,11 @@ pub struct FaceRunSummary {
     /// Faces that joined an already-**named** cluster and cleared the quality
     /// floor, so their photo's sidecar was written without anybody asking.
     pub faces_auto_tagged: u32,
-    /// Sidecars the auto-tag pass actually rewrote.
+    /// Sidecars this run actually rewrote (per-photo stamp, named write, or
+    /// auto-tag / resync).
     pub sidecars_written: u32,
-    /// Sidecars the auto-tag pass could not write.
+    /// Sidecars this run could not write. Per-photo scan/stamp failures are
+    /// also counted in [`Self::failed`] and left retryable on the queue.
     pub sidecars_failed: u32,
     /// Whether the run stopped early because `cancel` was set.
     pub cancelled: bool,
@@ -656,7 +659,11 @@ impl From<CoreFacePhotoRecord> for FacePhotoRecord {
     fn from(p: CoreFacePhotoRecord) -> Self {
         FacePhotoRecord {
             path: p.path,
-            faces: p.faces.into_iter().map(FaceAssignmentRecord::from).collect(),
+            faces: p
+                .faces
+                .into_iter()
+                .map(FaceAssignmentRecord::from)
+                .collect(),
         }
     }
 }
@@ -962,11 +969,12 @@ impl FaceSession {
         let listener = Arc::clone(&progress);
         let spawned = self.run.start("gallery-faces", move |cancel, running| {
             let reporter = Arc::clone(&listener);
-            let mut guard = FinishGuard::new(running, move |summary| {
-                reporter.on_finished(summary.unwrap_or_else(|| {
-                    FaceRunSummary::failed_with(FaceFailure::Inference, false)
-                }));
-            });
+            let mut guard =
+                FinishGuard::new(running, move |summary| {
+                    reporter.on_finished(summary.unwrap_or_else(|| {
+                        FaceRunSummary::failed_with(FaceFailure::Inference, false)
+                    }));
+                });
             let adapter = ProgressAdapter {
                 inner: Arc::clone(&listener),
             };

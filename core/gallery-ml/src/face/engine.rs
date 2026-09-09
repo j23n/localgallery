@@ -57,7 +57,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use gallery_meta::{write_faces, FaceWriteRequest};
+use gallery_meta::FaceWriteRequest;
 use gallery_vfs::Vfs;
 
 use crate::cache::{CacheDb, ClusterRow, ClusterState, Stats, StoredFace, WorkItem};
@@ -158,11 +158,14 @@ pub struct FaceRunSummary {
     /// Faces that joined an already-**named** cluster and cleared the quality
     /// floor, so their photo's sidecar was written without anybody asking.
     pub faces_auto_tagged: usize,
-    /// Sidecars the auto-tag pass actually rewrote. Lower than
+    /// Sidecars this run actually rewrote (per-photo stamp, mid-run named
+    /// write, or the auto-tag / resync passes). Lower than
     /// [`Self::faces_auto_tagged`] whenever a photo already said the right
     /// thing, or held several newly-matched faces.
     pub sidecars_written: usize,
-    /// Sidecars the auto-tag pass could not write.
+    /// Sidecars this run could not write: a per-photo scan/stamp failure
+    /// (those photos are failed/retryable, not `done`) plus auto-tag / resync
+    /// failures.
     pub sidecars_failed: usize,
     /// Whether the run stopped early because `cancel` was set.
     pub cancelled: bool,
@@ -578,8 +581,8 @@ impl FaceEngine {
 
         // REMOVE AFTER: named-keyword-resync. Delete this block with that module.
         {
-            let plan = self
-                .resync_named_keywords_once(opts.tagged_at.as_deref(), root_prefix.as_deref())?;
+            let plan =
+                self.resync_named_keywords_once(opts.tagged_at.as_deref(), root_prefix.as_deref())?;
             summary.sidecars_written += plan.written.len();
             summary.sidecars_failed += plan.failed.len();
             if !plan.written.is_empty() {
@@ -589,8 +592,8 @@ impl FaceEngine {
 
         // REMOVE AFTER: face-decision-resync. Delete this block with that module.
         {
-            let plan = self
-                .resync_face_decisions_once(opts.tagged_at.as_deref(), root_prefix.as_deref())?;
+            let plan =
+                self.resync_face_decisions_once(opts.tagged_at.as_deref(), root_prefix.as_deref())?;
             summary.sidecars_written += plan.written.len();
             summary.sidecars_failed += plan.failed.len();
             if !plan.written.is_empty() {
@@ -637,11 +640,17 @@ impl FaceEngine {
 
     /// One photo, start to finish. Never panics; every failure becomes an
     /// [`Outcome`].
-    fn process(&self, item: &WorkItem, tagged_at: &str, force: bool, cancel: &AtomicBool) -> Outcome {
+    fn process(
+        &self,
+        item: &WorkItem,
+        tagged_at: &str,
+        force: bool,
+        cancel: &AtomicBool,
+    ) -> Outcome {
         match self.cache.face_begin(&item.path) {
             Ok(true) => {}
             Ok(false) => return Outcome::Lost,
-            Err(_) => return Outcome::Failed,
+            Err(_) => return Outcome::Failed { sidecar: false },
         }
         if !extension_supported(&item.path) {
             let _ = self
@@ -664,7 +673,7 @@ impl FaceEngine {
                 ) {
                     Ok(true) => Outcome::Done(result),
                     Ok(false) => Outcome::Lost,
-                    Err(_) => Outcome::Failed,
+                    Err(_) => Outcome::Failed { sidecar: false },
                 }
             }
             Ok(None) => {
@@ -672,8 +681,13 @@ impl FaceEngine {
                 Outcome::Cancelled
             }
             Err(e) => {
+                let sidecar = matches!(
+                    e.error_code(),
+                    crate::error::ErrorCode::SidecarWrite
+                        | crate::error::ErrorCode::SidecarConflict
+                );
                 let _ = self.cache.face_finish_failed(&item.path, e.error_code());
-                Outcome::Failed
+                Outcome::Failed { sidecar }
             }
         }
     }
@@ -719,7 +733,7 @@ impl FaceEngine {
         if !self.cache.face_set_content_hash(path, &hash)? {
             return Ok(None);
         }
-        let written = self.write_scan_sidecar(path, &hash, tagged_at);
+        let written = self.write_scan_sidecar(path, &hash, tagged_at)?;
         Ok(Some(PhotoFaces {
             hash,
             face_count,
@@ -736,24 +750,25 @@ impl FaceEngine {
     /// confirmed) go out now. Otherwise a partial `CoreFacePack` stamp —
     /// empty regions, names left standing. Clustering still happens after
     /// the workers; newly joined names ride the auto-tag pass at the end.
-    fn write_scan_sidecar(&self, path: &str, hash: &[u8; 32], tagged_at: &str) -> bool {
+    fn write_scan_sidecar(&self, path: &str, hash: &[u8; 32], tagged_at: &str) -> MlResult<bool> {
         let named = self.cache.named_faces_for_hash(hash).unwrap_or_default();
-        let dismissed = self.cache.dismissed_faces_for_hash(hash).unwrap_or_default();
+        let dismissed = self
+            .cache
+            .dismissed_faces_for_hash(hash)
+            .unwrap_or_default();
         if named.is_empty() && dismissed.is_empty() {
             return self.stamp_face_pack(path, tagged_at);
         }
         let request = self.build_request(&named, &dismissed, tagged_at, &SyncScope::under(None));
-        self.write_with_retry(path, &request).unwrap_or(false)
+        self.write_with_retry(path, &request)
     }
 
     /// Leave `CoreFacePack` on every scanned photo so another reader can skip
     /// from the file. Empty + partial: names are not ours to retract.
-    fn stamp_face_pack(&self, path: &str, tagged_at: &str) -> bool {
+    fn stamp_face_pack(&self, path: &str, tagged_at: &str) -> MlResult<bool> {
         let request = FaceWriteRequest::new(Vec::new(), self.face_key.clone(), tagged_at)
             .speaking_partially(Vec::<String>::new());
-        write_faces(self.vfs.as_ref(), path, &request)
-            .map(|outcome| outcome.written)
-            .unwrap_or(false)
+        self.write_with_retry(path, &request)
     }
 
     /// Decode one photo for detection. Same host-HEIC shortcut as tagging.
@@ -767,14 +782,10 @@ impl FaceEngine {
         path: &str,
         probe: &[u8; 32],
     ) -> MlResult<(image::RgbImage, [u8; 32])> {
-        if let Some(rgb) =
-            crate::preprocess::host_heic_decode(self.heic_decoder.as_deref(), path)?
+        if let Some(rgb) = crate::preprocess::host_heic_decode(self.heic_decoder.as_deref(), path)?
         {
             return Ok((
-                crate::preprocess::limit_long_side(
-                    rgb,
-                    crate::preprocess::ANALYSIS_MAX_LONG_SIDE,
-                ),
+                crate::preprocess::limit_long_side(rgb, crate::preprocess::ANALYSIS_MAX_LONG_SIDE),
                 *probe,
             ));
         }
@@ -862,20 +873,17 @@ impl FaceEngine {
         let mut records = Vec::with_capacity(scanned.len());
         for (path, hash) in scanned {
             let faces = self.cache.faces_for_hash(hash)?;
-            let memberships: std::collections::HashMap<u32, i64> = self
-                .cache
-                .cluster_ids_for_hash(hash)?
-                .into_iter()
-                .collect();
+            let memberships: std::collections::HashMap<u32, i64> =
+                self.cache.cluster_ids_for_hash(hash)?.into_iter().collect();
             let mut rec_faces = Vec::with_capacity(faces.len());
             for face in faces {
-                let (cluster_id, seeded) =
-                    if let Some(&(id, seeded)) = placements.get(&(face.content_hash, face.face_idx))
-                    {
-                        (Some(id), Some(seeded))
-                    } else {
-                        (memberships.get(&face.face_idx).copied(), None)
-                    };
+                let (cluster_id, seeded) = if let Some(&(id, seeded)) =
+                    placements.get(&(face.content_hash, face.face_idx))
+                {
+                    (Some(id), Some(seeded))
+                } else {
+                    (memberships.get(&face.face_idx).copied(), None)
+                };
                 rec_faces.push(FaceAssignmentRecord {
                     score: face.score,
                     quality: face.quality,
@@ -1138,7 +1146,13 @@ struct PhotoFaces {
 enum Outcome {
     Done(PhotoFaces),
     Skipped,
-    Failed,
+    /// Photo-level failure. `sidecar` is true when the inference/cache work
+    /// succeeded but the sidecar write did not — those rows stay retryable
+    /// via [`crate::cache::CacheDb::face_finish_failed`] and count toward
+    /// [`FaceRunSummary::sidecars_failed`].
+    Failed {
+        sidecar: bool,
+    },
     Cancelled,
     /// The row was taken from under this worker (a queue reset mid-run).
     Lost,
@@ -1186,9 +1200,12 @@ impl Shared {
                 totals.skipped += 1;
                 true
             }
-            Outcome::Failed => {
+            Outcome::Failed { sidecar } => {
                 totals.processed += 1;
                 totals.failed += 1;
+                if sidecar {
+                    totals.sidecars_failed += 1;
+                }
                 true
             }
             Outcome::Cancelled | Outcome::Lost => false,
@@ -1325,5 +1342,33 @@ mod tests {
         let sum = RunningSum::from_members(&[vec![1.0, 0.0], vec![-1.0, 0.0]], 2);
         assert_eq!(sum.count, 2);
         assert!(sum.centroid().is_none());
+    }
+
+    #[test]
+    fn a_sidecar_write_failure_is_failed_and_counted() {
+        let shared = Shared {
+            done: AtomicUsize::new(0),
+            totals: Mutex::new(FaceRunSummary::default()),
+            reporter: Mutex::new(Reporter::new()),
+            scanned_photos: Mutex::new(Vec::new()),
+        };
+        let item = crate::cache::WorkItem {
+            path: "/a.jpg".into(),
+            content_hash: None,
+            state: crate::cache::WorkState::Pending,
+            model_pack: None,
+            error_code: crate::error::ErrorCode::None,
+            retry_count: 0,
+        };
+        assert!(shared.absorb(&item, Outcome::Failed { sidecar: true }));
+        let totals = shared.take_totals();
+        assert_eq!(totals.processed, 1);
+        assert_eq!(totals.failed, 1);
+        assert_eq!(totals.sidecars_failed, 1);
+
+        assert!(shared.absorb(&item, Outcome::Failed { sidecar: false }));
+        let totals = shared.take_totals();
+        assert_eq!(totals.failed, 2);
+        assert_eq!(totals.sidecars_failed, 1);
     }
 }

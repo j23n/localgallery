@@ -213,10 +213,17 @@ fn the_app_reads_our_tags_appended_to_a_photo_tools_sidecar() {
         .bytes;
     let after = parse_xmp_bytes(&bytes);
 
-    // Everything it saw before is still there, plus ours.
+    // Everything it saw before is still there, plus ours — including
+    // photo-tools Objects/Scenes, which we must not claim or retract.
     for tag in &before.raw_tags {
         assert!(after.raw_tags.contains(tag), "lost {tag}");
     }
+    assert!(after
+        .raw_tags
+        .contains(&"Objects/Structure/Balustrade".to_string()));
+    assert!(after
+        .raw_tags
+        .contains(&"Scenes/Urban/Building".to_string()));
     assert!(after.raw_tags.contains(&"Objects/Animal/Dog".to_string()));
     assert_eq!(after.country_code, before.country_code);
 }

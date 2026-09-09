@@ -725,7 +725,11 @@ fn merging_unnamed_groups_does_not_touch_sidecars() {
         .unwrap();
     assert_eq!(plan.total(), 0, "{plan:?}");
     assert!(!plan.touched_disk(), "{plan:?}");
-    assert_eq!(f.sidecar(BRIGHT), before, "an unnamed merge rewrote a sidecar");
+    assert_eq!(
+        f.sidecar(BRIGHT),
+        before,
+        "an unnamed merge rewrote a sidecar"
+    );
 }
 
 /// Three groups in one call: the pairwise loop this replaces would have
@@ -754,7 +758,11 @@ fn merging_many_clusters_moves_every_member_once() {
         .engine
         .merge_clusters_many(bulk, &[mid, extra], Some(STAMP), None)
         .unwrap();
-    assert_eq!(plan.total(), 0, "unnamed n-way still walked sidecars: {plan:?}");
+    assert_eq!(
+        plan.total(),
+        0,
+        "unnamed n-way still walked sidecars: {plan:?}"
+    );
 
     assert_eq!(f.members(bulk), whole);
     assert!(f.engine.cache().cluster(mid).unwrap().is_none());
@@ -1504,14 +1512,21 @@ fn named_keyword_resync_writes_a_missing_keyword_once() {
     assert!(first.failed.is_empty(), "{:?}", first.failed);
     assert_eq!(f.people(&target), vec!["People/Ada"]);
     let view = read_view(&f.sidecar(&target).unwrap()).unwrap();
-    assert!(view.regions.is_empty(), "the box must stay withheld: {view:?}");
+    assert!(
+        view.regions.is_empty(),
+        "the box must stay withheld: {view:?}"
+    );
 
     std::fs::remove_file(f.dir.path().join(format!("{target}.xmp"))).unwrap();
     let second = f
         .engine
         .resync_named_keywords_once(Some(STAMP), None)
         .unwrap();
-    assert_eq!(second.total(), 0, "a second pass must not touch disk: {second:?}");
+    assert_eq!(
+        second.total(),
+        0,
+        "a second pass must not touch disk: {second:?}"
+    );
     assert!(f.sidecar(&target).is_none(), "the one-shot rewrote a file");
 }
 
@@ -1587,5 +1602,88 @@ fn resync_writes_rejected_decisions_for_cache_only_dismissals() {
         second.total(),
         0,
         "a second pass must not touch disk: {second:?}"
+    );
+}
+
+/// A VFS that can read photos but refuses every sidecar write.
+struct SidecarWriteFailVfs {
+    inner: StdVfs,
+}
+
+impl gallery_vfs::Vfs for SidecarWriteFailVfs {
+    fn open(&self, path: &str) -> gallery_vfs::VfsResult<Box<dyn gallery_vfs::ReadSeek + Send>> {
+        self.inner.open(path)
+    }
+    fn stat(&self, path: &str) -> gallery_vfs::VfsResult<gallery_vfs::Stat> {
+        self.inner.stat(path)
+    }
+    fn list(&self, dir: &str) -> gallery_vfs::VfsResult<Vec<gallery_vfs::Entry>> {
+        self.inner.list(dir)
+    }
+    fn stat_entry(&self, path: &str) -> gallery_vfs::VfsResult<gallery_vfs::Entry> {
+        self.inner.stat_entry(path)
+    }
+    fn write_atomic(&self, path: &str, bytes: &[u8]) -> gallery_vfs::VfsResult<()> {
+        if path.ends_with(".xmp") {
+            return Err(gallery_vfs::VfsError::PermissionDenied {
+                path: path.to_string(),
+            });
+        }
+        self.inner.write_atomic(path, bytes)
+    }
+    fn exists(&self, path: &str) -> bool {
+        self.inner.exists(path)
+    }
+}
+
+#[test]
+fn a_sidecar_write_error_fails_the_queue_row_and_counts_sidecars_failed() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in PHOTOS {
+        std::fs::write(dir.path().join(name), fixture(name)).unwrap();
+    }
+    let engine = FaceEngine::open(
+        dir.path().join("gallery-cache.sqlite"),
+        face_pack_dir(),
+        Arc::new(SidecarWriteFailVfs { inner: StdVfs }),
+    )
+    .expect("face pack must load");
+    let paths: Vec<String> = PHOTOS
+        .iter()
+        .map(|n| dir.path().join(n).to_string_lossy().into_owned())
+        .collect();
+    engine.enqueue(&paths).unwrap();
+
+    let summary = engine
+        .run_with_options(&NoFaceProgress, &AtomicBool::new(false), &options())
+        .unwrap();
+    assert!(
+        summary.failed >= 1,
+        "sidecar write errors must fail photos, not mark them done: {summary:?}"
+    );
+    assert!(
+        summary.sidecars_failed >= 1,
+        "per-photo sidecar failures must be visible: {summary:?}"
+    );
+    assert_eq!(
+        summary.sidecars_written, 0,
+        "no sidecar should have landed: {summary:?}"
+    );
+
+    let stats = engine.stats().unwrap();
+    assert_eq!(
+        stats.done, 0,
+        "a sidecar write failure must not settle the queue row: {stats:?}"
+    );
+    assert!(
+        stats.pending > 0,
+        "the failure should remain retryable: {stats:?}"
+    );
+    assert!(
+        !std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().ends_with(".xmp")),
+        "a refused write must not leave a sidecar"
     );
 }

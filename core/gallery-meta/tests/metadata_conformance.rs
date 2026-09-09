@@ -282,10 +282,24 @@ fn the_assets_are_where_the_runner_looks_for_them() {
         assert!(path.is_file(), "missing fixture asset {}", path.display());
     }
     let vfs = StdVfs::new();
-    let loaded = read_image_metadata(&vfs, assets.join("xmp/tagslist.jpg").to_str().unwrap());
+    // Sidecar-only contract: embedded TagsList on `xmp/tagslist.jpg` is
+    // ignored. Probe a photo whose tags live in the sidecar, which is what
+    // the reader actually publishes.
+    let loaded = read_image_metadata(&vfs, assets.join("sidecar/only.jpg").to_str().unwrap());
     assert_eq!(
-        loaded.hierarchical_tags.len(),
-        3,
-        "the runner is reading empty files"
+        loaded
+            .hierarchical_tags
+            .iter()
+            .map(|t| t.full_path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["People/Dana", "Scenes/Beach"],
+        "the runner is not seeing sidecar tags"
+    );
+    let embedded_only =
+        read_image_metadata(&vfs, assets.join("xmp/tagslist.jpg").to_str().unwrap());
+    assert!(
+        embedded_only.hierarchical_tags.is_empty(),
+        "embedded TagsList must not leak into the sidecar-only reader: {:?}",
+        embedded_only.hierarchical_tags
     );
 }

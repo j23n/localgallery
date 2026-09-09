@@ -59,9 +59,9 @@ use crate::model::SidecarView;
 use crate::read::view_of;
 use crate::regions::{self, parse_decision, Area, FaceDecision, FaceRegionWrite, RegionClaim};
 use crate::schema::*;
-use crate::sidecar::{alt_sidecar_path, sidecar_path};
+use crate::sidecar::sidecar_path;
 use crate::tags::{leaf_of, nfc, nfc_lower, normalize_person, person_tag, to_lr_path};
-use crate::write::WriteOutcome;
+use crate::write::{commit_sidecar_write, load_sidecar_for_write, WriteOutcome};
 use crate::xml::{parse, serialize, Document};
 
 /// How much of its own past work a [`FaceWriteRequest`] is speaking for.
@@ -257,34 +257,21 @@ pub fn apply_faces(
 ///
 /// Same sidecar selection, same atomicity and the same
 /// [`MetaError::ConcurrentModification`] retry contract as
-/// [`crate::write_tags`] — see that function for why the stat token is what it
-/// is. Nothing is written when the sidecar already says exactly this.
+/// [`crate::write_tags`]. Nothing is written when the canonical sidecar
+/// already says exactly this.
 pub fn write_faces(
     vfs: &dyn Vfs,
     image_path: &str,
     request: &FaceWriteRequest,
 ) -> MetaResult<WriteOutcome> {
     let target = sidecar_path(image_path);
-    let before = stat_token(vfs, &target);
-
-    let existing = if before.is_some() {
-        Some(vfs.read(&target)?)
-    } else {
-        match alt_sidecar_path(image_path) {
-            Some(alt) if vfs.exists(&alt) => Some(vfs.read(&alt)?),
-            _ => None,
-        }
-    };
-
-    let applied = apply_faces(existing.as_deref(), request)?;
-    let created = before.is_none();
+    let seed = load_sidecar_for_write(vfs, image_path)?;
+    let applied = apply_faces(seed.existing.as_deref(), request)?;
+    let created = seed.canonical.is_none();
     let written = applied.changed || created;
 
     if written {
-        if stat_token(vfs, &target) != before {
-            return Err(MetaError::ConcurrentModification { path: target });
-        }
-        vfs.write_atomic(&target, &applied.bytes)?;
+        commit_sidecar_write(vfs, &target, seed.canonical.as_deref(), &applied.bytes)?;
     }
 
     Ok(WriteOutcome {
@@ -295,10 +282,6 @@ pub fn write_faces(
         removed: applied.people_removed,
         owned: applied.people_owned,
     })
-}
-
-fn stat_token(vfs: &dyn Vfs, path: &str) -> Option<(u64, Option<i64>)> {
-    vfs.stat(path).ok().map(|s| (s.size, s.modified_unix))
 }
 
 // ---------------------------------------------------------------------------
@@ -355,9 +338,7 @@ impl NormalizedRequest {
                 for decision in raw {
                     out.push(normalize_decision(decision)?);
                 }
-                out.sort_by(|a, b| {
-                    a.to_claim().cmp(&b.to_claim())
-                });
+                out.sort_by(|a, b| a.to_claim().cmp(&b.to_claim()));
                 out.dedup_by(|a, b| a == b);
                 Some(out)
             }
@@ -1051,7 +1032,10 @@ mod tests {
         assert_eq!(view.regions[0].kind.as_deref(), Some("Face"));
         assert_eq!(view.core.people, vec!["People/Alice"]);
         assert_eq!(view.core.face_pack.as_deref(), Some("buffalo_sc-2026.1"));
-        assert_eq!(view.core.face_tagged_at.as_deref(), Some("2026-08-03T10:00:00Z"));
+        assert_eq!(
+            view.core.face_tagged_at.as_deref(),
+            Some("2026-08-03T10:00:00Z")
+        );
         assert_eq!(view.core.regions.len(), 1);
         assert!(out.created && out.changed);
     }
@@ -1612,12 +1596,12 @@ mod tests {
     fn partial_authority_leaves_a_name_it_does_not_speak_for() {
         let alice = apply_faces(
             None,
-            &request(vec![region("Alice", 0.4, 0.35, 0.12, 0.16)]).with_decisions(
-                [FaceDecision::Named {
+            &request(vec![region("Alice", 0.4, 0.35, 0.12, 0.16)]).with_decisions([
+                FaceDecision::Named {
                     area: Area::new(0.4, 0.35, 0.12, 0.16),
                     name: "Alice".into(),
-                }],
-            ),
+                },
+            ]),
         )
         .unwrap()
         .bytes;
@@ -1631,7 +1615,11 @@ mod tests {
         let view = read_view(&bob_only.bytes).unwrap();
         assert_eq!(view.tags_list, vec!["People/Alice"]);
         assert_eq!(view.core.decisions.len(), 2, "{:?}", view.core.decisions);
-        assert!(view.core.decisions.iter().any(|e| e.contains("named Alice")));
+        assert!(view
+            .core
+            .decisions
+            .iter()
+            .any(|e| e.contains("named Alice")));
         assert!(view.core.decisions.iter().any(|e| e.ends_with(" rejected")));
     }
 }

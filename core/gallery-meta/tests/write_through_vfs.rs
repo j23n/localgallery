@@ -5,9 +5,10 @@ mod common;
 
 use common::fixture;
 use gallery_meta::{
-    read_view, write_faces, write_tags, Area, FaceRegionWrite, FaceWriteRequest, TagWriteRequest,
+    read_view, write_faces, write_places, write_tags, Area, FaceRegionWrite, FaceWriteRequest,
+    PlaceWriteRequest, TagWriteRequest,
 };
-use gallery_vfs::{MemVfs, StdVfs, Vfs};
+use gallery_vfs::{MemVfs, StdVfs, Vfs, VfsError};
 
 fn request(tags: &[&str]) -> TagWriteRequest {
     TagWriteRequest::new(
@@ -414,4 +415,159 @@ fn the_two_halves_of_the_core_write_the_same_sidecar_without_fighting() {
     assert_eq!(view.core.people, vec!["People/Alice"]);
     assert_eq!(view.tags_list, vec!["Objects/Animal/Dog", "People/Alice"]);
     assert_eq!(view.subject, vec!["Dog", "Alice"]);
+}
+
+/// Same size and (on MemVfs) the same mtime as the original — the window a
+/// size/mtime token cannot see. The content-identity check must still refuse.
+#[test]
+fn a_same_size_intrusion_is_detected_by_content_identity() {
+    let original = fixture("minimal.jpg.xmp");
+    let mut same_size = original.clone();
+    let pos = same_size
+        .windows(b"xpacket".len())
+        .position(|w| w == b"xpacket")
+        .expect("fixture has an xpacket marker");
+    same_size[pos] = b'X';
+    assert_eq!(
+        same_size.len(),
+        original.len(),
+        "the intrusion must not change size"
+    );
+    assert_ne!(same_size, original);
+
+    let vfs = RacyVfs::new("/lib/a.jpg.xmp", same_size.clone());
+    vfs.inner.insert("/lib/a.jpg", b"a".to_vec());
+    vfs.inner.insert("/lib/a.jpg.xmp", original);
+
+    let err = write_tags(&vfs, "/lib/a.jpg", &request(&["Objects/Animal/Dog"])).unwrap_err();
+    assert!(
+        matches!(err, gallery_meta::MetaError::ConcurrentModification { .. }),
+        "{err:?}"
+    );
+    assert_eq!(vfs.inner.read("/lib/a.jpg.xmp").unwrap(), same_size);
+}
+
+/// A sidecar we cannot read is not a missing sidecar. Synthesising a new
+/// packet over it would destroy the unreadable file the moment permissions
+/// came back.
+#[test]
+fn an_inaccessible_canonical_sidecar_is_not_treated_as_absent() {
+    let vfs = DeniedVfs {
+        inner: MemVfs::new(),
+        denied: "/lib/a.jpg.xmp".into(),
+    };
+    vfs.inner.insert("/lib/a.jpg", b"a".to_vec());
+    vfs.inner
+        .insert("/lib/a.jpg.xmp", fixture("phototools.jpg.xmp"));
+
+    let err = write_tags(&vfs, "/lib/a.jpg", &request(&["Objects/Animal/Dog"])).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            gallery_meta::MetaError::Vfs(VfsError::PermissionDenied { .. })
+        ),
+        "{err:?}"
+    );
+    assert_eq!(
+        vfs.inner.read("/lib/a.jpg.xmp").unwrap(),
+        fixture("phototools.jpg.xmp"),
+        "the unreadable sidecar was replaced"
+    );
+}
+
+#[test]
+fn places_seeds_the_canonical_sidecar_from_a_matching_alt() {
+    let vfs = MemVfs::new();
+    vfs.insert("/lib/a.jpg", b"a".to_vec());
+    let already = gallery_meta::apply_places(
+        None,
+        &PlaceWriteRequest {
+            path: "Places/Italy/Rome".into(),
+            country: Some("Italy".into()),
+            city: Some("Rome".into()),
+            country_code: Some("IT".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .bytes;
+    vfs.insert("/lib/a.xmp", already.clone());
+
+    let outcome = write_places(
+        &vfs,
+        "/lib/a.jpg",
+        &PlaceWriteRequest {
+            path: "Places/Italy/Rome".into(),
+            country: Some("Italy".into()),
+            city: Some("Rome".into()),
+            country_code: Some("IT".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        outcome.created && outcome.written,
+        "a matching alt must still produce the canonical file: {outcome:?}"
+    );
+    assert_eq!(outcome.sidecar_path, "/lib/a.jpg.xmp");
+    assert!(vfs.exists("/lib/a.jpg.xmp"));
+    assert_eq!(vfs.read("/lib/a.xmp").unwrap(), already);
+}
+
+/// Forwards to an inner Vfs except `denied`, which is always permission-denied.
+struct DeniedVfs {
+    inner: MemVfs,
+    denied: String,
+}
+
+impl Vfs for DeniedVfs {
+    fn open(&self, path: &str) -> gallery_vfs::VfsResult<Box<dyn gallery_vfs::ReadSeek + Send>> {
+        if path == self.denied {
+            return Err(VfsError::PermissionDenied {
+                path: path.to_string(),
+            });
+        }
+        self.inner.open(path)
+    }
+    fn stat(&self, path: &str) -> gallery_vfs::VfsResult<gallery_vfs::Stat> {
+        if path == self.denied {
+            return Err(VfsError::PermissionDenied {
+                path: path.to_string(),
+            });
+        }
+        self.inner.stat(path)
+    }
+    fn list(&self, dir: &str) -> gallery_vfs::VfsResult<Vec<gallery_vfs::Entry>> {
+        self.inner.list(dir)
+    }
+    fn stat_entry(&self, path: &str) -> gallery_vfs::VfsResult<gallery_vfs::Entry> {
+        if path == self.denied {
+            return Err(VfsError::PermissionDenied {
+                path: path.to_string(),
+            });
+        }
+        self.inner.stat_entry(path)
+    }
+    fn write_atomic(&self, path: &str, bytes: &[u8]) -> gallery_vfs::VfsResult<()> {
+        if path == self.denied {
+            return Err(VfsError::PermissionDenied {
+                path: path.to_string(),
+            });
+        }
+        self.inner.write_atomic(path, bytes)
+    }
+    fn exists(&self, path: &str) -> bool {
+        if path == self.denied {
+            return true;
+        }
+        self.inner.exists(path)
+    }
+    fn read(&self, path: &str) -> gallery_vfs::VfsResult<Vec<u8>> {
+        if path == self.denied {
+            return Err(VfsError::PermissionDenied {
+                path: path.to_string(),
+            });
+        }
+        self.inner.read(path)
+    }
 }

@@ -1,17 +1,14 @@
-//! `SearchIndex` + `TagIndex`, ported (Phase 4 step 3).
+//! Search and tag indexes over a photo table.
 //!
-//! Both Swift types are pure functions of `allPhotos`, which makes them the
-//! easiest part of the phase to port and the easiest to get quietly wrong: the
-//! sort tiebreak, the corpus join and Swift's canonical-equivalence substring
-//! matching are all invisible until a user notices the grid reshuffled or an
-//! accented name stopped being findable.
-//! `core/fixtures/memories-conformance/{search_index,tag_index}.json` pin all
-//! three; `tests/index_conformance.rs` runs this code against them.
+//! Pure functions of `allPhotos`. The sort tiebreak, the corpus join,
+//! and Swift's canonical-equivalence substring matching are easy to
+//! get quietly wrong. Fixtures
+//! `core/fixtures/memories-conformance/{search_index,tag_index}.json`
+//! pin all three; `tests/index_conformance.rs` runs this code against
+//! them.
 //!
-//! One owner, one photo table: [`LibraryIndex`] holds the photos and every
-//! index is a list of **indices** into it. That is the Phase-4-sanctioned
-//! improvement over the Swift `TagIndex`, which copies a whole `PhotoFile`
-//! into every bucket a photo is credited to.
+//! One owner, one photo table: [`LibraryIndex`] holds the photos and
+//! every index is a list of **indices** into it.
 
 #![forbid(unsafe_code)]
 

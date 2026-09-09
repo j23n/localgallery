@@ -4,27 +4,24 @@
 //! `setup_scaffolding!` names the generated Swift module, so the bindings land
 //! as `GalleryCore.swift` / `GalleryCoreFFI.h` — see `scripts/build_core.sh`.
 //!
-//! FFI rules (from `_plans/00-rust-core-overview.md`): coarse-grained calls
-//! only, typed error enums, long work on core-owned threads.
+//! FFI rules: coarse-grained calls only, typed error enums, long work
+//! on core-owned threads.
 //!
 //! Surface:
 //!
-//! * Phase 0 — [`core_version`], [`stable_uuid`].
-//! * Phase 1 — [`tagging`]: [`TaggingSession`] and its progress listener.
-//! * Phase 2 — [`faces`]: [`FaceSession`], its progress listener, and the
-//!   cluster-review calls (`clusters` / `cluster_faces` / `name_cluster` /
-//!   `rename_person` / `unname_cluster` / `ignore_cluster` / `recluster`).
-//! * Phase 3 — [`scanner`]: [`ScannerSession`], the [`ProviderProbe`] Swift
-//!   implements, the snapshot IO, and the metadata read path that replaced
-//!   `MetadataReader`. Unlike the two sessions above it is request/response —
-//!   see that module's docs for why it is still an object.
-//! * Phase 4 — [`library`]: [`LibraryIndex`] (the photo table, the sorted
-//!   order, the search corpus and the tag buckets) plus the memory engine as
-//!   free functions over an inputs snapshot, with [`MemoryGenerator`] carrying
-//!   the one piece of state a generation needs — its cancel flag.
+//! * [`core_version`], [`stable_uuid`].
+//! * [`tagging`]: [`TaggingSession`] and its progress listener.
+//! * [`faces`]: [`FaceSession`], cluster review, name / rename / merge / split.
+//! * [`scanner`]: [`ScannerSession`], [`ProviderProbe`], snapshot IO,
+//!   metadata reads. Request/response — see that module for why it is
+//!   still an object.
+//! * [`library`]: [`LibraryIndex`] plus the memory engine as free
+//!   functions over an inputs snapshot; [`MemoryGenerator`] holds the
+//!   cancel flag.
+//! * [`places`]: Nominatim lookup and Places sidecar writes.
 //!
-//! The two sessions are siblings sharing one cache file: [`support`] holds the
-//! run-thread mechanics both are built on.
+//! Tagging and face sessions share one cache file: [`support`] holds
+//! the run-thread mechanics both are built on.
 
 uniffi::setup_scaffolding!("GalleryCore");
 

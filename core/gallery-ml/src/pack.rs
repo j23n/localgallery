@@ -1,8 +1,8 @@
 //! Model-pack v2: the on-disk format, its loader, and its hash verification.
 //!
-//! A pack is a directory. Swift downloads it (networking stays out of Rust,
-//! overview §"Model packs") into
-//! `Application Support/ModelPacks/<version>/` and hands the core the path;
+//! A pack is a directory. The host stages it (networking stays out of
+//! Rust) into an Application Support / XDG directory and hands the core
+//! the path;
 //! the core verifies every declared SHA-256 *before* loading anything, because
 //! "same pinned model weights, SHA-256-verified" is the first clause of the
 //! determinism doctrine.
@@ -81,7 +81,7 @@
 //!
 //! # `faces` (schema 2, optional)
 //!
-//! Phase 2 added two more models to the same pack. They are **optional**: a
+//! Face models on the same pack are **optional**: a
 //! pack that ships only the tagging encoder is still a valid schema-2 pack, and
 //! [`crate::face::FaceEngine`] simply refuses to open against it. That is the
 //! whole reason the block is a separate `Option` rather than three more

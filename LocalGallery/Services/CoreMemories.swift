@@ -10,7 +10,7 @@ import os
 ///
 /// * **Running off the main actor.** Both entry points are `nonisolated` and
 ///   hop to a detached task, so the FFI never runs on the main thread —
-///   `_plans/06-performance-baseline.md` Finding 3, which measured the
+///   docs/architecture.md, which measured the
 ///   scheduled-memories pass at ~9 s of main-thread stall.
 /// * **Forwarding cancellation.** `Task.detached` swallows the caller's
 ///   cancellation, so `generate` wires it explicitly through

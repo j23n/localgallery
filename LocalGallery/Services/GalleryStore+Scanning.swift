@@ -316,7 +316,7 @@ extension GalleryStore {
         // no manifest at all. That last case is the one that matters: without
         // the explicit save below, the "no changes" branch would skip
         // `saveCache()`, the manifest would never reach disk, and every launch
-        // would go on re-probing every sidecar — `_plans/06` Finding 2 fixed
+        // would go on re-probing every sidecar — docs/adr/0002 fixed
         // in memory only.
         let previousManifest = self.lastSidecarManifest
         let manifestChanged = previousManifest != result.sidecarManifest

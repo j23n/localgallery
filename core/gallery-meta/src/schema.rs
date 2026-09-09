@@ -22,8 +22,8 @@ pub const NS_IPTC_CORE: &str = "http://iptc.org/std/Iptc4xmpCore/1.0/xmlns/";
 pub const NS_PHOTOSHOP: &str = "http://ns.adobe.com/photoshop/1.0/";
 /// `mwg-rs:` — Metadata Working Group face regions (§1.5).
 ///
-/// Read-only in Phase 1; Phase 2 makes the core the face-detector agent the
-/// schema reserves this root for, so [`crate::faces`] now writes it.
+/// [`crate::faces`] writes this root as the face-detector agent the
+/// schema reserves.
 pub const NS_MWG_RS: &str = "http://www.metadataworkinggroup.com/schemas/regions/";
 /// `stArea:` — the area struct inside an MWG region.
 pub const NS_ST_AREA: &str = "http://ns.adobe.com/xmp/sType/Area#";
@@ -81,8 +81,7 @@ pub const PROP_TAGS_LIST: &str = "TagsList";
 pub const PROP_HIERARCHICAL_SUBJECT: &str = "hierarchicalSubject";
 /// `Iptc4xmpExt:PersonInImage` — the projection of `People/*` leaves (§1.1).
 ///
-/// Read-only in Phase 1. [`crate::faces`] rewrites it from the file's
-/// `People/*` keywords, the way photo-tools does.
+/// [`crate::faces`] rewrites it from the file's `People/*` keywords.
 pub const PROP_PERSON_IN_IMAGE: &str = "PersonInImage";
 /// `mwg-rs:Regions` — the region container element (exiftool calls the whole
 /// struct `RegionInfo`).
@@ -134,8 +133,7 @@ pub const PROP_CLIP_TIMESTAMP: &str = "CLIPTimestamp";
 
 /// Sentinel: which agent wrote the tags recorded in [`PROP_CORE_TAGS`].
 ///
-/// New field in the photo-tools namespace; needs a §5 version entry in the
-/// schema doc before Phase 1 ships.
+/// New field in the photo-tools namespace.
 pub const PROP_CORE_AGENT: &str = "CoreAgent";
 /// Sentinel: model-pack version that produced the recorded tags.
 pub const PROP_CORE_MODEL_PACK: &str = "CoreModelPack";

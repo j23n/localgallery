@@ -35,7 +35,7 @@ pub struct Envelope<T> {
 
 /// The persisted result of the last scan.
 ///
-/// `sidecar_manifest` is the field `_plans/06` Finding 2 adds: **optional, no
+/// `sidecar_manifest` is the field docs/adr/0002 adds: **optional, no
 /// version bump**. A v20 file written before it existed decodes with `None`,
 /// pays one legacy re-probe, and persists it from then on. Bumping instead
 /// would force a full rescan on every install to save a single pass.

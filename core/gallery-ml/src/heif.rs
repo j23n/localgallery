@@ -1,30 +1,19 @@
 //! HEIC/HEIF decode, behind [`crate::preprocess::ImageDecoder`].
 //!
-//! iPhones shoot HEIC by default, so on a library shot on a modern phone this
-//! is not an edge case — it is most of the library, and until Phase 6 all of it
-//! was recorded [`ErrorCode::UnsupportedFormat`] and skipped.
+//! iPhones shoot HEIC by default, so on a modern-phone library this is
+//! most of the stills.
 //!
-//! # Why pure Rust, when the plan said libheif
+//! # Software path (`heif-oxide` + `rust_h265`)
 //!
-//! `_plans/08` recommended vendoring libheif + libde265 and recorded Option C
-//! (pure Rust) as "no production-quality pure-Rust HEVC decoder … revisit if
-//! that changes". It changed. `heif-oxide` (container) over `rust_h265`
-//! (HEVC Main/Main10 4:2:0) decodes what this pipeline needs, and taking it
-//! costs nothing the plan was trying to buy:
+//! HEVC Main/Main10 4:2:0, no C/CMake, MIT OR Apache-2.0 (not LGPL
+//! libheif/libde265). iOS analysis uses ImageIO instead (see
+//! [`crate::preprocess::HostHeicDecoder`]); this backend is what
+//! `cargo test` and Linux run.
 //!
-//! - **Cross-compile.** No build script, no C, no CMake. Both iOS slices build
-//!   from `cargo build --target …` with nothing installed. That was the plan's
-//!   "riskiest hour" and it is now zero hours; `build_core.sh` is untouched.
-//! - **Licence.** MIT OR Apache-2.0, against LGPL-3.0 for libheif and libde265.
-//!   The plan flagged LGPL static linking as a documented future App Store
-//!   constraint; there is now no constraint to document.
-//! - **Doctrine.** Zero `unsafe` in either crate, no SIMD dispatch, no platform
-//!   variance — *more* deterministic than the JPEG path, whose resize kernel is
-//!   already architecture-selected. Verified: 25 decodes of each fixture are
-//!   bit-identical, tiles are decoded on `std::thread::scope` into disjoint
+//! - **Cross-compile.** Both iOS slices build from `cargo build --target …`.
+//! - **Determinism.** No SIMD dispatch. 25 decodes of each fixture are
+//!   bit-identical; tiles decode on `std::thread::scope` into disjoint
 //!   regions.
-//! - **Reach.** Linux and Android get a decoder, which Option B (platform
-//!   decode through `CGImageSource`) would have denied them.
 //!
 //! Checked against ImageIO on real files before adopting: an 8-bit 1920×1080
 //! HEIC, a grid-tiled 4000×2250, and an `irot`-rotated one all land within
@@ -46,9 +35,8 @@
 //! 2. **4:2:0 only.** `rust_h265` decodes Main and Main 10, 4:2:0. Every iPhone
 //!    photo is 4:2:0; a 4:4:4 file (macOS's own `DefaultDesktop.heic`, for
 //!    instance) becomes a `skipped` row stamped with the current
-//!    [`crate::preprocess::DECODER_VERSION`] — which is the mechanism
-//!    `_plans/08` designed for exactly this, and it re-opens by itself the day
-//!    a wider decoder ships.
+//!    [`crate::preprocess::DECODER_VERSION`] — a wider decoder bumps that
+//!    constant and re-opens those rows.
 //! 3. **Maturity.** Both crates are young. That is what
 //!    [`crate::preprocess::ImageDecoder`] is for: swapping the backend is an
 //!    `impl` and a `DECODER_VERSION` bump, and the bump re-opens the skipped

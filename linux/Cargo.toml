@@ -3,7 +3,7 @@ name = "localgallery"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97"
-license = "MIT"
+license = "MPL-2.0"
 publish = false
 description = "LocalGallery Linux UI — GNOME laptop and Mecha Comet"
 

@@ -1,4 +1,4 @@
-//! Phase 4's half of the boundary: the library indexes and the memory engine.
+//! Library indexes and the memory engine.
 //!
 //! Two shapes, because the two halves are genuinely different:
 //!
@@ -15,7 +15,7 @@
 //! # Payload discipline
 //!
 //! Photos cross **into** the core once per rebuild, as [`ScanPhoto`] — the
-//! record Phase 3 already marshals `PhotoFile` through, so there is one photo
+//! record the scanner already marshals `PhotoFile` through, so there is one photo
 //! wire format, not two. Photos cross **out** as ids: every list this module
 //! returns (`sorted_photo_ids`, `search`, `photo_ids_for_tag`,
 //! `MemoryRecord::photo_ids`) is a list of `StableId` strings, because the app
@@ -26,7 +26,7 @@
 //!
 //! Everything here is synchronous and does no locking beyond the index's own
 //! `RwLock`. The requirement that these calls run **off the main thread**
-//! (`_plans/06-performance-baseline.md` Finding 3) is the app's to keep, and
+//! (docs/architecture.md) is the app's to keep, and
 //! `CoreLibraryIndex` / `CoreMemories` on the Swift side are where it is kept.
 //! Nothing in this module blocks, so a caller that gets it wrong is slow rather
 //! than deadlocked — which is precisely why the app also carries a generation
@@ -966,7 +966,7 @@ mod tests {
         assert!(!hidden.iter().any(|s| s.memory.id == "onThisDay-2024-06-11"));
     }
 
-    /// `_plans/10`'s exit criterion across the boundary: what the widget
+    /// the local-day memory-id rule's exit criterion across the boundary: what the widget
     /// pre-publishes for a day is what the rail generates when that day
     /// arrives, in a zone ahead of GMT. Tokyo's horizon used to name the
     /// previous GMT day and the deep link resolved to nothing.

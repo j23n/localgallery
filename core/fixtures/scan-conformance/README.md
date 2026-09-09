@@ -1,17 +1,9 @@
-# Phase-3 scanner / metadata conformance fixtures
+# Scanner / metadata conformance fixtures
 
-The spec for `_plans/04-phase-3-scanner-metadata.md` §1. Everything here was
-generated from the **shipping Swift** `MetadataReader`, `FolderScanner` and
-`LibrarySnapshot` before any of them was ported, so the Rust implementation
-could be checked against something other than opinion. Where the Swift
-behaviour was buggy, the bug is pinned — fixing it is a separate, deliberate
-change with its own version bump.
-
-Since step 5 those three Swift types are **gone**: the app runs on the core
-scanner, and the Swift-side harnesses now drive `CoreScanner` /
-`GalleryCore.readImageMetadata` with their assertions unchanged. That is the
-arrangement these files exist for — the same expectations, produced by a
-different implementation, reached through the path the app actually uses.
+Regression pins for `gallery-meta` and `gallery-scan`. The iOS harness
+drives `CoreScanner` / `GalleryCore.readImageMetadata`. Where a
+behaviour is buggy, the bug is pinned — fixing it is a separate,
+deliberate change.
 
 One copy in the repo, two readers:
 
@@ -114,7 +106,7 @@ library it encodes came out of a real `FolderScanner.scan`, with the temp-dir
 paths rebased onto `/fixtures/PhotoLibrary` and a few photos decorated so both
 encoder branches (optional present / absent) appear.
 
-What the Rust port must reproduce:
+What a save/load must reproduce:
 
 | aspect | contract |
 |---|---|
@@ -141,12 +133,10 @@ Documented, legal loss on a save/load round trip:
 
 ### `sidecarManifest` — landed, without a version bump
 
-`_plans/06-performance-baseline.md` Finding 2 added
-`sidecarManifest: [SidecarCandidate]?` to `LibrarySnapshot` as an **optional**
-field with **no version bump**: a bump would have forced a full rescan on every
-install to save a single pass. The fixture keeps its `v20` name because the
-version genuinely did not change, and it now carries one row so the field is
-exercised rather than merely present.
+`sidecarManifest: [SidecarCandidate]?` is an **optional** field on
+snapshot v20 with **no version bump** ([ADR 0002](../../../docs/adr/0002-scan-freshness.md)).
+The fixture keeps its `v20` name because the version did not change, and
+it carries one row so the field is exercised.
 
 Two things about that row are contract, not decoration:
 
@@ -188,8 +178,8 @@ is the source of both files' EXIF.
 
 ## The landmines, in one place
 
-Everything below is **pinned as-is**. A Rust implementation that "fixes" any of
-it diverges from the shipped app.
+Everything below is **pinned as-is**. An implementation that "fixes" any
+of it diverges from the fixtures.
 
 ### Metadata
 
@@ -241,8 +231,8 @@ it diverges from the shipped app.
     latitude serialises as `-0`.
 15. **AVFoundation only honours `moov/udta/©day` for QuickTime-branded
     files.** The same atom in an ISO-branded `.mp4` reads as nil. A Rust atom
-    parser that accepts it unconditionally is *more* permissive than the
-    baseline — a behaviour change, not a bug fix.
+    parser that accepts it unconditionally is *more* permissive than this
+    pin — a behaviour change, not a bug fix.
 16. **ImageIO sniffs content, the scanner sniffs extensions.** A PNG named
     `.jpg` is read fine by `MetadataReader` but classified by `UTType`; a JPEG
     named `.txt` never reaches the scanner at all.
@@ -287,8 +277,7 @@ it diverges from the shipped app.
     follow the on-disk spelling — but `FolderScanner.failedDirectoryPaths` (and
     the Store's carry-forward prefix check) go through `standardizedFileURL`
     and are therefore NFD. Both sides of that comparison normalize the same
-    way, so it is internally consistent; a byte-exact Rust implementation is
-    consistent too. Mixing the two is what breaks.
+    way, so it is internally consistent. Mixing the two is what breaks.
 27. **Anything written through a Foundation path API lands on disk
     decomposed.** A library created *by this app* is all-NFD; NFC names only
     arrive from outside. That is why the fixture tree is built with `open(2)`
@@ -305,9 +294,8 @@ it diverges from the shipped app.
 
 ## What the fixtures do *not* pin
 
-Cases the Rust port had to decide for itself, listed so the next person knows
-these are judgement calls rather than observations. Each is implemented the
-conservative way — the one that refuses rather than the one that guesses.
+Judgement calls, implemented the conservative way — refuse rather than
+guess.
 
 | area | undecided | port's reading |
 |---|---|---|

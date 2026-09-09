@@ -1,141 +1,149 @@
 # LocalGallery
 
-A read-only photo and video viewer for iOS. Point it at a folder of images and browse them — no importing, no library lock-in, no cloud required.
+A folder-backed photo and video gallery for iOS and Linux. You pick a
+directory of files; the apps browse it in place. Nothing is imported
+into a private library.
+
+Pair it with [Syncthing](https://syncthing.net/) (via
+[SyncTrain](https://apps.apple.com/app/synctrain/id6475591584) on iOS)
+to sync the folder across devices.
 
 ## Why
 
-Photo libraries shouldn't require a specific app or service to access. LocalGallery treats a plain folder of image files as your gallery. You own the files, you choose where they live, and nothing is copied or modified.
-
-Pair it with [Syncthing](https://syncthing.net/) (via [SyncTrain](https://apps.apple.com/app/synctrain/id6475591584) on iOS) to sync your photos across devices without any cloud service.
+Photo libraries should not require a specific app or service. The
+folder is the gallery: you own the files and choose where they live.
 
 ## Features
 
-- **Folder browsing** — navigate your photo folders with cover thumbnails and sorting options
-- **Collections** — auto-grouped views by hierarchical tags (people, places, objects, etc.)
-- **All Photos** — flat grid of every photo, sorted by capture date, with search
-- **Memories** — once-a-day generated stories (on this day, years ago, trips, birthdays) with a music-backed slideshow and MP4 export
-- **People** — face-cropped person rail from MWG XMP regions, with optional address-book linking for birthday memories
-- **Home-screen widgets** — rotating photo, folder, tag, and memories widgets with deep links
-- **Video and Live Photos** — inline playback for videos and Live Photo motion
-- **HEIC** — iPhone's default photo format is read like any other: embedded XMP tags, on-device tagging, and face detection, decoded on a pure-Rust HEVC path rather than the platform decoder so two devices agree on the result
-- **Cloud folders** — file-provider folders (iCloud Drive, etc.) work via on-demand download, with `.xmp` sidecar caching for evicted files
-- **EXIF metadata** — camera, lens, exposure, GPS, and dimensions in a slide-up panel
-- **Hierarchical tags** — reads `digiKam:TagsList`-style XMP keywords with slash-separated paths (e.g. `Places/Japan/Tokyo`, `People/Anna`); see the [photo-tools schema](https://github.com/j23n/photo-tools/blob/main/docs/xmp-schema.md)
-- **Metadata search** — search across filenames, keywords, and tags
-- **Disk cache** — thumbnails and scan results are cached for fast repeat launches
-- **Background refresh** — daily memories and sidecar syncs run as background tasks
-- **Opt-in crash reporting** — MetricKit crash payloads + redacted logs, shared manually, never sent automatically
-- **No account required** — no sign-up, no server, no tracking
+- **Folder browsing** — cover thumbnails, sorting, nested folders
+- **Collections** — tags (people, places, objects, scenes) from XMP
+- **All Photos** — date-sorted grid with search
+- **Memories** — once-a-day stories, slideshow, MP4 export (iOS)
+- **People** — face regions from MWG XMP; optional address-book link (iOS)
+- **Home-screen widgets** — photo, folder, tag, memories (iOS)
+- **Video and Live Photos** — inline playback (iOS)
+- **HEIC** — read like other stills. Analysis decode is ImageIO on iOS
+  and software HEVC (`heif-oxide`) on Linux and `cargo test`
+- **Cloud folders** — iOS File Provider: on-demand download, sidecar
+  cache for evicted `.xmp`
+- **EXIF panel** — camera, lens, exposure, GPS, size
+- **Hierarchical tags** — `digiKam:TagsList`-style paths; see the
+  [photo-tools schema](https://github.com/j23n/photo-tools/blob/main/docs/xmp-schema.md)
+- **On-device tagging and faces** — optional model pack (ONNX)
+- **Places from GPS** — Nominatim reverse geocode; **coordinates leave
+  the device**
+- **Explicit file mutations** — Scan Photos writes `.xmp` sidecars;
+  you can move, delete, or create items in the folder
+- **Opt-in crash export** — MetricKit + redacted logs, never uploaded
+  automatically (iOS)
+
+## What the apps write
+
+They are not read-only. Sidecar writes and file move/delete/create
+are described in [docs/storage.md](docs/storage.md). Image bytes are
+not rewritten by the core.
+
+Places is the only product network egress: Nominatim (injectable
+endpoint). There is no LocalGallery account or telemetry backend.
 
 ## Requirements
 
-- Xcode 16.0+
-- iOS 18.0+
-- [XcodeGen](https://github.com/yonaskolb/XcodeGen)
-- [rustup](https://rustup.rs) — the tagging/faces/scanning core is Rust
-- Python 3 — only to build the on-device model pack, once
+- **iOS app:** a current Xcode that can run an iOS 18+ simulator
+  (project file declares Xcode 16.0 / iOS 18.0). [XcodeGen](https://github.com/yonaskolb/XcodeGen).
+  [rustup](https://rustup.rs). Python 3 only if you build a model pack.
+- **Linux app:** GTK4, libadwaita 1.5+, Rust — [linux/INSTALL.md](linux/INSTALL.md).
 
-## Build
+## Build (iOS)
 
 ```bash
-# Install XcodeGen if you don't have it
-brew install xcodegen
-
-# Stage the model pack into build/pack, which the app bundles
-./scripts/prepare_pack.sh
-
-# Generate UniFFI Swift (HeicDecoder, TaggingSession, …) then the Xcode project
-./scripts/build_core.sh
+brew install xcodegen          # if needed
+./scripts/build_core.sh        # UniFFI Swift + GalleryCore.xcframework
+# Optional: stage a model pack (tagging/faces). Without one, those
+# features stay off. xcodegen still needs the build/pack directory:
+mkdir -p build/pack
+./scripts/prepare_pack.sh      # when build/model_packs/<version> exists
 xcodegen
-
-# Open in Xcode
 open LocalGallery.xcodeproj
 ```
 
-`xcodegen` only *lists* `build/core/Generated/GalleryCore.swift`. It does not
-run UniFFI. If that file is from an older core, Xcode reports `Cannot find
-type 'HeicDecoder'` and similar. `./scripts/build_core.sh` regenerates it.
+`xcodegen` lists `build/core/Generated/GalleryCore.swift`; it does not
+run UniFFI. If that file is stale, Xcode reports missing `HeicDecoder`
+and similar. `./scripts/build_core.sh` regenerates it. The LocalGallery
+target's **Build Rust Core** phase runs the same script; pass
+`--release` only when you invoke it from the CLI.
 
-Then build and run on a simulator (iOS 18+). The LocalGallery target's
-**Build Rust Core** phase also runs `scripts/build_core.sh` before compile, so
-a later core change is just Product → Build. Pass `--release` yourself only
-when invoking the script from the CLI; an Xcode Release/Archive build already
-does. The first core build on a machine needs network access — see below.
+The first `build_core.sh` on a machine downloads a static ONNX Runtime
+(~85 MB) into `~/Library/Caches/ort.pyke.io/`. Offline:
+`ORT_LIB_LOCATION` pointing at a directory that contains
+`libonnxruntime.a`.
 
-If `xcodegen` complains that `GalleryCore.xcframework` is missing, the
-`build_core.sh` step above is what creates it.
+Device / Archive builds need a signing team in Xcode (or
+`DEVELOPMENT_TEAM` in `project.yml`).
 
 ### Model pack
 
-On-device tagging and face grouping run against a *model pack* — an ONNX image
-encoder, the precomputed label embeddings, and optionally two face models. The
-pack is ~157 MB, so it is not committed; `scripts/build_model_pack/` builds it
-and `scripts/prepare_pack.sh` stages the newest build into
-`build/pack/<version>`, which the app bundles. Run `prepare_pack.sh` with no
-pack built and it prints the exact command that builds one.
+On-device tagging and face grouping use a pack (ONNX encoder, label
+embeddings, optional face models, ~157 MB). **It is not committed and
+is not required.** `scripts/build_model_pack/` builds one;
+`scripts/prepare_pack.sh` stages the newest build into
+`build/pack/<version>/`.
 
-The app ships the staged pack, so a fresh install can tag, find faces, and
-name places from GPS with no setup. Settings → Scan Photos runs all three.
-
-**Licence:** the face models in the default (full) pack are insightface's
-`buffalo_sc` — SCRFD-500M and w600k_mbf — which are **research /
-non-commercial licensed**. That is fine for a personal build; anything
-distributed must either ship the tagging-only pack
+A tagging-only pack is valid: Scan Photos tags objects/scenes and
+names places; it skips faces. Use that variant for any build you
+distribute — the default full pack's face models are insightface
+`buffalo_sc` (research / non-commercial):
 
 ```bash
 PACK_VARIANT=tagging ./scripts/prepare_pack.sh
 ```
 
-or substitute face models whose licence permits it. A tagging-only pack is a
-valid pack: Scan Photos still tags objects/scenes and names places; it skips
-the face pass.
-
-The first `build_core.sh` on a machine downloads a prebuilt static ONNX Runtime
-(~85 MB) into `~/Library/Caches/ort.pyke.io/`; offline builds work with
-`ORT_LIB_LOCATION` pointing at a directory containing `libonnxruntime.a`.
-JPEG and PNG decode in the core is pure Rust. HEIC on iOS uses ImageIO
-(hardware) so a first-run scan is not several seconds of software HEVC per
-photo; `cargo test` and non-iOS hosts keep the software path.
-
 ### Third-party licences
 
-The app is MPL 2.0. Its dependencies are permissive and statically linked:
-ONNX Runtime (MIT), and for HEIC, `heif-oxide` + `rust_h265` (MIT OR
-Apache-2.0). No copyleft library is linked in — HEIC decoding deliberately
-does **not** use libheif/libde265, which are LGPL-3.0 and whose static linking
-obliges a distributor to let a user relink against a modified library. Swapping
-the decoder back to them would re-introduce that obligation; the seam that
-would make such a swap possible is `gallery_ml::preprocess::ImageDecoder`.
+The app is MPL-2.0. Linked decode/inference crates are permissive
+(ONNX Runtime MIT; `heif-oxide` + `rust_h265` MIT OR Apache-2.0).
+HEIC does not use libheif/libde265 (LGPL-3.0). The decode seam is
+`gallery_ml::preprocess::ImageDecoder`.
 
 ## Tests
-
-The `LocalGallery` scheme includes the unit-test target:
 
 ```bash
 xcodebuild test -project LocalGallery.xcodeproj -scheme LocalGallery \
   -destination "platform=iOS Simulator,name=iPhone 17 Pro" \
   -testLanguage en -testRegion US
+
+cd core && cargo test --workspace
 ```
 
-The locale flags are required: the memories conformance fixtures record the
-simulator's locale and assert `en_US`, so a Mac in another region fails two of
-them for no reason.
+Locale flags are required: memories fixtures assert `en_US`.
 
-Tests live in `LocalGalleryTests/Unit` with shared fixtures in
-`LocalGalleryTests/Support`. For an architecture overview (scan pipeline,
-memory generation, cache invalidation, widget pipeline), see
-[.claude/CLAUDE.md](.claude/CLAUDE.md).
+Tests live in `LocalGalleryTests/Unit` with fixtures in
+`LocalGalleryTests/Support` and `core/fixtures/`. Architecture:
+[docs/architecture.md](docs/architecture.md).
+
+## CI
+
+Pull requests and tags **validate** the tree (generate, compile, test).
+They do not publish an IPA. See [docs/release.md](docs/release.md) and
+[ADR 0003](docs/adr/0003-validation-only-release.md).
 
 ## Setup
 
-On first launch, the app asks you to select (or create) a folder containing your photos. This can be any folder accessible to the app — including one synced by Syncthing or iCloud Drive.
+On first launch, pick (or create) a folder of photos. Syncthing and
+iCloud Drive folders are fine. Scan Photos is opt-in and writes
+sidecars. Places uploads GPS to Nominatim.
 
-The app is read-only: it never modifies, moves, or deletes your files.
+## Linux
+
+[linux/README.md](linux/README.md) · [linux/INSTALL.md](linux/INSTALL.md)
+
+## Contributing
+
+[CONTRIBUTING.md](CONTRIBUTING.md)
 
 ## AI disclaimer
 
-Please see [docs/AI_DISCLAIMER.md](docs/AI_DISCLAIMER.md).
+[docs/AI_DISCLAIMER.md](docs/AI_DISCLAIMER.md)
 
 ## License
 
-[MPL 2.0](LICENSE)
+[MPL-2.0](LICENSE)

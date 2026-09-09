@@ -136,7 +136,7 @@ impl From<MlError> for TaggingError {
                 actual,
             },
             MlError::PackInvalid { detail } => TaggingError::PackInvalid { detail },
-            // Phase 2's face pipeline has its own FFI surface; a tagging call
+            // The face pipeline has its own FFI surface; a tagging call
             // can only reach this by being handed a pack it never asked about,
             // so it reads as an invalid pack from here.
             MlError::FaceModelsUnavailable => TaggingError::PackInvalid {

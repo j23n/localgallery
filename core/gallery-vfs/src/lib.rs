@@ -1,13 +1,12 @@
 //! Filesystem abstraction for the gallery core.
 //!
 //! The core never touches `std::fs` directly; it goes through [`Vfs`] so the
-//! same code runs against a real directory ([`StdVfs`]), an in-memory tree
-//! ([`MemVfs`], tests), and — later — Android SAF handles.
+//! same code runs against a real directory ([`StdVfs`]) and an in-memory tree
+//! ([`MemVfs`], tests).
 //!
-//! v1 is path-based on purpose: on iOS/simulator Swift resolves the
-//! security-scoped root and starts access before calling in, so the core only
-//! ever sees plain paths under an active scope. Handle-based `list()` lands in
-//! Phase 3 with the scanner port.
+//! The trait is path-based: on iOS/simulator Swift resolves the
+//! security-scoped root and starts access before calling in, so the core
+//! only ever sees plain paths under an active scope.
 //!
 //! # Atomic writes
 //!
@@ -114,7 +113,7 @@ pub enum EntryKind {
 /// One row of a directory listing.
 ///
 /// Everything the scanner needs about a file arrives here, in **one** call per
-/// directory. That granularity is the whole point (`_plans/06` Finding 1): the
+/// directory. That granularity is the whole point (docs/adr/0002): the
 /// Swift baseline pays a per-file `resourceValues` round-trip to `fileproviderd`
 /// — ~20 ms each, fully serial, 99.4% of a cold scan. The trait stays
 /// per-directory so an implementation is free to batch or parallelise the
@@ -158,7 +157,7 @@ pub struct Entry {
 /// them for a small minority of the files it walks: a light scan that hits the
 /// cache for every photo asks for **none**. Folding them into the listing
 /// would make the cheap path pay the expensive path's bill — which is exactly
-/// `_plans/06` Finding 1, restated one layer down.
+/// docs/adr/0002, restated one layer down.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ProviderAttrs {
     /// Whether the entry belongs to a file provider (iCloud Drive, OneDrive,
@@ -245,7 +244,7 @@ pub trait Vfs: Send + Sync {
     /// The same record [`Vfs::list`] returns, for a single path.
     ///
     /// Deliberately *not* the bulk read path — calling it per file is the
-    /// mistake `_plans/06` Finding 1 is about. The scanner calls it once per
+    /// mistake docs/adr/0002 is about. The scanner calls it once per
     /// **directory**, to pick up the folder node's own timestamps, exactly
     /// where the Swift baseline calls `dirURL.resourceValues(forKeys:)`.
     /// [`Stat`] cannot serve: it has no creation time and no sub-seconds.
@@ -255,7 +254,7 @@ pub trait Vfs: Send + Sync {
     ///
     /// The batch is the whole point. On iOS each of these is a blocking XPC
     /// call to `fileproviderd` that takes ~20 ms; run serially over a 20k
-    /// library that is 99.4% of a cold scan (`_plans/06` Finding 1). Given the
+    /// library that is 99.4% of a cold scan (docs/adr/0002). Given the
     /// batch, the platform implementation is free to fan the calls out and
     /// still emit the answers in order — which is what makes the scan both
     /// fast and deterministic.

@@ -35,7 +35,7 @@
 //!
 //! A cluster card shows a few face crops, and the pixels for them do *not*
 //! cross this boundary — Swift crops from its own thumbnail pipeline using the
-//! normalized rectangle in [`FaceRef`] (Phase 2 plan, "FFI additions"). Picking
+//! normalized rectangle in [`FaceRef`]. Picking
 //! *which* faces is done here, in Rust, because it depends on the quality score
 //! the app has no other reason to know about. See [`exemplars`].
 
@@ -319,8 +319,8 @@ pub struct FaceLibraryStats {
     pub ignored_clusters: u64,
     /// Clusters the user rejected (not a person / not a face).
     pub rejected_clusters: u64,
-    /// Outstanding merge proposals. Computed and stored; applying one is not
-    /// implemented (Phase 2 status), so this is advisory.
+    /// Outstanding merge proposals. Applying one is a separate call
+    /// (`merge_clusters` / `dismiss_merge_proposal`); this count is advisory.
     pub merge_proposals: u64,
 }
 
@@ -861,8 +861,8 @@ impl FaceSession {
     /// both inference sessions.
     ///
     /// Fails with [`FaceError::ModelsUnavailable`] for a pack that ships no
-    /// face models. That is the expected answer for a Phase 1 pack, not an
-    /// error to report — the app uses it to decide whether the faces UI exists.
+    /// face models. That is the expected answer for a tagging-only pack, not
+    /// an error to report — the app uses it to decide whether the faces UI exists.
     #[uniffi::constructor]
     pub fn new(
         cache_db_path: String,

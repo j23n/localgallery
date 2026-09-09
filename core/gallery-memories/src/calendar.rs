@@ -44,7 +44,7 @@ fn same_month_day_other_years(
 /// let one viewing apply the 6-month seen penalty to every future day's
 /// on-this-day memory. The date in it names the **local** day the memory
 /// selects — see [`crate::time::LocalCalendar::iso_day`], which used to render
-/// it in GMT (landmine 2, fixed in `_plans/10`).
+/// it in GMT (landmine 2, fixed in the local-day memory-id rule).
 pub fn generate_on_this_day(
     zone: &Zone,
     photos: &[PhotoFile],
@@ -195,7 +195,7 @@ mod tests {
         assert!(generate_on_this_day(&cal(), &photos, today, &dated, 1).is_some());
     }
 
-    /// The Tokyo half of `_plans/10`, hand-computed: `now` is 2024-06-11T15:30Z,
+    /// The Tokyo half of the local-day memory-id rule, hand-computed: `now` is 2024-06-11T15:30Z,
     /// which is 2024-06-12 00:30 JST, and the photos are the June-12-local
     /// ones. The memory is about June 12 and is now named after it — the same
     /// call used to answer `onThisDay-2024-06-11`, which is landmine 2 and what

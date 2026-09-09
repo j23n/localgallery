@@ -1,7 +1,6 @@
 //! Folder traversal: the tree, the flat photo list, and the diff against the
 //! last scan.
 //!
-//! A port of `LocalGallery/Services/FolderScanner.swift`, and *only* that.
 //! Scan **policy** — light/full/auto resolution, the 48-hour promotion, the
 //! dedupe of concurrent requests, the two-phase ordering, and the
 //! sidecar-sync / memories / widget steps that follow a scan — stays in

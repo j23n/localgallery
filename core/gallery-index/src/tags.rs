@@ -2,7 +2,7 @@
 //!
 //! The Swift index stores `[String: [PhotoFile]]`: a full struct copy of every
 //! photo, in every bucket it is credited to, plus the `Places/*` prefix
-//! expansion that credits one photo to three or four keys. `_plans/05` calls
+//! expansion that credits one photo to three or four keys. The tag index
 //! taking the known follow-up ("switch to `[String: [UUID]]` + `photoByID`")
 //! part of the port rather than replicating the waste, so this stores **photo
 //! indices into one shared photo table** and nothing else. It is invisible to

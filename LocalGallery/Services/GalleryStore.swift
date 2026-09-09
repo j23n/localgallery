@@ -206,7 +206,7 @@ final class GalleryStore {
     /// Seeded from the persisted snapshot in `loadCache()`, *before*
     /// `restoreFolder` kicks off the launch `.auto` scan — without that, the
     /// first light scan of every session re-probes every `.xmp` in the library
-    /// (`_plans/06-performance-baseline.md` Finding 2).
+    /// (docs/adr/0002).
     @ObservationIgnored var lastSidecarManifest: [SidecarCandidate] = []
     @ObservationIgnored let bookmarks: BookmarkManager
     /// The Rust core's folder scanner and the provider probe it calls back
@@ -1109,7 +1109,7 @@ final class GalleryStore {
             }
         }
         // Everything the export needs, snapshotted here so the rest of this
-        // runs without touching the Store. `_plans/06` Finding 3: the horizon
+        // runs without touching the Store. the horizon grouping: the horizon
         // pass used to run on the main actor and cost ~9 s on a 20k library.
         let visible = memories.visible
         let tags = allTags
@@ -1123,7 +1123,7 @@ final class GalleryStore {
         Task { [weak self] in
             let started = CFAbsoluteTimeGetCurrent()
             let scheduled = await CoreMemories.computeScheduled(inputs, hiddenMemoryIDs: hidden)
-            // The line `_plans/06` Finding 3's gate is measured from. It
+            // The line the horizon grouping's gate is measured from. It
             // replaces the `OnThisDay (…)` burst the deleted Swift generators
             // logged once per horizon day; the core does not log, so the one
             // number worth having is the whole pass.

@@ -1,4 +1,4 @@
-//! `MemoryEngine+Birthdays.swift`, plus the fix `_plans/06` Finding 3 asked
+//! `MemoryEngine+Birthdays.swift`, plus the fix the horizon grouping asked
 //! for.
 //!
 //! The Swift builds its person → photos grouping inside every caller, once per

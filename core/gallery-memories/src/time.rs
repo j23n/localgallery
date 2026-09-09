@@ -188,7 +188,7 @@ impl YearMonthDay {
     /// widget horizon has to step from one calendar day to the next in a zone
     /// whose offset may change in between: adding a day's worth of seconds at
     /// the run's single `now` offset lands at 23:00 the previous evening when
-    /// the clock falls back, and `_plans/10-widget-timezone-fix.md` is about
+    /// the clock falls back, and the local-day memory-id rule is about
     /// exactly the class of id drift that produces.
     pub fn adding_days(self, n: i64) -> YearMonthDay {
         let midnight =
@@ -300,7 +300,7 @@ impl LocalCalendar {
     /// deep-link drift in landmine 3, because the daily rail passed `now` and
     /// the horizon passed local midnight and the two only render the same date
     /// in UTC. Reading both through the local calendar makes them agree by
-    /// construction: `_plans/10-widget-timezone-fix.md`.
+    /// construction: the local-day memory-id rule.
     pub fn iso_day(&self, t: AppleDate) -> String {
         let d = self.ymd(t);
         format!("{:04}-{:02}-{:02}", d.year, d.month, d.day)
@@ -334,7 +334,7 @@ mod tests {
         assert_eq!(start, utc(2024, 6, 7, 15, 0));
         // …which used to be where the widget's pre-published id drift came
         // from: rendering that instant in GMT said "2024-06-07". Read in the
-        // calendar that produced it, it names the day it opens (_plans/10).
+        // calendar that produced it, it names the day it opens (local-day memory ids).
         assert_eq!(tokyo.iso_day(start), "2024-06-08");
     }
 
@@ -344,11 +344,11 @@ mod tests {
         let t = utc(2024, 6, 11, 15, 30); // 2024-06-12 00:30 JST
         assert_eq!(tokyo.month_day(t), MonthDay { month: 6, day: 12 });
         // Landmine 2 was "2024-06-11" — the memory is about June 12 local and
-        // was named after the GMT instant. Fixed in _plans/10.
+        // was named after the GMT instant. Ids name the local calendar day.
         assert_eq!(tokyo.iso_day(t), "2024-06-12");
     }
 
-    /// The matrix `_plans/10` asks for. For every offset and every time of day,
+    /// The matrix the local-day memory-id rule asks for. For every offset and every time of day,
     /// the id the daily rail renders from `now` and the id the horizon renders
     /// from that day's local midnight must be the same string, and it must name
     /// the day the user is living in. Before the fix the first diverged from

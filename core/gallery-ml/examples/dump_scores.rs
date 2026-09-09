@@ -8,9 +8,11 @@
 //! delta, which is the only way to find out that the pack's `resize_filter`
 //! and the model's training transform have drifted apart.
 //!
+//! From the `core/` workspace:
+//!
 //! ```sh
 //! cargo run -p gallery-ml --release --example dump_scores -- \
-//!     build/model_packs/mobileclip-s2-v1 /tmp/refimgs/*.jpg > /tmp/rust.json
+//!     ../build/model_packs/mobileclip-s2-v1 /tmp/refimgs/*.jpg > /tmp/rust.json
 //! ```
 //!
 //! Not a test: it needs a real pack (150 MB, never committed) and real photos.

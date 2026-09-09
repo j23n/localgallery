@@ -1,14 +1,14 @@
 //! `gallery-cache.sqlite` — the derived-data store.
 //!
-//! Everything in here is recomputable and is never treated as truth (overview
-//! standing decision 1). Deleting the file costs a re-run, not data: the
+//! Everything in here is recomputable and is never treated as truth
+//! (docs/adr/0001). Deleting the file costs a re-run, not data: the
 //! durable output is the sidecar.
 //!
 //! # Schema
 //!
 //! ```sql
 //! CREATE TABLE meta       (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-//! -- Phase 1
+//! -- tagging
 //! CREATE TABLE ml_work    (path TEXT PRIMARY KEY, content_hash BLOB,
 //!                          state INTEGER NOT NULL, model_pack TEXT,
 //!                          error_code INTEGER NOT NULL DEFAULT 0,
@@ -19,7 +19,7 @@
 //!                          decoder_version INTEGER);
 //! CREATE TABLE embeddings (content_hash BLOB, model TEXT, dim INTEGER,
 //!                          vec BLOB, PRIMARY KEY (content_hash, model));
-//! -- Phase 2
+//! -- faces
 //! CREATE TABLE face_work  (… identical shape to ml_work, face_count instead
 //!                          of tag_count …);
 //! CREATE TABLE face_scans (content_hash BLOB, model TEXT, face_count INTEGER,

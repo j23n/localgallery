@@ -16,7 +16,7 @@ import os
 ///    type keeps `photoByID`, which is an object table, not an index — it has
 ///    no ordering and no matching rule of its own.
 /// 2. **Keep the FFI off the main actor.** `build` runs the core call on a
-///    detached task behind a generation counter (`_plans/06` Finding 3); the
+///    detached task behind a generation counter (the horizon grouping); the
 ///    two query calls are synchronous but memoised, so a scrolling list row
 ///    that asks the same question on every body evaluation crosses the boundary
 ///    once, not once per frame.
@@ -262,7 +262,7 @@ final class CoreLibraryIndex {
     /// Exists so the detached task can return something `Sendable`: the core's
     /// `LibraryIndexSummary` is not, and making it the hop's payload would have
     /// forced the id resolution and the suggestion mapping back onto the main
-    /// actor — the two costs `_plans/05` measured at 14–22 ms and a 20k-entry
+    /// actor — the two costs measured at 14–22 ms and a 20k-entry
     /// dictionary walk.
     private struct Built: Sendable {
         let sorted: [PhotoFile]

@@ -10,13 +10,11 @@ import Foundation
 /// all share, so it belongs with the other models rather than inside whichever
 /// service happens to produce it.
 ///
-/// **`Codable` is load-bearing.** `_plans/06-performance-baseline.md` Finding 2:
-/// the manifest used to live only in `GalleryStore.lastSidecarManifest`, so
-/// every launch started with an empty one and re-probed ~17k sidecars — 259 s
-/// before the first light scan could finish. It now rides along in
-/// `LibrarySnapshot` as an optional field, and the fast path survives a
-/// relaunch. The encoding has to match `gallery_model::snapshot::SidecarCandidate`
-/// exactly, because the Rust core decodes the same file.
+/// **`Codable` is load-bearing.** docs/adr/0002: the manifest rides in
+/// `LibrarySnapshot` as an optional field so the light-scan fast path
+/// survives relaunch. Encoding must match
+/// `gallery_model::snapshot::SidecarCandidate` — the Rust core decodes
+/// the same file.
 struct SidecarCandidate: Codable, Equatable, Sendable {
     let photoID: UUID
     let sidecarURL: URL

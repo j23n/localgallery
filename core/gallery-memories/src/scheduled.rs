@@ -17,7 +17,7 @@
 //! resolve. Landmine 3 in the fixture README describes the old behaviour and
 //! `scheduled_memories.json`'s `asia-tokyo-horizon` scenario, which recorded
 //! three of seven days with an empty `matchedIDs`, is now the regression test
-//! for the fix (`_plans/10-widget-timezone-fix.md`).
+//! for the fix (the local-day memory-id rule).
 //!
 //! Two things keep it fixed:
 //!
@@ -190,7 +190,7 @@ mod tests {
             .collect()
     }
 
-    /// The exit criterion of `_plans/10`, hand-computed in the zone that showed
+    /// The exit criterion of the local-day memory-id rule, hand-computed in the zone that showed
     /// the bug. `now` is 2024-06-08T03:00Z — 12:00 JST — and the library sits on
     /// 2019-06-11T12:00Z, which is 21:00 JST on the 11th. Day +3 is therefore
     /// Tokyo's June 11, and the pre-published id says so.

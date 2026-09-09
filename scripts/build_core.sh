@@ -20,7 +20,7 @@
 #
 # ## ONNX Runtime
 #
-# Since Phase 1, gallery-ffi depends on gallery-ml, which links ONNX Runtime
+# gallery-ffi depends on gallery-ml, which links ONNX Runtime
 # through the `ort` crate. `ort-sys` downloads pyke's prebuilt *static*
 # `libonnxruntime.a` at build time (~85 MB, cached under
 # `~/Library/Caches/ort.pyke.io/`) and emits a `-L`/`-l` pair for it. Cargo

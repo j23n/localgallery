@@ -12,9 +12,8 @@
 //! | `mwg-rs:RegionInfo` | the regions **we** authored ([`crate::regions`]) |
 //! | `photo-tools:CorePeople*` / `CoreRegions` / `CoreFaceDecisions` / `CoreFacePack` / `CoreFaceTaggedAt` | the sentinel |
 //!
-//! Phase 1's [`crate::write`] deliberately refuses all of these; this module is
-//! the door the schema doc opens for a face-detector agent (§1.5, §2.1), and it
-//! is the only place `People/*` may be written from.
+//! [`crate::write`] refuses all of these; this module is the only place
+//! `People/*` may be written from.
 //!
 //! # Why the face sentinel is not the tag sentinel
 //!

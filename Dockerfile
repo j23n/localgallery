@@ -1,4 +1,6 @@
 # Linux toolchain for the parts of LocalGallery that are not Apple-only.
+# GTK headers are included so `cd linux && cargo test --no-default-features`
+# and a host UI build can run. The image does not produce an iOS IPA.
 #
 #   docker build -t localgallery-dev .
 #   docker run --rm -it -v "$PWD":/work -w /work localgallery-dev

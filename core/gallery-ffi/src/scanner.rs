@@ -6,7 +6,7 @@
 //! none of the [`crate::support`] run-thread machinery applies — there is no
 //! listener to notify, no summary to publish, no "already running" to report.
 //! The Store already owns the concurrency policy (dedupe, two-phase ordering,
-//! the 48-hour promotion) and Phase 3 explicitly does not move it.
+//! the 48-hour promotion).
 //!
 //! Two things still need somewhere to live, and both are per-*app* rather than
 //! per-call:
@@ -20,9 +20,9 @@
 //!
 //! # Why the probe is the *only* thing Swift implements
 //!
-//! The Phase-3 sketch had Swift implement a whole `Vfs` — list, stat, read —
-//! so the listing could carry `is_placeholder` and `content_version`. Measured,
-//! that is the wrong split. Everything except those provider attributes is
+//! A full Swift `Vfs` (list, stat, read) so listings could carry
+//! `is_placeholder` and `content_version` is the wrong split. Everything
+//! except those provider attributes is
 //! plain POSIX, and `std::fs` does it under the app's already-active security
 //! scope; routing 20k listings through UniFFI *and* Foundation's URL
 //! resource-value machinery costs about 7 s of `resourceValues` calls that
@@ -168,7 +168,7 @@ pub struct VfsProviderAttrs {
 ///
 /// Implementations are expected to *fan the batch out*. Each of these is a
 /// blocking XPC round trip to `fileproviderd`; run serially they were 99.4% of
-/// a cold scan (`_plans/06` Finding 1).
+/// a cold scan (docs/adr/0002).
 ///
 /// **The match is positional and nothing re-keys it.** An implementation that
 /// fans the batch out owes the core answers written back into the slots it was

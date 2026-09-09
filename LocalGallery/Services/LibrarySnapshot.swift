@@ -4,40 +4,21 @@ import Foundation
 /// photo list. Stored via `JSONDiskCache` (see `GalleryStore.libraryCache`);
 /// this file owns the snapshot shape and its schema version.
 struct LibrarySnapshot: Codable, Sendable {
-    /// Bumping invalidates every existing cache. v13: force rescan so video
-    /// dates read AVAsset.creationDate (videos used to skip enrichment and
-    /// fall back to the filesystem date, which often equals the download
-    /// time on this device). v16: stable IDs migrated from MD5 to SHA-256 —
-    /// old cached IDs are incompatible with new scan output. v17: PhotoFile
-    /// gained `faceRegions` — re-enrich so MWG region data populates.
-    /// v18: face region reader now also pulls from embedded XMP (not just
-    /// .xmp sidecars), so re-enrich to pick up regions in JPEG/HEIC files
-    /// that don't have a sidecar. v19: MWG region parser rewritten to target
-    /// `<mwg-rs:Area>` directly instead of walking `<rdf:li>` boundaries —
-    /// re-enrich so libraries that hit the boundary bug pick up regions now.
-    /// v20: PhotoFile gained `fileModificationDate` so light scans can diff
-    /// the live filesystem listing against the cache without re-probing every
-    /// file — bump so the first scan after upgrade populates it for everyone.
+    /// Current schema is 20. Bumping evicts every existing library cache
+    /// and the memories cache (photo IDs may change). The Store does that
+    /// in `loadCache()`.
     ///
-    /// Note: a bump here also wipes the memories cache (memories reference
-    /// photo IDs that may change with the library schema) — the Store
-    /// orchestrates that in `loadCache()`.
-    /// **`sidecarManifest` deliberately did not bump this.** It is optional, a
-    /// v20 file written before it existed decodes with `nil`, pays one legacy
-    /// re-probe and persists it from then on. A bump would have forced a full
-    /// rescan on every install — minutes of provider round-trips — to save a
-    /// single pass. See `_plans/06-performance-baseline.md` Finding 2.
+    /// `sidecarManifest` is optional on this version and did **not** bump
+    /// it: a v20 file written without the field decodes as `nil` and pays
+    /// one re-probe. See docs/adr/0002.
     static let version = 20
 
     let rootFolder: PhotoFolder
     let allPhotos: [PhotoFile]
     /// The sidecar rows the same scan produced.
     ///
-    /// Persisting these is what stops every launch re-probing ~17k `.xmp`
-    /// files: the light scan's fast path needs a manifest hit per photo, and
-    /// the manifest used to live only in `GalleryStore.lastSidecarManifest` —
-    /// in memory, empty on launch, so the first `.auto` scan after every cold
-    /// start paid 259 s on a 20k library with 20,000/20,000 photo cache hits.
+    /// Persisting these is what stops every launch re-probing every `.xmp`:
+    /// the light scan's fast path needs a manifest hit per photo.
     ///
     /// Staleness is already guarded three ways and none of them relies on this
     /// field being fresh: the fast path requires an unchanged photo size+mtime,

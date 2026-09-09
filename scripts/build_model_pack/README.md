@@ -1,10 +1,13 @@
 # build_model_pack
 
 Builds the on-device model pack: an ONNX image encoder plus the precomputed
-text embeddings for every taxonomy label, and — since Phase 2 — an optional
-pair of face models. The app ships no text tower (tagging is a dot product
-against this matrix), so this script is where the model choices, the label set
+text embeddings for every taxonomy label, and an optional pair of face
+models. The app ships no text tower (tagging is a dot product against
+this matrix), so this script is where the model choices, the label set
 and every threshold are decided.
+
+Run the commands in this file from `scripts/build_model_pack/` unless a
+snippet says otherwise.
 
 The pack format is defined by `core/gallery-ml/src/pack.rs`; that rustdoc is
 the spec, this is the producer.
@@ -12,6 +15,7 @@ the spec, this is the producer.
 ## Build
 
 ```sh
+cd scripts/build_model_pack
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 .venv/bin/python build_pack.py --out ../../build/model_packs
@@ -73,8 +77,8 @@ Every distinct `Objects/*` and `Scenes/*` target path in photo-tools'
 376 Scenes), sorted by path. Deriving rather than curating means every tag the
 core can write is one photo-tools already knows how to read.
 
-`People/*` is excluded (face recognition, Phase 2); `Landmarks/*` and
-`Places/*` are excluded (geocoding, stays desktop-side).
+`People/*` is excluded (face recognition); `Landmarks/*` and
+`Places/*` are excluded (Nominatim / Places pass).
 
 ### Prompt template
 
@@ -132,9 +136,8 @@ The threshold goes in the gap:
   only true scene in the set (the Hubble deep field's `Sky/Galaxy` 0.2706 and
   `Sky/Constellation` 0.2511).
 
-Both are deliberately strict. Phase 1's acceptance floor is "no wrong
-high-confidence tags; sparse is fine", and a wrong tag costs a user more than a
-missing one.
+Both are deliberately strict: no wrong high-confidence tags; sparse is
+fine. A wrong tag costs more than a missing one.
 
 **This is a 16-image calibration.** It is enough to place the bar in an
 observed gap, not enough for per-label thresholds — `calibrate.py --bias` shows
@@ -150,8 +153,8 @@ one that does not, so float drift cannot flap tags.
 
 ## Face models (schema 2)
 
-Phase 2 added two more models to the same pack, both **optional**: a pack
-without them is still valid and the app simply has no face UI.
+Two more models on the same pack, both **optional**: a pack without
+them is still valid and the app has no face scan.
 
 ```sh
 .venv/bin/python build_pack.py --only-faces \
@@ -249,8 +252,11 @@ Rust:    zune-jpeg  -> fast_image_resize     -> center crop -> ORT encoder
 ```
 
 ```sh
+# pack path is relative to the core/ workspace:
+cd ../../core
 cargo run -p gallery-ml --release --example dump_scores -- \
-    build/model_packs/mobileclip-s2-v1 /tmp/refimgs/*.jpg > /tmp/rust.json
+    ../build/model_packs/mobileclip-s2-v1 /tmp/refimgs/*.jpg > /tmp/rust.json
+cd ../scripts/build_model_pack
 .venv/bin/python parity.py --pack ../../build/model_packs/mobileclip-s2-v1 \
     --rust /tmp/rust.json --encoder onnx
 ```

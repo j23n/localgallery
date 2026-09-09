@@ -1,27 +1,20 @@
-//! `MemoryEngine` + `GalleryStore.computeScheduledMemories`, ported (Phase 4
-//! step 2).
+//! Memory generation and the widget's 7-day pre-publish horizon.
 //!
-//! The module layout mirrors the Swift extension files on purpose, so the score
-//! ladder documented in `CLAUDE.md` and `_plans/05-phase-4-indexes-memories.md`
-//! still maps to code: [`calendar`], [`birthdays`], [`trips`], [`selection`],
-//! plus [`scheduled`] for the widget's pre-publish horizon and [`time`] /
-//! [`locale`] for the two things Foundation used to supply implicitly.
+//! Modules: [`calendar`], [`birthdays`], [`trips`], [`selection`],
+//! [`scheduled`], plus [`time`] / [`locale`] for calendar offset and
+//! `en_US` strings.
 //!
 //! `core/fixtures/memories-conformance/{memory_engine,scheduled_memories}.json`
-//! are the spec — 15 generation scenarios and 4 horizon scenarios, generated
-//! from the shipping Swift before any of it was ported. Where the Swift is
-//! buggy the bug is **pinned**, and this crate reproduces it; each site says so
-//! and points at the landmine number in that directory's README.
+//! are the spec — 15 generation scenarios and horizon cases. Where a
+//! behaviour is buggy the bug is **pinned**; each site points at the
+//! landmine number in that directory's README.
 //!
-//! ## What this crate does differently from the Swift, deliberately
+//! ## Architecture that keeps the horizon off the UI thread
 //!
-//! `_plans/06-performance-baseline.md` Finding 3 measured the scheduled-memory
-//! pass at ~9 s on the main thread, and named the architecture — not the
-//! language — as the cause. So:
+//! The scheduled-memory pass is grouped work, not per-day copies:
 //!
 //! 1. **People → photos is grouped once per call**, in [`birthdays::PeopleIndex`],
-//!    and shared across all seven horizon days. The Swift regroups the whole
-//!    library seven times.
+//!    and shared across all seven horizon days.
 //! 2. **No-birthday days early-exit on the birthday check**, before any photo
 //!    work, which is the common case.
 //! 3. **Nothing copies a photo.** Every stage carries `u32` indices into the

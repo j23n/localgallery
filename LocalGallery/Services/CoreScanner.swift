@@ -194,7 +194,7 @@ final class CoreScanner: Sendable {
                     """)
             }
 
-            // Same shape as the line `_plans/06-performance-baseline.md`
+            // Same shape as the line docs/adr/0002
             // measures the acceptance gates from, so the harness keeps working
             // across the port. `core` is time inside Rust; `in`/`out` are the
             // two record marshals, which is the number that decides whether the
@@ -407,7 +407,7 @@ final class CoreScanner: Sendable {
 /// seven ubiquitous-item keys — one blocking XPC round trip to `fileproviderd`,
 /// **~11 ms**, whatever the file. Run serially over the ~37k photos and sidecars
 /// of a 20k-photo library that was 403 s of a 406 s cold scan
-/// (`_plans/06-performance-baseline.md` Finding 1). The scan is latency-bound,
+/// (docs/adr/0002). The scan is latency-bound,
 /// not CPU-bound: `sample` showed the thread parked in `mach_msg2_trap`.
 ///
 /// # What actually fixed it, and what did not
@@ -444,7 +444,7 @@ final class CoreProviderProbe: ProviderProbe {
     ///
     /// Benchmarked at 1 / 16 against the 20k fixture library on the simulator;
     /// with the directory prefetch in place the reads are cache hits and the
-    /// width stops mattering (see `_plans/06-performance-baseline.md`). Kept at
+    /// width stops mattering (see docs/adr/0002). Kept at
     /// 16 for the uncached fallback, and overridable at runtime so the
     /// measurement can be repeated without a rebuild:
     ///
@@ -608,7 +608,7 @@ final class CoreProviderProbe: ProviderProbe {
     /// Drive — measured on the simulator, a plain local directory answers `nil`,
     /// never `false`. Treating that absence as "unknown" too would send every
     /// scan down the seven-key path and undo the whole 406 s → 2.3 s win
-    /// (`_plans/06` Finding 1). It is the ordinary case, not a failure.
+    /// (docs/adr/0002). It is the ordinary case, not a failure.
     static func treeIsUbiquitous(_ read: UbiquityRead) -> Bool {
         switch read {
         case .unreadable:

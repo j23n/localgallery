@@ -15,8 +15,8 @@
 //!
 //! `IPTC:Keywords` is *not* written: an XMP sidecar has no IIM section, so
 //! photo-tools drops that write too (§1.4). `iptcExt:PersonInImage`,
-//! `mwg-rs:RegionInfo`, the OCR fields and the IPTC location fields are all
-//! read-only here — Phase 1 has no business in any of them.
+//! `mwg-rs:RegionInfo`, the OCR fields and the IPTC location fields are
+//! not written here — faces and places own those paths.
 //!
 //! `photo-tools:TaggerVersion` is the shared skip key (pack version).
 //! `CLIPEmbedding` / `CLIPModel` / `CLIPTimestamp` are written when the

@@ -1,19 +1,12 @@
-# Phase-4 memories / indexes conformance fixtures
+# Memories / indexes conformance fixtures
 
-The spec for `_plans/05-phase-4-indexes-memories.md` §1. Everything here was
-generated from the **shipping Swift** `SeededRNG`, `MemoryEngine`,
-`GalleryStore.computeScheduledMemories`, `SearchIndex` and `TagIndex` before
-any of them was ported, so the Rust implementation can be checked against
-something other than opinion. Where the Swift behaviour is buggy, the bug is
-pinned — fixing it is a separate, deliberate change.
+Regression pins for `gallery-memories` and `gallery-index`. Where a
+behaviour is buggy, the bug is pinned — fixing it is a separate,
+deliberate change.
 
-One such change has since happened: `_plans/10-widget-timezone-fix.md` fixed
-the GMT-rendered memory id (landmines 2 and 3) and regenerated
-`memory_engine.json` and `scheduled_memories.json` with it. Those two files no
-longer record "what the Swift did"; the Swift engine is deleted. They record
-what the core does, and their job is now regression rather than verification —
-which is why the new expectations were hand-computed into Rust unit tests
-first and the JSON regenerated second.
+Memory ids name the **local calendar day** the memory is about
+(landmines 2 and 3). `memory_engine.json` and `scheduled_memories.json`
+record what the core emits.
 
 One copy in the repo, two readers:
 
@@ -48,8 +41,8 @@ Tests that read them:
 
 Shared plumbing: `LocalGalleryTests/Support/MemoriesConformance.swift` (record
 types, the UTC date helpers, the process time-zone override) on top of
-`ConformanceFixtures` (the Phase-3 assert/regenerate mechanism, now
-parameterised by fixture directory).
+`ConformanceFixtures` (assert/regenerate, parameterised by fixture
+directory).
 
 ## Regenerating
 
@@ -131,7 +124,7 @@ reproducible or this fixture cannot be used.
 
 The **calendar** is not an input the engine takes — see landmine 1.
 
-## What a port must implement first
+## What the harness checks first
 
 In order, because each depends on the one before it:
 
@@ -147,45 +140,28 @@ In order, because each depends on the one before it:
 
 ## The landmines, in one place
 
-Everything below is **pinned as-is** unless it says otherwise. A Rust
-implementation that "fixes" one of the pinned entries diverges from the shipped
-app. Entries 2 and 3 are the exception: they were fixed on purpose, and they
-still describe the old behaviour so the diff in the fixture is explicable years
-from now.
+Everything below is **pinned as-is** unless it says otherwise. An
+implementation that "fixes" one of the pinned entries diverges from
+the fixtures. Entries 2 and 3 describe the current id rule (local
+calendar day) and why the non-UTC horizon cases exist.
 
 ### Time, calendars and ids
 
 1. **`MemoryEngine.generate` does not take a calendar.** It reads
    `Calendar.current` — despite the sub-generators (`generateOnThisDay`,
    `generateYearsAgo`, `generateBirthdayMemories`, `flushTrip`) all taking one
-   as a parameter. The plan's claim that "the engine already takes an explicit
-   calendar" is true of the parts and false of the whole. The fixtures
-   therefore record a `timeZone` per scenario and the Swift harness moves the
-   *process* (`NSTimeZone.default`) to produce them. In Rust this becomes an
-   explicit input, which is strictly better — but it must be threaded to every
-   stage, including the ones that currently read the ambient calendar.
+   as a parameter. The fixtures record a `timeZone` per scenario and the Swift
+   harness moves the *process* (`NSTimeZone.default`) to produce them. The
+   Rust engine takes an explicit calendar and threads it to every stage.
 2. **A memory id's date names the local calendar day the memory is about.**
-   *Fixed in `_plans/10-widget-timezone-fix.md`; the invariant is now that
    `onThisDay-<date>` and `yearsAgo-<n>-<date>` carry the same y/m/d the
-   generator filtered photos by.*
-   It used to format `day` with an `ISO8601DateFormatter` whose time zone
-   defaults to GMT, so in `non-utc-timezone-asia-tokyo` the engine selected the
-   photos from **June 12 local** and called the memory `onThisDay-2024-06-11`.
-   That scenario now expects `onThisDay-2024-06-12`, and the regenerated
-   `memory_engine.json` differs from the pre-fix file in exactly those two ids.
-3. **…which is what made the widget's pre-published ids resolve.**
-   *Fixed with entry 2; the invariant is now that the id pre-published for day
-   N is the id the live run produces on day N, in **every** zone and at every
-   hour — asserted for all seven scenarios rather than for the UTC ones alone.*
-   `computeScheduledMemories` walks days from local midnight, which in Tokyo is
-   15:00 GMT the *previous* day, while the id was rendered in GMT. The
-   `asia-tokyo-horizon` scenario recorded the consequence: for three of the
-   seven horizon days `scheduledButNotGeneratedLive` was non-empty and
-   `matchedIDs` empty, so **the widget deep link did not resolve** — and worse,
-   day +4's pre-published `onThisDay-2024-06-11` and day +3's live
-   `onThisDay-2024-06-11` were the *same id with different photos*. It is now
-   the regression test for the fix, alongside three zones added because the
-   original pair could not see the other two symptoms:
+   generator filtered photos by. `non-utc-timezone-asia-tokyo` expects
+   `onThisDay-2024-06-12` for the June 12 local selection.
+3. **The id pre-published for day N is the id the live run produces on
+   day N**, in every zone and at every hour — asserted for all seven
+   scenarios. `computeScheduledMemories` walks days from local midnight.
+   `asia-tokyo-horizon` plus the extra zones are the regression for that
+   agreement:
    `america-los-angeles-evening-horizon` (behind GMT the **live** id rolled
    forward after 17:00 local, which only an evening `now` shows),
    `europe-berlin-dst-fallback-horizon` (a horizon that straddles a transition,
@@ -252,7 +228,7 @@ from now.
 16. **Substring matching is Swift's, i.e. canonical equivalence, not byte
     equality.** The query `"café"` (precomposed) matches a filename stored
     decomposed on disk. A byte-comparing Rust port silently stops finding
-    accented names — the single most likely regression in the index port.
+    accented names — the single most likely index regression.
     Recorded alongside it: `"cafe"` does *not* match `"café"` (equivalence is
     not folding), and `"istanbul"` *does* match `"İstanbul"`, whose lowercase
     is `i` + U+0307. The mechanism is not documented anywhere; the three cases
@@ -294,11 +270,9 @@ coin flip.
    deliberately absent because they cannot be pinned.
    `MemoryEngineConformanceTests.testScenariosAreOrderStable` re-runs every
    scenario and fails if one stops being reproducible.
-   **For the port:** the Rust engine will have a deterministic iteration order
-   (`BTreeMap`, or a sort before the jitter). That is a *tightening*, not a
-   divergence — but it means the Rust output for a two-birthday day is a
-   specific order where the Swift's was arbitrary, and no fixture can say
-   whether it is the "right" one.
+   The Rust engine uses a deterministic iteration order. A two-birthday
+   day therefore has a specific order; these fixtures do not pin that
+   case.
 2. **`TagIndex.aggregateTagsAndPeople` sorts by `count` alone**, with Swift's
    non-stable `sorted`, over a `Dictionary` walk. Equal-count entries come out
    in an unspecified order that varies between processes.
@@ -306,8 +280,7 @@ coin flip.
    `(count desc, id asc)`, and the Swift harness canonicalises the observed
    output the same way before comparing. The port must reproduce the counts and
    the count-descending grouping; the tie order is free, exactly as it is in
-   Swift today. (The UI shows these lists, so "free" here means "the user
-   already sees an arbitrary order".)
+   the live UI. (The lists already show an arbitrary tie order.)
 3. **`tripLabel`'s dominant-country pick is `Dictionary.max(by:)`**, which on a
    tie returns an arbitrary key. It only matters when a tie also clears the 90%
    dominance rule, which cannot happen with two or more countries — so it is
@@ -348,7 +321,7 @@ Listed so the next person knows these are gaps rather than decisions.
 
 | area | not covered | why |
 |---|---|---|
-| `MemoryCoordinator` | the daily gate, epoch invalidation, seen/cool-down persistence, the hidden set, `visible` filtering, the cloud-placeholder input filter | stays in Swift (plan non-goal). `inputs.photos` is already past the placeholder filter. |
+| `MemoryCoordinator` | the daily gate, epoch invalidation, seen/cool-down persistence, the hidden set, `visible` filtering, the cloud-placeholder input filter | stays in the iOS host. `inputs.photos` is already past the placeholder filter. |
 | trip home detection | the global-median fallback branch (`homeRegions.isEmpty`) | every trip scenario has a real home cluster; the fallback needs a sparse-GPS library of its own |
 | `Collection.shuffle` / `Int.random(in:)` | not pinned at all | `MemoryEngine` never uses them; only `WidgetRotation.pickRotation` does, and widgets stay Swift. Swift's integer-range algorithm is a stdlib detail that would break this fixture on a toolchain bump for no benefit. |
 | hidden memories | `computeScheduledMemories` filters `memories.hiddenMemories`; no scenario exercises it | hiding from a test store fires `onMemoriesPublished` → the widget exporter → App Group I/O |

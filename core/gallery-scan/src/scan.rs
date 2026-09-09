@@ -77,7 +77,7 @@ pub struct ScanInput {
 /// Where a pass spent its time, and how often the fast path engaged.
 ///
 /// Not decoration: `Scan totals: … probe=…ms hits=… slow=…` is the line
-/// `_plans/06-performance-baseline.md` measures the acceptance gates from, and
+/// docs/adr/0002 measures the acceptance gates from, and
 /// the numbers behind it now live on this side of the boundary. `hits + slow`
 /// must equal the photo count; a light scan with a high `slow` means the cache
 /// lookup is not engaging, which is the failure the counters exist to catch.
@@ -321,7 +321,7 @@ impl<'a> Walk<'a> {
 
         // The folder's own timestamps. One call per *directory* — where the
         // Swift baseline calls `dirURL.resourceValues(forKeys:)`, not the
-        // per-file chatter `_plans/06` Finding 1 is about.
+        // per-file chatter docs/adr/0002 is about.
         let dir_entry = vfs.stat_entry(dir).ok();
         let node_index = self.nodes.len();
         self.nodes.push(ScanNode {
@@ -511,7 +511,7 @@ impl<'a> Walk<'a> {
             // Probe the sidecar only when its listing no longer matches the
             // cached row. A hit here is what keeps a zero-change light scan
             // off the provider entirely — each `.xmp` probe is the expensive
-            // XPC round trip `_plans/06` Finding 2 exists to avoid.
+            // XPC round trip docs/adr/0002 exists to avoid.
             if !self.sidecar_row_reusable(&file.path, sidecar) {
                 wanted.push(join(dir, &sidecar.name));
             }
@@ -1244,7 +1244,7 @@ mod tests {
     /// Swift baseline wrote `totalFileSize ?? fileSize` into it. Writing the
     /// on-disk stub size for a placeholder instead makes every placeholder
     /// `.xmp` in the library read as changed on the first scan after the
-    /// upgrade — and re-fetch, which is the cost `_plans/06` Finding 2 exists
+    /// upgrade — and re-fetch, which is the cost docs/adr/0002 exists
     /// to avoid.
     #[test]
     fn a_placeholder_sidecar_records_its_intended_size_not_its_stub() {

@@ -2,7 +2,7 @@
 //!
 //! Everything *not* represented here still survives a read→write cycle — the
 //! DOM keeps it. This type exists so the writer can reason about what it owns
-//! and so callers (and Phase 2) can inspect a sidecar without touching XML.
+//! and so callers can inspect a sidecar without touching XML.
 
 /// `mwg-rs:AppliedToDimensions` — the pixel size a file's normalized region
 /// areas were computed against.
@@ -29,7 +29,7 @@ pub struct FaceRegion {
     /// `mwg-rs:Name`, when the writer set one.
     pub name: Option<String>,
     /// `mwg-rs:Type` — `Face`, `Pet`, `BarCode`, … Regions with a non-face type
-    /// still round-trip; the field is here so Phase 2 can filter.
+    /// still round-trip; the field is here so callers can filter.
     pub kind: Option<String>,
     /// Centre X, 0…1.
     pub center_x: f64,

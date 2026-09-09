@@ -5,9 +5,11 @@
 //! embedding cache, thresholds, sidecar read-modify-write — turns a folder of
 //! photos into `.xmp` files somebody would want.
 //!
+//! From the `core/` workspace:
+//!
 //! ```sh
 //! cargo run -p gallery-ml --release --example tag_dir -- \
-//!     build/model_packs/mobileclip-s2-v1 /tmp/testlib
+//!     ../build/model_packs/mobileclip-s2-v1 /tmp/testlib
 //! ```
 //!
 //! Writes sidecars **in place**, next to the photos, so point it at a copy.
@@ -25,9 +27,9 @@ use std::sync::Arc;
 use gallery_ml::{NoProgress, RunOptions, TaggingEngine};
 use gallery_vfs::StdVfs;
 
-/// Extensions `gallery_ml::preprocess` can actually decode. HEIC is the known
-/// gap (plan 02, "Remaining"), and enqueuing one would only add a `failed` row.
-const EXTENSIONS: &[&str] = &["jpg", "jpeg", "png"];
+/// Extensions the software preprocess path can decode. HEIC uses
+/// `heif-oxide` on this host; iOS analysis uses ImageIO instead.
+const EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "heic", "heif"];
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);

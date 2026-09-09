@@ -16,7 +16,7 @@ actor WidgetSnapshotExporter {
     /// Cap on photos in `index.json`. Folder/tag widgets pick from this pool.
     /// 500 most recent covers the rotation use-case while keeping the thumb
     /// directory under ~75MB at q=0.85 / 1024px.
-    private static let maxIndexPhotos = 500
+    nonisolated private static let maxIndexPhotos = 500
     /// Max edge for widget thumbnails in pixels. Large widget on a Pro Max
     /// is ~1180px wide @3x, so 1024 keeps headroom without bloating storage.
     private static let thumbMaxPixel: CGFloat = 1024
@@ -70,16 +70,47 @@ actor WidgetSnapshotExporter {
 
     static let shared = WidgetSnapshotExporter()
 
-    private var lastExportSignature: String?
+    /// Destinations for a snapshot write. Production uses the App Group
+    /// container; tests inject a temp directory so JSON/thumb failures and
+    /// signature commit can be asserted without the group entitlement.
+    struct Destinations: Sendable {
+        var thumbsDir: URL
+        var indexURL: URL
+        var foldersURL: URL
+        var tagsURL: URL
+        var memoriesURL: URL
+    }
+
+    /// Set only after every JSON file and every intended thumbnail write
+    /// succeeded. A failed export leaves this unchanged so the next trigger
+    /// retries instead of treating the torn snapshot as current.
+    private(set) var lastExportSignature: String?
 
     func export(_ inputs: Inputs) async {
-        let t = CFAbsoluteTimeGetCurrent()
         SharedContainer.prepareDirectories()
-        guard SharedContainer.widgetDataDir != nil,
-              let thumbsDir = SharedContainer.thumbsDir else {
+        guard let thumbsDir = SharedContainer.thumbsDir,
+              let indexURL = SharedContainer.indexURL,
+              let foldersURL = SharedContainer.foldersURL,
+              let tagsURL = SharedContainer.tagsURL,
+              let memoriesURL = SharedContainer.memoriesURL else {
             Log.widget.warning("App Group container unavailable; skipping export")
             return
         }
+        _ = await export(inputs, destinations: Destinations(
+            thumbsDir: thumbsDir,
+            indexURL: indexURL,
+            foldersURL: foldersURL,
+            tagsURL: tagsURL,
+            memoriesURL: memoriesURL
+        ))
+    }
+
+    /// Writes the snapshot to `destinations`. Returns whether the signature
+    /// was committed (complete success, or an unchanged already-committed
+    /// fingerprint).
+    @discardableResult
+    func export(_ inputs: Inputs, destinations: Destinations) async -> Bool {
+        let t = CFAbsoluteTimeGetCurrent()
 
         // Content-aware dedup: skip re-export when the inputs that actually
         // affect the snapshot haven't changed. Mixes in the calendar day so
@@ -88,11 +119,11 @@ actor WidgetSnapshotExporter {
         let signature = Self.contentFingerprint(inputs: inputs)
         if signature == lastExportSignature {
             Log.widget.debug("Snapshot signature unchanged — skipping export")
-            return
+            return true
         }
 
         let recent = topRecentPhotos(from: inputs.allPhotos, limit: Self.maxIndexPhotos)
-        let folderIdByPhotoURL = buildFolderIdMap(rootFolder: inputs.rootFolder)
+        let folderIdByPhotoURL = Self.buildFolderIdMap(rootFolder: inputs.rootFolder)
         let indexRefs = recent.map { photo -> (PhotoFile, WidgetPhotoRef) in
             (photo, makeRef(photo: photo, folderIdByURL: folderIdByPhotoURL))
         }
@@ -104,7 +135,7 @@ actor WidgetSnapshotExporter {
             folderIdByURL: folderIdByPhotoURL
         )
 
-        let folderEntries = buildFolderCatalog(rootFolder: inputs.rootFolder, leaves: inputs.leafFolders)
+        let folderEntries = Self.buildFolderCatalog(rootFolder: inputs.rootFolder, leaves: inputs.leafFolders)
         let tagPaths = inputs.allTags
             .map(\.fullPath)
             .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
@@ -121,9 +152,13 @@ actor WidgetSnapshotExporter {
             }
         }
 
+        try? FileManager.default.createDirectory(
+            at: destinations.thumbsDir, withIntermediateDirectories: true
+        )
+
         // Generate / refresh thumbnails (skips files already up-to-date on disk).
-        await generateThumbnails(referencedPhotos.values.map { $0 }, thumbsDir: thumbsDir)
-        garbageCollectThumbs(thumbsDir: thumbsDir, keepIDs: Set(referencedPhotos.keys))
+        let thumbsOK = await generateThumbnails(referencedPhotos.values.map { $0 }, thumbsDir: destinations.thumbsDir)
+        garbageCollectThumbs(thumbsDir: destinations.thumbsDir, keepIDs: Set(referencedPhotos.keys))
 
         let now = Date()
         let index = WidgetIndex(generatedAt: now, photos: indexRefs.map(\.1))
@@ -131,32 +166,41 @@ actor WidgetSnapshotExporter {
         let tagCatalog = TagCatalog(generatedAt: now, tagPaths: tagPaths)
         let memorySnapshot = MemorySnapshot(generatedAt: now, items: memoryItems)
 
-        writeJSON(index, to: SharedContainer.indexURL)
-        writeJSON(folderCatalog, to: SharedContainer.foldersURL)
-        writeJSON(tagCatalog, to: SharedContainer.tagsURL)
-        writeJSON(memorySnapshot, to: SharedContainer.memoriesURL)
+        let jsonOK = writeJSON(index, to: destinations.indexURL)
+            && writeJSON(folderCatalog, to: destinations.foldersURL)
+            && writeJSON(tagCatalog, to: destinations.tagsURL)
+            && writeJSON(memorySnapshot, to: destinations.memoriesURL)
+
+        guard thumbsOK, jsonOK else {
+            Log.widget.error("Snapshot export incomplete; leaving lastExportSignature unset so the next trigger retries")
+            return false
+        }
 
         let elapsed = (CFAbsoluteTimeGetCurrent() - t) * 1000
         Log.widget.info("Exported snapshot: \(indexRefs.count) photos, \(memoryItems.count) memories, \(folderEntries.count) folders, \(tagPaths.count) tags in \(String(format: "%.0f", elapsed))ms")
 
         lastExportSignature = signature
         WidgetCenter.shared.reloadAllTimelines()
+        return true
     }
 
     // MARK: - Content fingerprint
 
     /// Hex-encoded MD5 of every input that affects the published snapshot —
-    /// photo identity *and* mutable fields (date, tags, folder), plus tag/
-    /// memory/folder inventories and the calendar day. Catches equal-count
-    /// edits (delete-one-add-one, retag, mtime bump) that the previous
-    /// count-only signature missed.
-    private static func contentFingerprint(inputs: Inputs) -> String {
+    /// photo identity, every field the widget displays, source-freshness
+    /// (size/mtime), memory title/subtitle/kind/score/ordered photo ids,
+    /// folder path descriptions, and the calendar day.
+    nonisolated static func contentFingerprint(inputs: Inputs) -> String {
         var hasher = Insecure.MD5()
 
         let dayKey = dayKeyFormatter.string(from: Calendar.current.startOfDay(for: Date()))
         hasher.update(data: Data("day:\(dayKey)\n".utf8))
 
-        // Photos: stable identity + everything the widget displays. Sort by id
+        let folderIdByURL = buildFolderIdMap(rootFolder: inputs.rootFolder)
+        let folderPaths = folderPathMap(rootFolder: inputs.rootFolder)
+
+        // Photos: stable identity + everything the widget displays + the
+        // source-freshness fields that force a thumbnail rewrite. Sort by id
         // so reordered allPhotos arrays produce the same hash.
         hasher.update(data: Data("photos:\n".utf8))
         let recent = inputs.allPhotos
@@ -165,9 +209,7 @@ actor WidgetSnapshotExporter {
             .prefix(maxIndexPhotos)
             .sorted { $0.id.uuidString < $1.id.uuidString }
         for p in recent {
-            let date = p.dateTaken.map { String($0.timeIntervalSince1970) } ?? "nil"
-            let tags = p.hierarchicalTags.map(\.fullPath).sorted().joined(separator: ",")
-            hasher.update(data: Data("\(p.id.uuidString)|\(date)|\(tags)\n".utf8))
+            hasher.update(data: Data(photoFingerprintLine(p, folderId: folderIdByURL[p.url] ?? "").utf8))
         }
 
         hasher.update(data: Data("tags:\n".utf8))
@@ -177,13 +219,14 @@ actor WidgetSnapshotExporter {
 
         hasher.update(data: Data("memories:\n".utf8))
         for m in inputs.memories.sorted(by: { $0.id < $1.id }) {
-            hasher.update(data: Data("\(m.id)|\(m.coverPhotoID.uuidString)|\(m.photoIDs.count)\n".utf8))
+            hasher.update(data: Data(memoryFingerprintLine(m).utf8))
         }
 
         hasher.update(data: Data("folders:\n".utf8))
         for f in inputs.leafFolders.sorted(by: { $0.id.uuidString < $1.id.uuidString }) {
             let mod = f.dateModified.map { String($0.timeIntervalSince1970) } ?? "nil"
-            hasher.update(data: Data("\(f.id.uuidString)|\(f.name)|\(mod)|\(f.photos.count)\n".utf8))
+            let path = folderPaths[f.id] ?? f.name
+            hasher.update(data: Data("\(f.id.uuidString)|\(f.name)|\(path)|\(mod)|\(f.photos.count)\n".utf8))
         }
 
         hasher.update(data: Data("scheduled:\n".utf8))
@@ -192,10 +235,24 @@ actor WidgetSnapshotExporter {
             return lhs.memory.id < rhs.memory.id
         }
         for s in scheduledSorted {
-            hasher.update(data: Data("\(s.memory.id)|\(s.validFrom.timeIntervalSince1970)|\(s.memory.photoIDs.count)\n".utf8))
+            hasher.update(data: Data("\(s.validFrom.timeIntervalSince1970)|\(s.validTo.timeIntervalSince1970)|\(memoryFingerprintLine(s.memory))".utf8))
         }
 
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    nonisolated private static func photoFingerprintLine(_ p: PhotoFile, folderId: String) -> String {
+        let date = p.dateTaken.map { String($0.timeIntervalSince1970) } ?? "nil"
+        let tags = p.hierarchicalTags.map(\.fullPath).sorted().joined(separator: ",")
+        let mtime = p.fileModificationDate.map { String($0.timeIntervalSince1970) } ?? "nil"
+        return "\(p.id.uuidString)|\(date)|\(tags)|\(folderId)|\(p.fileSize)|\(mtime)\n"
+    }
+
+    nonisolated private static func memoryFingerprintLine(_ m: Memory) -> String {
+        let photos = m.photoIDs.map(\.uuidString).joined(separator: ",")
+        let subtitle = m.subtitle ?? ""
+        let range = m.dateRange.map { "\($0.lowerBound.timeIntervalSince1970)-\($0.upperBound.timeIntervalSince1970)" } ?? "nil"
+        return "\(m.id)|\(m.type.rawValue)|\(m.title)|\(subtitle)|\(m.coverPhotoID.uuidString)|\(photos)|\(m.score)|\(range)\n"
     }
 
     // MARK: - Photo / Folder maps
@@ -206,7 +263,7 @@ actor WidgetSnapshotExporter {
         return Array(sorted.prefix(limit))
     }
 
-    private func buildFolderIdMap(rootFolder: PhotoFolder?) -> [URL: String] {
+    nonisolated private static func buildFolderIdMap(rootFolder: PhotoFolder?) -> [URL: String] {
         var out: [URL: String] = [:]
         guard let root = rootFolder else { return out }
         func walk(_ folder: PhotoFolder) {
@@ -216,6 +273,18 @@ actor WidgetSnapshotExporter {
         }
         walk(root)
         return out
+    }
+
+    /// Human-readable parent chain, matching `FolderCatalogEntry.pathDescription`.
+    nonisolated private static func folderPathMap(rootFolder: PhotoFolder?) -> [UUID: String] {
+        var parents: [UUID: String] = [:]
+        func walk(_ folder: PhotoFolder, parentChain: String) {
+            let chain = parentChain.isEmpty ? folder.name : "\(parentChain) › \(folder.name)"
+            parents[folder.id] = chain
+            for sub in folder.subfolders { walk(sub, parentChain: chain) }
+        }
+        if let root { walk(root, parentChain: "") }
+        return parents
     }
 
     private func makeRef(photo: PhotoFile, folderIdByURL: [URL: String]) -> WidgetPhotoRef {
@@ -230,17 +299,9 @@ actor WidgetSnapshotExporter {
 
     // MARK: - Folder catalog
 
-    private func buildFolderCatalog(rootFolder: PhotoFolder?, leaves: [PhotoFolder]) -> [FolderCatalogEntry] {
-        guard let root = rootFolder else { return [] }
-        // Build path: walk the tree once, recording the parent chain so the
-        // intent picker can show "Trips › Italy 2024" instead of just "Italy 2024".
-        var parents: [UUID: String] = [:]   // folder id -> chain like "Trips › Italy 2024"
-        func walk(_ folder: PhotoFolder, parentChain: String) {
-            let chain = parentChain.isEmpty ? folder.name : "\(parentChain) › \(folder.name)"
-            parents[folder.id] = chain
-            for sub in folder.subfolders { walk(sub, parentChain: chain) }
-        }
-        walk(root, parentChain: "")
+    private static func buildFolderCatalog(rootFolder: PhotoFolder?, leaves: [PhotoFolder]) -> [FolderCatalogEntry] {
+        guard rootFolder != nil else { return [] }
+        let parents = folderPathMap(rootFolder: rootFolder)
 
         return leaves
             .sorted { ($0.dateModified ?? .distantPast) > ($1.dateModified ?? .distantPast) }
@@ -341,40 +402,55 @@ actor WidgetSnapshotExporter {
 
     // MARK: - Thumbnails
 
-    private func generateThumbnails(_ pairs: [(PhotoFile, WidgetPhotoRef)], thumbsDir: URL) async {
+    private func generateThumbnails(_ pairs: [(PhotoFile, WidgetPhotoRef)], thumbsDir: URL) async -> Bool {
         // Cap concurrency: a first-run with the full 500-photo pool would
         // otherwise spawn 500 simultaneous CGImageSource decoders and pin
         // the device's CPU. Sliding window via the in-flight counter keeps
         // exactly `thumbnailConcurrency` decodes inflight at any moment.
         let limit = Self.thumbnailConcurrency
-        await withTaskGroup(of: Void.self) { group in
+        return await withTaskGroup(of: Bool.self, returning: Bool.self) { group in
             var inflight = 0
             var iter = pairs.makeIterator()
+            var allOK = true
+            func drainOne() async {
+                if let ok = await group.next() {
+                    inflight -= 1
+                    if !ok { allOK = false }
+                }
+            }
             while let (photo, ref) = iter.next() {
                 if inflight >= limit {
-                    await group.next()
-                    inflight -= 1
+                    await drainOne()
                 }
                 group.addTask {
                     await Self.writeThumbIfNeeded(photo: photo, ref: ref, thumbsDir: thumbsDir)
                 }
                 inflight += 1
             }
-            await group.waitForAll()
+            while inflight > 0 {
+                await drainOne()
+            }
+            return allOK
         }
     }
 
-    private nonisolated static func writeThumbIfNeeded(photo: PhotoFile, ref: WidgetPhotoRef, thumbsDir: URL) async {
+    /// `true` when the dest JPEG is already current or was written. `false`
+    /// only for a write/replace failure after a successful decode — missing
+    /// sources are skipped (logged) so a deleted file can't pin retries.
+    private nonisolated static func writeThumbIfNeeded(photo: PhotoFile, ref: WidgetPhotoRef, thumbsDir: URL) async -> Bool {
         let dest = thumbsDir.appendingPathComponent(ref.thumbnailFilename)
         let fm = FileManager.default
         let srcMod = (try? photo.url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
         let dstMod = (try? dest.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
         if let srcMod, let dstMod, dstMod >= srcMod, fm.fileExists(atPath: dest.path) {
-            return
+            return true
         }
 
         let opts: [CFString: Any] = [kCGImageSourceShouldCache: false]
-        guard let src = CGImageSourceCreateWithURL(photo.url as CFURL, opts as CFDictionary) else { return }
+        guard let src = CGImageSourceCreateWithURL(photo.url as CFURL, opts as CFDictionary) else {
+            Log.widget.debug("Skip widget thumb; unreadable source \(Log.r.filename(photo.filename))")
+            return true
+        }
         let thumbOpts: [CFString: Any] = [
             kCGImageSourceThumbnailMaxPixelSize: thumbMaxPixel,
             kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -387,7 +463,10 @@ actor WidgetSnapshotExporter {
         // below forces the decode anyway (into a malloc-backed context), so the
         // eager flag would only add a second IOSurface-backed buffer per photo
         // and worsen pool pressure during a large export.
-        guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, thumbOpts as CFDictionary) else { return }
+        guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, thumbOpts as CFDictionary) else {
+            Log.widget.debug("Skip widget thumb; decode failed \(Log.r.filename(photo.filename))")
+            return true
+        }
 
         // Encode JPEG via CGImageDestination instead of routing through
         // `UIGraphicsImageRenderer` — its default `UIGraphicsImageRendererFormat()`
@@ -405,7 +484,10 @@ actor WidgetSnapshotExporter {
             UTType.jpeg.identifier as CFString,
             1,
             nil
-        ) else { return }
+        ) else {
+            Log.widget.error("Failed to open widget thumb destination for \(Log.r.filename(ref.thumbnailFilename))")
+            return false
+        }
         let destProps: [CFString: Any] = [
             kCGImageDestinationLossyCompressionQuality: thumbQuality
         ]
@@ -415,7 +497,8 @@ actor WidgetSnapshotExporter {
         CGImageDestinationAddImage(destination, cg.opaqueCopy(), destProps as CFDictionary)
         guard CGImageDestinationFinalize(destination) else {
             try? fm.removeItem(at: tmp)
-            return
+            Log.widget.error("Failed to finalize widget thumb \(Log.r.filename(ref.thumbnailFilename))")
+            return false
         }
         do {
             if fm.fileExists(atPath: dest.path) {
@@ -423,8 +506,11 @@ actor WidgetSnapshotExporter {
             } else {
                 try fm.moveItem(at: tmp, to: dest)
             }
+            return true
         } catch {
             try? fm.removeItem(at: tmp)
+            Log.widget.error("Failed to commit widget thumb \(Log.r.filename(ref.thumbnailFilename)): \(Log.r.error(error))")
+            return false
         }
     }
 
@@ -441,15 +527,21 @@ actor WidgetSnapshotExporter {
 
     // MARK: - JSON
 
-    private func writeJSON<T: Encodable>(_ value: T, to url: URL?) {
-        guard let url else { return }
+    @discardableResult
+    private func writeJSON<T: Encodable>(_ value: T, to url: URL?) -> Bool {
+        guard let url else {
+            Log.widget.error("Failed to write widget JSON: destination URL is nil")
+            return false
+        }
         do {
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .iso8601
             let data = try encoder.encode(value)
             try data.write(to: url, options: .atomic)
+            return true
         } catch {
             Log.widget.error("Failed to write \(Log.r.filename(url.lastPathComponent)): \(Log.r.error(error))")
+            return false
         }
     }
 }

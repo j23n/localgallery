@@ -25,9 +25,21 @@ private let decodeLimiter = AsyncSemaphore(limit: 4)
 final class ThumbnailService {
     private let thumbnailCache = NSCache<NSURL, UIImage>()
     private let fullImageCache = NSCache<NSURL, UIImage>()
-    /// Cropped face cells. Keyed by path + region + cell size, not by photo —
-    /// two faces in one group shot must not share a bitmap.
+    /// Cropped face cells. Keyed by path + region + cell size + source stamp,
+    /// not by photo — two faces in one group shot must not share a bitmap.
     private let faceCropCache = NSCache<NSString, UIImage>()
+
+    /// Source identity recorded when an in-memory thumbnail was stored.
+    /// Lookups compare this to the live size/mtime (or content identifier)
+    /// so a replaced file doesn't keep painting the old JPEG.
+    private var thumbnailStamps: [NSURL: FileProviderDetector.ContentVersion] = [:]
+    private var fullImageStamps: [NSURL: FileProviderDetector.ContentVersion] = [:]
+    /// Pixel-size of the bitmap sitting in `fullImageCache` for that URL.
+    /// A 1080 export must not satisfy a later 2000 viewer load.
+    private var fullImagePixelSizes: [NSURL: CGFloat] = [:]
+    /// Face-crop cache keys per source URL, so scan-modified invalidation
+    /// can drop every region/size variant without enumerating `NSCache`.
+    private var faceCropKeysByURL: [URL: Set<NSString>] = [:]
 
     private let thumbnailDiskCacheDir: URL
 
@@ -56,7 +68,13 @@ final class ThumbnailService {
     /// disk — used by the viewer to populate an initial bitmap before the
     /// async path loads at full size.
     func cachedThumbnail(for url: URL) -> UIImage? {
-        thumbnailCache.object(forKey: url as NSURL)
+        let key = url as NSURL
+        guard let image = thumbnailCache.object(forKey: key) else { return nil }
+        guard isFresh(url, stamp: thumbnailStamps[key]) else {
+            evictInMemoryThumbnail(for: url)
+            return nil
+        }
+        return image
     }
 
     /// Async load: memory cache → disk cache → ImageIO/AVAsset generation.
@@ -69,7 +87,7 @@ final class ThumbnailService {
     /// survives the source's eviction, so subsequent grid scrolls don't have
     /// to re-fetch.
     func thumbnail(for url: URL, size: CGSize, isVideo: Bool = false, useQuickLook: Bool = false) async -> UIImage? {
-        if let cached = thumbnailCache.object(forKey: url as NSURL) {
+        if let cached = cachedThumbnail(for: url) {
             return cached
         }
 
@@ -109,7 +127,9 @@ final class ThumbnailService {
                 return nil
             }
             let cost = image.cgImage.map { $0.bytesPerRow * $0.height } ?? 0
-            thumbnailCache.setObject(image, forKey: url as NSURL, cost: cost)
+            let key = url as NSURL
+            thumbnailStamps[key] = Self.sourceStamp(for: url)
+            thumbnailCache.setObject(image, forKey: key, cost: cost)
             return image
         } catch is CancellationError {
             Log.thumb.debug("Cancelled: \(Log.r.filename(url.lastPathComponent))")
@@ -130,7 +150,27 @@ final class ThumbnailService {
     /// Drops the in-memory entry for `url` without touching the on-disk JPEG.
     /// Tests use this to force a disk-cache hit after the source file is gone.
     func evictInMemoryThumbnail(for url: URL) {
-        thumbnailCache.removeObject(forKey: url as NSURL)
+        let key = url as NSURL
+        thumbnailCache.removeObject(forKey: key)
+        thumbnailStamps.removeValue(forKey: key)
+    }
+
+    /// Drops in-memory thumbnails, full images, and face crops for URLs the
+    /// scanner reported as modified. Disk JPEGs stay; the next load compares
+    /// size/mtime and regenerates when the source is newer.
+    func invalidateCachedImages(for urls: [URL]) {
+        for url in urls {
+            evictInMemoryThumbnail(for: url)
+            let key = url as NSURL
+            fullImageCache.removeObject(forKey: key)
+            fullImageStamps.removeValue(forKey: key)
+            fullImagePixelSizes.removeValue(forKey: key)
+            if let keys = faceCropKeysByURL.removeValue(forKey: url) {
+                for cropKey in keys {
+                    faceCropCache.removeObject(forKey: cropKey)
+                }
+            }
+        }
     }
 
     /// Generates or loads a thumbnail — `nonisolated` for cooperative pool
@@ -166,9 +206,7 @@ final class ThumbnailService {
                     return image
                 }
             } else {
-                let sourceModDate = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-                let cacheModDate = (try? diskPath.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-                if let src = sourceModDate, let cache = cacheModDate, cache >= src,
+                if diskStampMatchesSource(diskPath: diskPath, source: url),
                    let image = loadDiskCachedJPEG(at: diskPath) {
                     return image
                 }
@@ -232,6 +270,71 @@ final class ThumbnailService {
         }
     }
 
+    /// Cheap size/mtime/content-identifier read — the same keys
+    /// `FileProviderDetector.sizeKeys` uses, without the ubiquitous probe.
+    nonisolated static func sourceStamp(for url: URL) -> FileProviderDetector.ContentVersion {
+        let values = try? url.resourceValues(forKeys: [
+            .fileContentIdentifierKey,
+            .contentModificationDateKey,
+            .fileSizeKey,
+        ])
+        return FileProviderDetector.ContentVersion(
+            contentIdentifier: values?.fileContentIdentifier.map(String.init),
+            modificationDate: values?.contentModificationDate,
+            size: values?.fileSize.map(Int64.init)
+        )
+    }
+
+    /// True when the cached bitmap still matches the live file. A missing
+    /// source keeps the last-known image (same contract as the disk JPEG).
+    private func isFresh(_ url: URL, stamp: FileProviderDetector.ContentVersion?) -> Bool {
+        guard let stamp else { return false }
+        if Self.sourceFileIsMissing(url) { return true }
+        return FileProviderDetector.ContentVersion.sameContent(stamp, Self.sourceStamp(for: url))
+    }
+
+    private nonisolated static func stampURL(nextTo diskPath: URL) -> URL {
+        diskPath.deletingPathExtension().appendingPathExtension("stamp")
+    }
+
+    private nonisolated static func writeDiskStamp(
+        _ stamp: FileProviderDetector.ContentVersion, nextTo diskPath: URL
+    ) {
+        let size = stamp.size.map(String.init) ?? ""
+        // Milliseconds avoid Date equality failing after a Double string round-trip.
+        let mtime = stamp.modificationDate.map { String(Int64(($0.timeIntervalSince1970 * 1000).rounded())) } ?? ""
+        let id = stamp.contentIdentifier ?? ""
+        try? "\(size)|\(mtime)|\(id)".data(using: .utf8)?.write(
+            to: stampURL(nextTo: diskPath), options: .atomic
+        )
+    }
+
+    /// Disk JPEG is reusable when its sibling stamp matches the live source
+    /// (size + mtime + content identifier). Legacy JPEGs without a stamp
+    /// fall back to cache-mtime >= source-mtime.
+    private nonisolated static func diskStampMatchesSource(diskPath: URL, source: URL) -> Bool {
+        let stampPath = stampURL(nextTo: diskPath)
+        if let data = try? Data(contentsOf: stampPath),
+           let text = String(data: data, encoding: .utf8) {
+            let parts = text.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+            let size = parts.first.flatMap { Int64($0) }
+            let storedMs = parts.count > 1 ? Int64(parts[1]) : nil
+            let contentID = parts.count > 2 && !parts[2].isEmpty ? parts[2] : nil
+            let live = sourceStamp(for: source)
+            if let l = contentID, let r = live.contentIdentifier {
+                return l == r
+            }
+            let liveMs = live.modificationDate.map { Int64(($0.timeIntervalSince1970 * 1000).rounded()) }
+            return size == live.size && storedMs == liveMs
+        }
+        let sourceModDate = (try? source.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        let cacheModDate = (try? diskPath.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        if let src = sourceModDate, let cache = cacheModDate {
+            return cache >= src
+        }
+        return false
+    }
+
     private nonisolated static func isNotFoundError(_ error: Error) -> Bool {
         let nsError = error as NSError
         if nsError.domain == NSCocoaErrorDomain {
@@ -260,6 +363,7 @@ final class ThumbnailService {
             let cgImage = rep.cgImage
             if let jpegData = opaqueJPEGData(from: cgImage, quality: 0.7) {
                 try? jpegData.write(to: diskPath, options: .atomic)
+                writeDiskStamp(sourceStamp(for: url), nextTo: diskPath)
             }
             return rep.uiImage
         } catch is CancellationError {
@@ -288,6 +392,7 @@ final class ThumbnailService {
         try Task.checkCancellation()
         if let jpegData = opaqueJPEGData(from: cgImage, quality: 0.7) {
             try? jpegData.write(to: diskPath, options: .atomic)
+            writeDiskStamp(sourceStamp(for: url), nextTo: diskPath)
         }
         return UIImage(cgImage: cgImage)
     }
@@ -312,6 +417,7 @@ final class ThumbnailService {
         try Task.checkCancellation()
         if let jpegData = opaqueJPEGData(from: cgImage, quality: 0.7) {
             try? jpegData.write(to: diskPath, options: .atomic)
+            writeDiskStamp(sourceStamp(for: url), nextTo: diskPath)
         }
         return UIImage(cgImage: cgImage)
     }
@@ -369,6 +475,10 @@ final class ThumbnailService {
         thumbnailCache.removeAllObjects()
         fullImageCache.removeAllObjects()
         faceCropCache.removeAllObjects()
+        thumbnailStamps.removeAll()
+        fullImageStamps.removeAll()
+        fullImagePixelSizes.removeAll()
+        faceCropKeysByURL.removeAll()
         try? FileManager.default.removeItem(at: thumbnailDiskCacheDir)
         try? FileManager.default.createDirectory(at: thumbnailDiskCacheDir, withIntermediateDirectories: true)
         Log.thumb.info("Thumbnail cache cleared")
@@ -378,7 +488,8 @@ final class ThumbnailService {
     /// as grid thumbnails, crops, then drops the source so a 300-face grid
     /// never holds 300 viewer-sized bitmaps.
     func faceCrop(for url: URL, region: FaceRegion, cellSize: CGFloat) async -> UIImage? {
-        let key = Self.faceCropKey(url: url, region: region, cellSize: cellSize)
+        let stamp = Self.sourceStamp(for: url)
+        let key = Self.faceCropKey(url: url, region: region, cellSize: cellSize, stamp: stamp)
         if let cached = faceCropCache.object(forKey: key) {
             return cached
         }
@@ -396,6 +507,7 @@ final class ThumbnailService {
             let cropped = PersonThumbnailView.crop(source, to: region)
             let cost = cropped.cgImage.map { $0.bytesPerRow * $0.height } ?? 0
             faceCropCache.setObject(cropped, forKey: key, cost: cost)
+            faceCropKeysByURL[url, default: []].insert(key)
             return cropped
         } catch is CancellationError {
             await decodeLimiter.release()
@@ -406,20 +518,30 @@ final class ThumbnailService {
         }
     }
 
-    private static func faceCropKey(url: URL, region: FaceRegion, cellSize: CGFloat) -> NSString {
-        "\(url.path)#\(region.centerX),\(region.centerY),\(region.width),\(region.height)#\(Int(cellSize.rounded()))" as NSString
+    private static func faceCropKey(
+        url: URL, region: FaceRegion, cellSize: CGFloat,
+        stamp: FileProviderDetector.ContentVersion
+    ) -> NSString {
+        let stampPart = "\(stamp.contentIdentifier ?? "")|\(stamp.size ?? 0)|\(stamp.modificationDate?.timeIntervalSince1970 ?? 0)"
+        return "\(url.path)#\(region.centerX),\(region.centerY),\(region.width),\(region.height)#\(Int(cellSize.rounded()))#\(stampPart)" as NSString
     }
 
     // MARK: - Full Resolution
 
-    func loadFullImage(for url: URL) async -> UIImage? {
-        if let cached = fullImageCache.object(forKey: url as NSURL) {
+    func loadFullImage(for url: URL, maxPixelSize: CGFloat = 2000) async -> UIImage? {
+        let key = url as NSURL
+        if let cached = fullImageCache.object(forKey: key),
+           let cachedSize = fullImagePixelSizes[key],
+           cachedSize >= maxPixelSize,
+           isFresh(url, stamp: fullImageStamps[key]) {
             return cached
         }
         do {
-            guard let image = try await Self.generateFullImage(for: url) else { return nil }
+            guard let image = try await Self.generateFullImage(for: url, maxPixelSize: maxPixelSize) else { return nil }
             let cost = image.cgImage.map { $0.bytesPerRow * $0.height } ?? 0
-            fullImageCache.setObject(image, forKey: url as NSURL, cost: cost)
+            fullImageCache.setObject(image, forKey: key, cost: cost)
+            fullImagePixelSizes[key] = maxPixelSize
+            fullImageStamps[key] = Self.sourceStamp(for: url)
             return image
         } catch is CancellationError {
             Log.thumb.debug("Cancelled full image: \(Log.r.filename(url.lastPathComponent))")
@@ -429,7 +551,7 @@ final class ThumbnailService {
         }
     }
 
-    private nonisolated static func generateFullImage(for url: URL) async throws -> UIImage? {
+    private nonisolated static func generateFullImage(for url: URL, maxPixelSize: CGFloat) async throws -> UIImage? {
         try Task.checkCancellation()
         let options: [CFString: Any] = [kCGImageSourceShouldCache: false]
         guard let source = CGImageSourceCreateWithURL(url as CFURL, options as CFDictionary) else {
@@ -437,8 +559,10 @@ final class ThumbnailService {
         }
         try Task.checkCancellation()
         // 2000px is sharp on phone screens, much faster to decode than 3600px.
+        // Slideshow export passes the requested canvas edge so we don't decode
+        // a 2000px bitmap only to scale it down to 1080.
         let thumbOptions: [CFString: Any] = [
-            kCGImageSourceThumbnailMaxPixelSize: 2000,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceShouldCache: false,

@@ -4,8 +4,12 @@ import CoreImage
 import UIKit
 
 /// Renders a memory's photo list as a crossfading slideshow MP4 file.
-/// Output is 1080×1080 square, H.264, 30 fps. Each photo is held then
-/// cross-fades into the next.
+/// Output defaults to 1080×1080 square, H.264, 30 fps. Each photo is held
+/// then cross-fades into the next.
+///
+/// Decode is a two-frame window (current + next). Finished frames are
+/// released before the following photo is loaded so a 75-photo memory never
+/// retains 75 decoded bitmaps.
 enum SlideshowVideoRenderer {
     struct Options {
         var canvasSize = CGSize(width: 1080, height: 1080)
@@ -20,6 +24,38 @@ enum SlideshowVideoRenderer {
         case pixelBufferPoolFailed
         case thumbnailFailed
         case appendFailed
+    }
+
+    /// Peak number of decoded frames held by the most recent `streamFrames`
+    /// / `render` call. Tests assert the window stays at current+next.
+    enum RetentionMetrics: @unchecked Sendable {
+        private static let lock = NSLock()
+        nonisolated(unsafe) private static var retained = 0
+        nonisolated(unsafe) private static var maxRetained = 0
+
+        static var currentRetained: Int {
+            lock.lock(); defer { lock.unlock() }
+            return retained
+        }
+
+        static var maxRetainedImages: Int {
+            lock.lock(); defer { lock.unlock() }
+            return maxRetained
+        }
+
+        static func reset() {
+            lock.lock()
+            retained = 0
+            maxRetained = 0
+            lock.unlock()
+        }
+
+        fileprivate static func record(_ count: Int) {
+            lock.lock()
+            retained = count
+            if count > maxRetained { maxRetained = count }
+            lock.unlock()
+        }
     }
 
     /// Renders `photos` to an MP4 file in the caches directory.
@@ -64,70 +100,69 @@ enum SlideshowVideoRenderer {
         guard writer.startWriting() else { throw RenderError.writerSetupFailed }
         writer.startSession(atSourceTime: .zero)
 
-        // Preload images at target res.
-        await progress(0)
-        var images: [CGImage] = []
-        images.reserveCapacity(photos.count)
-        for (i, photo) in photos.enumerated() {
-            try Task.checkCancellation()
-            let ui = await loadImage(photo.url, canvas)
-            guard let cg = ui?.cgImage ?? ui?.normalizedCGImage() else {
-                continue
-            }
-            images.append(cg)
-            let p = Double(i + 1) / Double(photos.count) * 0.25
-            await progress(p)
-        }
-        guard !images.isEmpty else { throw RenderError.thumbnailFailed }
-
         let holdFrames = Int(options.holdSeconds * Double(options.frameRate))
         let crossFrames = Int(options.crossfadeSeconds * Double(options.frameRate))
         let fpsDuration = CMTimeMake(value: 1, timescale: options.frameRate)
+        let queue = DispatchQueue(label: "slideshow.render")
 
         var frameIndex: Int64 = 0
-        let queue = DispatchQueue(label: "slideshow.render")
-        let totalSegments = images.count
+        var segmentsDone = 0
 
-        for (idx, cg) in images.enumerated() {
-            // Caller cancellation (in-app Cancel, or the continued-processing
-            // shield expiring) must stop the encode promptly — the wait loops
-            // below only observe it when the writer applies backpressure.
+        try await streamFrames(
+            photos: photos,
+            canvas: canvas,
+            loadImage: loadImage,
+            progress: { @MainActor p in
+                // streamFrames reports decode-window progress in 0…0.25;
+                // encode fills 0.25…0.99 via the visit callback below.
+                if p <= 0.25 { await progress(p) }
+            }
+        ) { current, next in
             try Task.checkCancellation()
 
-            // Hold the current frame.
             for _ in 0..<holdFrames {
-                while !input.isReadyForMoreMediaData { try await Task.sleep(nanoseconds: 5_000_000) }
-                guard let buffer = makePixelBuffer(adaptor: adaptor, canvas: canvas) else {
-                    throw RenderError.pixelBufferPoolFailed
+                try Task.checkCancellation()
+                while !input.isReadyForMoreMediaData {
+                    try Task.checkCancellation()
+                    try await Task.sleep(nanoseconds: 5_000_000)
                 }
-                try await draw(into: buffer, top: cg, bottom: nil, alpha: 1.0, canvas: canvas, queue: queue)
-                let time = CMTimeMultiply(fpsDuration, multiplier: Int32(frameIndex))
-                if !adaptor.append(buffer, withPresentationTime: time) {
-                    throw RenderError.appendFailed
-                }
+                try await appendFrame(
+                    adaptor: adaptor,
+                    canvas: canvas,
+                    queue: queue,
+                    frameIndex: frameIndex,
+                    fpsDuration: fpsDuration,
+                    top: current,
+                    bottom: nil,
+                    alpha: 1.0
+                )
                 frameIndex += 1
             }
 
-            // Crossfade to the next (if there is one).
-            if idx < images.count - 1 {
-                let next = images[idx + 1]
+            if let next {
                 for f in 0..<crossFrames {
-                    while !input.isReadyForMoreMediaData { try await Task.sleep(nanoseconds: 5_000_000) }
-                    guard let buffer = makePixelBuffer(adaptor: adaptor, canvas: canvas) else {
-                        throw RenderError.pixelBufferPoolFailed
+                    try Task.checkCancellation()
+                    while !input.isReadyForMoreMediaData {
+                        try Task.checkCancellation()
+                        try await Task.sleep(nanoseconds: 5_000_000)
                     }
-                    let alpha = Double(f + 1) / Double(crossFrames)
-                    try await draw(into: buffer, top: next, bottom: cg, alpha: alpha, canvas: canvas, queue: queue)
-                    let time = CMTimeMultiply(fpsDuration, multiplier: Int32(frameIndex))
-                    if !adaptor.append(buffer, withPresentationTime: time) {
-                        throw RenderError.appendFailed
-                    }
+                    let alpha = Double(f + 1) / Double(max(crossFrames, 1))
+                    try await appendFrame(
+                        adaptor: adaptor,
+                        canvas: canvas,
+                        queue: queue,
+                        frameIndex: frameIndex,
+                        fpsDuration: fpsDuration,
+                        top: next,
+                        bottom: current,
+                        alpha: alpha
+                    )
                     frameIndex += 1
                 }
             }
 
-            // 25% for load, then 75% for the render portion.
-            let p = 0.25 + Double(idx + 1) / Double(totalSegments) * 0.75
+            segmentsDone += 1
+            let p = 0.25 + Double(segmentsDone) / Double(max(photos.count, 1)) * 0.75
             await progress(min(p, 0.99))
         }
 
@@ -142,7 +177,82 @@ enum SlideshowVideoRenderer {
         return outURL
     }
 
+    /// Walks `photos` with a two-frame decode window. `visit` receives the
+    /// current frame and the already-decoded next frame (nil on the last
+    /// photo). After `visit` returns, `current` is released and `next`
+    /// becomes current.
+    ///
+    /// Failed loads are skipped, matching the historical renderer. Throws
+    /// `thumbnailFailed` when every photo fails to decode.
+    static func streamFrames(
+        photos: [PhotoFile],
+        canvas: CGSize,
+        loadImage: @escaping (URL, CGSize) async -> UIImage?,
+        progress: (@MainActor (Double) -> Void)? = nil,
+        visit: (CGImage, CGImage?) async throws -> Void
+    ) async throws {
+        guard !photos.isEmpty else { throw RenderError.noPhotos }
+        RetentionMetrics.reset()
+        defer { RetentionMetrics.record(0) }
+
+        var nextIndex = 0
+        func loadCG() async throws -> CGImage? {
+            while nextIndex < photos.count {
+                try Task.checkCancellation()
+                let photo = photos[nextIndex]
+                nextIndex += 1
+                let ui = await loadImage(photo.url, canvas)
+                if let cg = autoreleasepool(invoking: { ui?.cgImage ?? ui?.normalizedCGImage() }) {
+                    return cg
+                }
+            }
+            return nil
+        }
+
+        if let progress { await progress(0) }
+        guard var current = try await loadCG() else { throw RenderError.thumbnailFailed }
+        RetentionMetrics.record(1)
+        if let progress {
+            let loaded = Double(nextIndex) / Double(photos.count)
+            await progress(min(loaded * 0.25, 0.25))
+        }
+
+        while true {
+            try Task.checkCancellation()
+            let next = try await loadCG()
+            RetentionMetrics.record(next == nil ? 1 : 2)
+            if let progress {
+                let loaded = Double(nextIndex) / Double(photos.count)
+                await progress(min(loaded * 0.25, 0.25))
+            }
+            try await visit(current, next)
+            guard let next else { break }
+            current = next
+            RetentionMetrics.record(1)
+        }
+    }
+
     // MARK: - Frame rendering
+
+    private static func appendFrame(
+        adaptor: AVAssetWriterInputPixelBufferAdaptor,
+        canvas: CGSize,
+        queue: DispatchQueue,
+        frameIndex: Int64,
+        fpsDuration: CMTime,
+        top: CGImage,
+        bottom: CGImage?,
+        alpha: Double
+    ) async throws {
+        guard let buffer = makePixelBuffer(adaptor: adaptor, canvas: canvas) else {
+            throw RenderError.pixelBufferPoolFailed
+        }
+        try await draw(into: buffer, top: top, bottom: bottom, alpha: alpha, canvas: canvas, queue: queue)
+        let time = CMTimeMultiply(fpsDuration, multiplier: Int32(frameIndex))
+        if !adaptor.append(buffer, withPresentationTime: time) {
+            throw RenderError.appendFailed
+        }
+    }
 
     private static func makePixelBuffer(adaptor: AVAssetWriterInputPixelBufferAdaptor, canvas: CGSize) -> CVPixelBuffer? {
         var pb: CVPixelBuffer?
@@ -179,37 +289,39 @@ enum SlideshowVideoRenderer {
         let pb = UnsafeSendable(value: pixelBuffer)
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             queue.async {
-                let pixelBuffer = pb.value
-                CVPixelBufferLockBaseAddress(pixelBuffer, [])
-                defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, []) }
+                autoreleasepool {
+                    let pixelBuffer = pb.value
+                    CVPixelBufferLockBaseAddress(pixelBuffer, [])
+                    defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, []) }
 
-                let width = CVPixelBufferGetWidth(pixelBuffer)
-                let height = CVPixelBufferGetHeight(pixelBuffer)
-                let base = CVPixelBufferGetBaseAddress(pixelBuffer)
-                let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
-                let colorSpace = CGColorSpaceCreateDeviceRGB()
-                let bitmapInfo = CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
-                guard let ctx = CGContext(data: base, width: width, height: height,
-                                          bitsPerComponent: 8, bytesPerRow: bytesPerRow,
-                                          space: colorSpace, bitmapInfo: bitmapInfo) else {
-                    cont.resume(); return
+                    let width = CVPixelBufferGetWidth(pixelBuffer)
+                    let height = CVPixelBufferGetHeight(pixelBuffer)
+                    let base = CVPixelBufferGetBaseAddress(pixelBuffer)
+                    let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+                    let colorSpace = CGColorSpaceCreateDeviceRGB()
+                    let bitmapInfo = CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+                    guard let ctx = CGContext(data: base, width: width, height: height,
+                                              bitsPerComponent: 8, bytesPerRow: bytesPerRow,
+                                              space: colorSpace, bitmapInfo: bitmapInfo) else {
+                        return
+                    }
+
+                    // Paint black background (memory slideshow look).
+                    ctx.setFillColor(UIColor.black.cgColor)
+                    ctx.fill(CGRect(origin: .zero, size: canvas))
+
+                    // Image is drawn flipped — stored in context-ascending pixel space.
+                    ctx.saveGState()
+                    ctx.translateBy(x: 0, y: canvas.height)
+                    ctx.scaleBy(x: 1, y: -1)
+
+                    if let bottom {
+                        draw(image: bottom, in: ctx, canvas: canvas, alpha: 1.0)
+                    }
+                    draw(image: top, in: ctx, canvas: canvas, alpha: CGFloat(alpha))
+
+                    ctx.restoreGState()
                 }
-
-                // Paint black background (memory slideshow look).
-                ctx.setFillColor(UIColor.black.cgColor)
-                ctx.fill(CGRect(origin: .zero, size: canvas))
-
-                // Image is drawn flipped — stored in context-ascending pixel space.
-                ctx.saveGState()
-                ctx.translateBy(x: 0, y: canvas.height)
-                ctx.scaleBy(x: 1, y: -1)
-
-                if let bottom {
-                    draw(image: bottom, in: ctx, canvas: canvas, alpha: 1.0)
-                }
-                draw(image: top, in: ctx, canvas: canvas, alpha: CGFloat(alpha))
-
-                ctx.restoreGState()
                 cont.resume()
             }
         }

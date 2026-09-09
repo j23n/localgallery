@@ -1,6 +1,7 @@
 import CoreGraphics
 import Foundation
 import ImageIO
+import UIKit
 import UniformTypeIdentifiers
 import XCTest
 @testable import LocalGallery
@@ -113,19 +114,113 @@ final class ThumbnailServiceTests: XCTestCase {
         XCTAssertNotNil(second)
     }
 
+    // MARK: - Source freshness
+
+    /// Replacing the file with different bytes (newer mtime) must miss the
+    /// in-memory cache and return the new image, not the first decode.
+    func testReplacedSourceServesTheNewBitmap() async throws {
+        let temp = makeTemp()
+        let service = ThumbnailService(thumbnailDir: temp.appending("thumbs", isDirectory: true))
+        let source = temp.appending("photo.jpg")
+        try writeTinyJPEG(to: source, red: 0xE0, green: 0x10, blue: 0x10)
+
+        let first = try XCTUnwrap(await service.thumbnail(for: source, size: CGSize(width: 64, height: 64)))
+        let firstPixel = try XCTUnwrap(samplePixel(first))
+
+        try writeTinyJPEG(to: source, red: 0x10, green: 0x10, blue: 0xE0)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(5)],
+            ofItemAtPath: source.path
+        )
+
+        let second = try XCTUnwrap(await service.thumbnail(for: source, size: CGSize(width: 64, height: 64)))
+        let secondPixel = try XCTUnwrap(samplePixel(second))
+        XCTAssertNotEqual(firstPixel.0, secondPixel.0, "stale red cache must not survive a blue replacement")
+        XCTAssertGreaterThan(secondPixel.2, secondPixel.0, "replacement should decode as blue-dominant")
+    }
+
+    /// Same-mtime rewrite with a different file size still misses: the
+    /// stamp includes size, not just mtime.
+    func testSameMtimeSizeChangeMissesTheMemoryCache() async throws {
+        let temp = makeTemp()
+        let service = ThumbnailService(thumbnailDir: temp.appending("thumbs", isDirectory: true))
+        let source = temp.appending("photo.jpg")
+        try writeTinyJPEG(to: source, width: 8, height: 8, red: 0xE0, green: 0x10, blue: 0x10)
+        let first = try XCTUnwrap(await service.thumbnail(for: source, size: CGSize(width: 64, height: 64)))
+        let firstPixel = try XCTUnwrap(samplePixel(first))
+        let originalMtime = try FileManager.default.attributesOfItem(atPath: source.path)[.modificationDate] as? Date
+
+        try writeTinyJPEG(to: source, width: 32, height: 32, red: 0x10, green: 0x10, blue: 0xE0)
+        if let originalMtime {
+            try FileManager.default.setAttributes(
+                [.modificationDate: originalMtime],
+                ofItemAtPath: source.path
+            )
+        }
+
+        let second = try XCTUnwrap(await service.thumbnail(for: source, size: CGSize(width: 64, height: 64)))
+        let secondPixel = try XCTUnwrap(samplePixel(second))
+        XCTAssertNotEqual(firstPixel.0, secondPixel.0)
+    }
+
+    /// Scan-modified URLs can be dropped explicitly; the next load re-reads
+    /// the source even if the caller hasn't compared stamps itself.
+    func testInvalidateCachedImagesForcesReload() async throws {
+        let temp = makeTemp()
+        let service = ThumbnailService(thumbnailDir: temp.appending("thumbs", isDirectory: true))
+        let source = temp.appending("photo.jpg")
+        try writeTinyJPEG(to: source, red: 0xE0, green: 0x10, blue: 0x10)
+        _ = await service.thumbnail(for: source, size: CGSize(width: 64, height: 64))
+        _ = await service.loadFullImage(for: source, maxPixelSize: 64)
+        XCTAssertNotNil(service.cachedThumbnail(for: source))
+
+        service.invalidateCachedImages(for: [source])
+        XCTAssertNil(service.cachedThumbnail(for: source))
+
+        try writeTinyJPEG(to: source, red: 0x10, green: 0x10, blue: 0xE0)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(5)],
+            ofItemAtPath: source.path
+        )
+        let reloaded = try XCTUnwrap(await service.thumbnail(for: source, size: CGSize(width: 64, height: 64)))
+        let pixel = try XCTUnwrap(samplePixel(reloaded))
+        XCTAssertGreaterThan(pixel.2, pixel.0)
+    }
+
+    /// Slideshow export asks for the canvas edge; a later viewer-sized load
+    /// must not reuse a smaller cached bitmap.
+    func testFullImageCacheDoesNotSatisfyALargerRequest() async throws {
+        let temp = makeTemp()
+        let service = ThumbnailService(thumbnailDir: temp.appending("thumbs", isDirectory: true))
+        let source = temp.appending("photo.jpg")
+        try writeTinyJPEG(to: source, width: 64, height: 64)
+
+        let small = try XCTUnwrap(await service.loadFullImage(for: source, maxPixelSize: 16))
+        let large = try XCTUnwrap(await service.loadFullImage(for: source, maxPixelSize: 64))
+        let smallEdge = max(small.size.width, small.size.height)
+        let largeEdge = max(large.size.width, large.size.height)
+        XCTAssertLessThan(smallEdge, largeEdge + 0.5)
+        XCTAssertGreaterThanOrEqual(largeEdge, 32, "64px request should decode more than the 16px export cache")
+    }
+
     // MARK: - Fixture
 
-    /// 8×8 sRGB JPEG so ImageIO has real bytes to decode and cache.
-    private func writeTinyJPEG(to url: URL) throws {
-        let width = 8
-        let height = 8
+    /// sRGB JPEG so ImageIO has real bytes to decode and cache.
+    private func writeTinyJPEG(
+        to url: URL,
+        width: Int = 8,
+        height: Int = 8,
+        red: UInt8 = 0xC0,
+        green: UInt8 = 0x40,
+        blue: UInt8 = 0x20
+    ) throws {
         let bytesPerPixel = 4
         let colorSpace = try XCTUnwrap(CGColorSpace(name: CGColorSpace.sRGB))
         var pixels = [UInt8](repeating: 0, count: width * height * bytesPerPixel)
         for i in stride(from: 0, to: pixels.count, by: 4) {
-            pixels[i] = 0xC0
-            pixels[i + 1] = 0x40
-            pixels[i + 2] = 0x20
+            pixels[i] = red
+            pixels[i + 1] = green
+            pixels[i + 2] = blue
             pixels[i + 3] = 0xFF
         }
         let data = Data(pixels)
@@ -155,5 +250,23 @@ final class ThumbnailServiceTests: XCTestCase {
             CGImageDestinationFinalize(destination),
             "failed to write JPEG at \(url.path)"
         )
+    }
+
+    /// First pixel of a decoded bitmap as (R, G, B). Used to tell a red
+    /// fixture from a blue replacement without depending on exact JPEG bytes.
+    private func samplePixel(_ image: UIImage) -> (UInt8, UInt8, UInt8)? {
+        guard let cg = image.cgImage else { return nil }
+        var pixel = [UInt8](repeating: 0, count: 4)
+        guard let ctx = CGContext(
+            data: &pixel,
+            width: 1,
+            height: 1,
+            bitsPerComponent: 8,
+            bytesPerRow: 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+        return (pixel[0], pixel[1], pixel[2])
     }
 }

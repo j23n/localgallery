@@ -16,6 +16,7 @@ extension PhotoFile {
         filename: String? = nil,
         fileSize: Int64 = 1024,
         dateTaken: Date? = nil,
+        fileModificationDate: Date? = nil,
         dateFromMetadata: Bool = false,
         isVideo: Bool = false,
         livePhotoVideoURL: URL? = nil,
@@ -34,6 +35,7 @@ extension PhotoFile {
             livePhotoVideoURL: livePhotoVideoURL,
             hierarchicalTags: tags.map { HierarchicalTag(raw: $0) },
             countryCode: countryCode,
+            fileModificationDate: fileModificationDate,
             gpsLatitude: gps?.lat,
             gpsLongitude: gps?.lon
         )

@@ -235,8 +235,8 @@ struct CollectionsView: View {
             }
             if Task.isCancelled { await endExportShield(success: false); return }
 
-            let loader: (URL, CGSize) async -> UIImage? = { url, _ in
-                await mgr.loadFullImage(for: url)
+            let loader: (URL, CGSize) async -> UIImage? = { url, size in
+                await mgr.loadFullImage(for: url, maxPixelSize: max(size.width, size.height))
             }
             do {
                 let url = try await SlideshowVideoRenderer.render(

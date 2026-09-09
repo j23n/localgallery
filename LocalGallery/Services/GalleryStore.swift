@@ -1220,6 +1220,13 @@ final class GalleryStore {
         thumbnailService.clearThumbnailCache()
     }
 
+    /// Drops in-memory thumbnails and full-size bitmaps for scan-modified
+    /// URLs so the next load re-reads size/mtime (and the on-disk JPEG if
+    /// that is stale too).
+    func invalidateCachedImages(for urls: [URL]) {
+        thumbnailService.invalidateCachedImages(for: urls)
+    }
+
     // MARK: - EXIF (forwarded to EXIFService)
 
     func loadEXIF(for photo: PhotoFile) async -> EXIFData? {
@@ -1228,8 +1235,8 @@ final class GalleryStore {
 
     // MARK: - Full Resolution
 
-    func loadFullImage(for url: URL) async -> UIImage? {
-        await thumbnailService.loadFullImage(for: url)
+    func loadFullImage(for url: URL, maxPixelSize: CGFloat = 2000) async -> UIImage? {
+        await thumbnailService.loadFullImage(for: url, maxPixelSize: maxPixelSize)
     }
 
     // MARK: - Materialization (forwarded to PhotoMaterializer)

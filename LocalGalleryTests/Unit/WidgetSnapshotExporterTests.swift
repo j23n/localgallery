@@ -161,6 +161,68 @@ final class WidgetSnapshotExporterTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: dest.memoriesURL.path))
     }
 
+    /// A later export that fails while writing JSON must not delete thumbs
+    /// the previous `index.json` still names, and must not replace that
+    /// index. Retrying against a writable destination then succeeds.
+    func testFailedJSONExportLeavesPriorSnapshotUsableAndRetrySucceeds() async throws {
+        let temp = makeTemp()
+        let photoA = temp.appending("a.jpg")
+        try writeTinyJPEG(to: photoA)
+        let firstInputs = makeInputs(photoURL: photoA)
+        let dest = destinations(in: temp)
+        let exporter = WidgetSnapshotExporter()
+
+        XCTAssertTrue(await exporter.export(firstInputs, destinations: dest))
+        let firstSignature = await exporter.lastExportSignature
+        XCTAssertEqual(firstSignature, WidgetSnapshotExporter.contentFingerprint(inputs: firstInputs))
+        let priorIndex = try Data(contentsOf: dest.indexURL)
+        let priorFolders = try Data(contentsOf: dest.foldersURL)
+        let priorTags = try Data(contentsOf: dest.tagsURL)
+        let priorMemories = try Data(contentsOf: dest.memoriesURL)
+        let photoAId = firstInputs.allPhotos[0].id.uuidString
+        let priorThumb = dest.thumbsDir.appendingPathComponent(photoAId + ".jpg")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: priorThumb.path))
+
+        let photoB = temp.appending("b.jpg")
+        try writeTinyJPEG(to: photoB)
+        let secondInputs = makeInputs(photoURL: photoB)
+        let failed = WidgetSnapshotExporter.Destinations(
+            thumbsDir: dest.thumbsDir,
+            indexURL: temp.appending("missing-parent", isDirectory: true)
+                .appendingPathComponent("nope")
+                .appendingPathComponent("index.json"),
+            foldersURL: dest.foldersURL,
+            tagsURL: dest.tagsURL,
+            memoriesURL: dest.memoriesURL
+        )
+        XCTAssertFalse(await exporter.export(secondInputs, destinations: failed))
+        XCTAssertEqual(
+            await exporter.lastExportSignature, firstSignature,
+            "failed export must not replace the last committed signature"
+        )
+        XCTAssertEqual(try Data(contentsOf: dest.indexURL), priorIndex)
+        XCTAssertEqual(try Data(contentsOf: dest.foldersURL), priorFolders)
+        XCTAssertEqual(try Data(contentsOf: dest.tagsURL), priorTags)
+        XCTAssertEqual(try Data(contentsOf: dest.memoriesURL), priorMemories)
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: priorThumb.path),
+            "prior index still names this thumb; GC must not drop it on a failed export"
+        )
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let surviving = try decoder.decode(WidgetIndex.self, from: Data(contentsOf: dest.indexURL))
+        XCTAssertEqual(surviving.photos.map(\.id), [photoAId])
+
+        XCTAssertTrue(await exporter.export(secondInputs, destinations: dest))
+        XCTAssertNotNil(await exporter.lastExportSignature)
+        let retried = try decoder.decode(WidgetIndex.self, from: Data(contentsOf: dest.indexURL))
+        XCTAssertEqual(retried.photos.map(\.id), [secondInputs.allPhotos[0].id.uuidString])
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: dest.thumbsDir.appendingPathComponent(secondInputs.allPhotos[0].id.uuidString + ".jpg").path
+        ))
+    }
+
     func testFailedJSONWriteDoesNotCommitSignatureSoRetrySucceeds() async throws {
         let temp = makeTemp()
         let photoURL = temp.appending("p.jpg")

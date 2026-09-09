@@ -22,7 +22,7 @@ final class PhotoMoveTests: XCTestCase {
         FileManager.default.createFile(atPath: url.path, contents: Data(body.utf8))
     }
 
-    func testMoveRelocatesThePhotoAndBothSidecarSpellings() async {
+    func testMoveRelocatesThePhotoAndBothSidecarSpellings() async throws {
         let h = makeHarness()
         let src = h.tempDir.appending("inbox", isDirectory: true)
         let dest = h.tempDir.appending("italy", isDirectory: true)
@@ -39,16 +39,17 @@ final class PhotoMoveTests: XCTestCase {
 
         XCTAssertEqual(result.moved.count, 1)
         XCTAssertTrue(result.failed.isEmpty)
-        let moved = result.moved[photo.id]
-        XCTAssertEqual(moved?.url.path, dest.appendingPathComponent("shot.jpg").path)
-        XCTAssertEqual(moved?.id, PhotoFile.stableID(for: dest.appendingPathComponent("shot.jpg")))
-        XCTAssertNotEqual(moved?.id, photo.id)
+        let moved = try XCTUnwrap(result.moved[photo.id])
+        XCTAssertEqual(moved.url.path, dest.appendingPathComponent("shot.jpg").path)
+        XCTAssertEqual(moved.id, PhotoFile.stableID(for: dest.appendingPathComponent("shot.jpg")))
+        XCTAssertNotEqual(moved.id, photo.id)
         XCTAssertFalse(FileManager.default.fileExists(atPath: src.appendingPathComponent("shot.jpg").path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: dest.appendingPathComponent("shot.jpg").path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: dest.appendingPathComponent("shot.jpg").path + ".xmp"))
         XCTAssertTrue(FileManager.default.fileExists(atPath: dest.appendingPathComponent("shot.xmp").path))
-        XCTAssertEqual(h.store.allPhotos.map(\.id), [moved?.id])
-        XCTAssertEqual(h.store.rootFolder?.folder(withID: italy.id)?.photos.map(\.id), [moved?.id])
+        XCTAssertEqual(h.store.allPhotos.map(\.id), [moved.id])
+        let destPhotos = try XCTUnwrap(h.store.rootFolder?.folder(withID: italy.id)?.photos.map(\.id))
+        XCTAssertEqual(destPhotos, [moved.id])
         XCTAssertTrue(h.store.rootFolder?.folder(withID: inbox.id)?.photos.isEmpty ?? false)
     }
 
@@ -204,7 +205,7 @@ final class PhotoMoveTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: dest.appendingPathComponent("shot.jpg").path))
     }
 
-    func testFailedRollbackForcesReconciliationAndDoesNotReportFullSuccess() async {
+    func testFailedRollbackForcesReconciliationAndDoesNotReportFullSuccess() async throws {
         let h = makeHarness()
         addTeardownBlock {
             PhotoDiskMove.testFailRoles = []
@@ -228,11 +229,11 @@ final class PhotoMoveTests: XCTestCase {
         XCTAssertEqual(result.partialIDs, [photo.id])
         XCTAssertTrue(result.needsReconciliation)
         XCTAssertTrue(result.failed.isEmpty)
-        let moved = result.moved[photo.id]
-        XCTAssertEqual(moved?.url.path, dest.appendingPathComponent("shot.jpg").path)
+        let moved = try XCTUnwrap(result.moved[photo.id])
+        XCTAssertEqual(moved.url.path, dest.appendingPathComponent("shot.jpg").path)
         XCTAssertTrue(FileManager.default.fileExists(atPath: dest.appendingPathComponent("shot.jpg").path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: src.appendingPathComponent("shot.jpg").path + ".xmp"))
-        XCTAssertEqual(h.store.allPhotos.map(\.id), [moved?.id])
+        XCTAssertEqual(h.store.allPhotos.map(\.id), [moved.id])
     }
 
     func testPromptNamesTheDestination() {

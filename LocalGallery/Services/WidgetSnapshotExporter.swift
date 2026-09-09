@@ -156,9 +156,10 @@ actor WidgetSnapshotExporter {
             at: destinations.thumbsDir, withIntermediateDirectories: true
         )
 
-        // Generate / refresh thumbnails (skips files already up-to-date on disk).
+        // New thumbs land beside the previous set. Do not GC yet — a later
+        // JSON failure must leave the last committed snapshot's referenced
+        // JPEGs on disk.
         let thumbsOK = await generateThumbnails(referencedPhotos.values.map { $0 }, thumbsDir: destinations.thumbsDir)
-        garbageCollectThumbs(thumbsDir: destinations.thumbsDir, keepIDs: Set(referencedPhotos.keys))
 
         let now = Date()
         let index = WidgetIndex(generatedAt: now, photos: indexRefs.map(\.1))
@@ -166,15 +167,39 @@ actor WidgetSnapshotExporter {
         let tagCatalog = TagCatalog(generatedAt: now, tagPaths: tagPaths)
         let memorySnapshot = MemorySnapshot(generatedAt: now, items: memoryItems)
 
-        let jsonOK = writeJSON(index, to: destinations.indexURL)
-            && writeJSON(folderCatalog, to: destinations.foldersURL)
-            && writeJSON(tagCatalog, to: destinations.tagsURL)
-            && writeJSON(memorySnapshot, to: destinations.memoriesURL)
+        // Stage every payload before replacing any live file. Commit the
+        // supporting catalogs first and `index.json` last — that file is
+        // the widget's primary reference — then GC unreferenced thumbs.
+        let staged: [StagedJSON?] = [
+            stageJSON(folderCatalog, beside: destinations.foldersURL),
+            stageJSON(tagCatalog, beside: destinations.tagsURL),
+            stageJSON(memorySnapshot, beside: destinations.memoriesURL),
+            stageJSON(index, beside: destinations.indexURL),
+        ]
+        let jsonStaged = staged.allSatisfy { $0 != nil }
 
-        guard thumbsOK, jsonOK else {
+        guard thumbsOK, jsonStaged else {
+            discardStaged(staged)
             Log.widget.error("Snapshot export incomplete; leaving lastExportSignature unset so the next trigger retries")
             return false
         }
+
+        var commitFailed = false
+        for item in staged.compactMap({ $0 }) {
+            if commitFailed {
+                try? FileManager.default.removeItem(at: item.staged)
+                continue
+            }
+            if !commitStaged(item) {
+                commitFailed = true
+            }
+        }
+        guard !commitFailed else {
+            Log.widget.error("Snapshot export incomplete; leaving lastExportSignature unset so the next trigger retries")
+            return false
+        }
+
+        garbageCollectThumbs(thumbsDir: destinations.thumbsDir, keepIDs: Set(referencedPhotos.keys))
 
         let elapsed = (CFAbsoluteTimeGetCurrent() - t) * 1000
         Log.widget.info("Exported snapshot: \(indexRefs.count) photos, \(memoryItems.count) memories, \(folderEntries.count) folders, \(tagPaths.count) tags in \(String(format: "%.0f", elapsed))ms")
@@ -526,6 +551,45 @@ actor WidgetSnapshotExporter {
     }
 
     // MARK: - JSON
+
+    private struct StagedJSON: Sendable {
+        let dest: URL
+        let staged: URL
+    }
+
+    /// Encodes `value` to a sibling `.exporting` file. The live destination
+    /// is left untouched until `commitStaged` replaces it.
+    private func stageJSON<T: Encodable>(_ value: T, beside dest: URL) -> StagedJSON? {
+        let staged = dest.appendingPathExtension("exporting")
+        guard writeJSON(value, to: staged) else {
+            try? FileManager.default.removeItem(at: staged)
+            return nil
+        }
+        return StagedJSON(dest: dest, staged: staged)
+    }
+
+    private func commitStaged(_ item: StagedJSON) -> Bool {
+        let fm = FileManager.default
+        do {
+            if fm.fileExists(atPath: item.dest.path) {
+                _ = try fm.replaceItemAt(item.dest, withItemAt: item.staged)
+            } else {
+                try fm.moveItem(at: item.staged, to: item.dest)
+            }
+            return true
+        } catch {
+            try? fm.removeItem(at: item.staged)
+            Log.widget.error("Failed to commit \(Log.r.filename(item.dest.lastPathComponent)): \(Log.r.error(error))")
+            return false
+        }
+    }
+
+    private func discardStaged(_ items: [StagedJSON?]) {
+        for item in items {
+            guard let item else { continue }
+            try? FileManager.default.removeItem(at: item.staged)
+        }
+    }
 
     @discardableResult
     private func writeJSON<T: Encodable>(_ value: T, to url: URL?) -> Bool {

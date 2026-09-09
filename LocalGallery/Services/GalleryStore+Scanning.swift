@@ -427,6 +427,14 @@ extension GalleryStore {
             }
         }
 
+        // Stamp checks already drop stale in-memory bitmaps on the next
+        // load; explicit invalidation also evicts them now so a replaced
+        // file cannot keep painting the previous JPEG until something
+        // else misses the cache.
+        if result.rootFolder != nil, !rootUnlistable {
+            invalidateCachedImages(for: result.modifiedURLs)
+        }
+
         return result
     }
 

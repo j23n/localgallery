@@ -17,7 +17,7 @@ pub mod watch;
 
 pub use analysis::{
     progress_title, readiness_blurb, run_analysis, AnalysisPhase, AnalysisProgress,
-    AnalysisSummary, ProgressFn,
+    AnalysisRequest, AnalysisSummary, ProgressFn,
 };
 pub use eligibility::{is_ml_eligible, is_places_candidate, places_needed};
 pub use pack::{

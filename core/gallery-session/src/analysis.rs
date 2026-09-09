@@ -93,17 +93,38 @@ impl AnalysisSummary {
 /// Progress hop used by worker threads.
 pub type ProgressFn = Arc<dyn Fn(AnalysisProgress) + Send + Sync>;
 
+/// Inputs for one Scan Photos run.
+pub struct AnalysisRequest<'a> {
+    /// Library entries at the start of the run.
+    pub photos: &'a [PhotoFile],
+    /// Discovered pack, if any. Ignored when `ml` is off.
+    pub pack: Option<&'a PackStatus>,
+    /// Face/tag cache DB path. Ignored when `ml` is off.
+    pub ml_cache: Option<&'a std::path::Path>,
+    /// Reverse geocoder used for the Places phase.
+    pub geo: &'a dyn ReverseGeocoder,
+    /// On-disk Nominatim cache.
+    pub geo_cache: &'a mut GeoCache,
+    /// Re-write Places even when a path is already present.
+    pub force_places: bool,
+    /// Host-owned cancel flag.
+    pub cancel: &'a AtomicBool,
+    /// Optional progress hop for the banner.
+    pub on_progress: Option<ProgressFn>,
+}
+
 /// Run the three phases. `pack` / `ml_cache` are ignored when `ml` is off.
-pub fn run_analysis(
-    photos: &[PhotoFile],
-    pack: Option<&PackStatus>,
-    ml_cache: Option<&std::path::Path>,
-    geo: &dyn ReverseGeocoder,
-    geo_cache: &mut GeoCache,
-    force_places: bool,
-    cancel: &AtomicBool,
-    on_progress: Option<ProgressFn>,
-) -> AnalysisSummary {
+pub fn run_analysis(request: AnalysisRequest<'_>) -> AnalysisSummary {
+    let AnalysisRequest {
+        photos,
+        pack,
+        ml_cache,
+        geo,
+        geo_cache,
+        force_places,
+        cancel,
+        on_progress,
+    } = request;
     let mut summary = AnalysisSummary {
         photos: photos.len(),
         ..AnalysisSummary::default()
@@ -114,8 +135,14 @@ pub fn run_analysis(
     {
         match (pack, ml_cache, crate::pack::ml_enabled()) {
             (Some(pack), Some(cache), true) => {
-                if let Err(e) = run_ml(&stills, pack, cache, cancel, on_progress.clone(), &mut summary)
-                {
+                if let Err(e) = run_ml(
+                    &stills,
+                    pack,
+                    cache,
+                    cancel,
+                    on_progress.clone(),
+                    &mut summary,
+                ) {
                     if summary.error.is_none() {
                         summary.error = Some(e);
                     }
@@ -201,7 +228,8 @@ fn run_ml(
     }
     let paths: Vec<String> = stills.iter().map(|p| p.path().to_string()).collect();
 
-    let tagging = TaggingEngine::open(cache_db, &pack.directory, vfs.clone()).map_err(|e| e.to_string())?;
+    let tagging =
+        TaggingEngine::open(cache_db, &pack.directory, vfs.clone()).map_err(|e| e.to_string())?;
     tagging.enqueue(&paths).map_err(|e| e.to_string())?;
     let progress = PhaseProgress::new(AnalysisPhase::Tagging, on_progress.clone());
     let tag_summary = tagging

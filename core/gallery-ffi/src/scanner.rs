@@ -923,6 +923,10 @@ pub fn parse_xmp_bytes(bytes: Vec<u8>) -> SidecarParseRecord {
 }
 
 fn sidecar_parse_from(parsed: gallery_meta::media::SwiftXmpParse) -> SidecarParseRecord {
+    let named_without_box = gallery_meta::named_without_box(
+        parsed.face_regions.iter().filter_map(|r| r.name.as_deref()),
+        &parsed.face_decisions,
+    );
     SidecarParseRecord {
         raw_tags: parsed.raw_tags,
         country_code: parsed.country_code,
@@ -944,10 +948,7 @@ fn sidecar_parse_from(parsed: gallery_meta::media::SwiftXmpParse) -> SidecarPars
         face_pack: parsed.core_face_pack,
         face_tagged_at: parsed.core_face_tagged_at,
         face_decisions: parsed.face_decisions,
-        named_without_box: gallery_meta::named_without_box(
-            parsed.face_regions.iter().filter_map(|r| r.name.as_deref()),
-            &parsed.face_decisions,
-        ),
+        named_without_box,
     }
 }
 

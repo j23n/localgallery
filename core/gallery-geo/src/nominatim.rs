@@ -131,7 +131,7 @@ fn nominatim_lookup(
         .query("lat", &format!("{lat}"))
         .query("lon", &format!("{lon}"))
         .call()
-        .map_err(|e| classify_ureq(e))?;
+        .map_err(classify_ureq)?;
     let status = response.status();
     if status == 404 {
         return Ok(None);

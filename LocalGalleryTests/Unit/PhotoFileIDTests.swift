@@ -1,4 +1,5 @@
 import XCTest
+import CoreGraphics
 @testable import LocalGallery
 
 final class PhotoFileIDTests: XCTestCase {

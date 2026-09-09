@@ -657,16 +657,16 @@ impl Window {
         thread::spawn(move || {
             let mut geo_cache = geo_cache;
             let geo = Nominatim::new(endpoint);
-            let summary = session::run_analysis(
-                &photos,
-                pack.as_ref(),
-                Some(&ml_cache),
-                &geo,
-                &mut geo_cache,
-                false,
-                &flag,
-                Some(on_progress),
-            );
+            let summary = session::run_analysis(session::AnalysisRequest {
+                photos: &photos,
+                pack: pack.as_ref(),
+                ml_cache: Some(&ml_cache),
+                geo: &geo,
+                geo_cache: &mut geo_cache,
+                force_places: false,
+                cancel: &flag,
+                on_progress: Some(on_progress),
+            });
             let library = if summary.written_paths.is_empty() {
                 None
             } else {

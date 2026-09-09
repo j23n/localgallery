@@ -83,8 +83,7 @@ pub mod tagger;
 
 pub use cache::{
     CacheDb, ClusterRow, ClusterState, DismissedFace, FaceLibraryStats, FaceThumb, NamedFace,
-    Stats, StoredFace,
-    WorkItem, WorkState,
+    Stats, StoredFace, WorkItem, WorkState,
 };
 pub use encoder::{ImageEncoder, ModelOutput, MultiOutputModel};
 pub use engine::{

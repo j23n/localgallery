@@ -139,7 +139,11 @@ mod tests {
     #[test]
     fn tags_and_country_come_from_the_sidecar_only() {
         let out = merged(SwiftXmpParse {
-            raw_tags: vec!["people/alice".into(), "Scenes/Beach".into(), "people/alice".into()],
+            raw_tags: vec![
+                "people/alice".into(),
+                "Scenes/Beach".into(),
+                "people/alice".into(),
+            ],
             country_code: Some("FR".into()),
             ..Default::default()
         });

@@ -434,7 +434,7 @@ impl FaceEngine {
         if from.is_empty() {
             return Ok(SidecarWritePlan::default());
         }
-        if from.iter().any(|&id| id == into) {
+        if from.contains(&into) {
             return Err(MlError::InvalidMerge {
                 detail: format!("cluster {into} cannot absorb itself"),
             });
@@ -483,10 +483,8 @@ impl FaceEngine {
         for source in &sources {
             match (&kept_name, &source.person_name) {
                 (None, Some(name)) => kept_name = Some(name.clone()),
-                (Some(kept), Some(dropped)) if kept != dropped => {
-                    if !retracting.contains(dropped) {
-                        retracting.push(dropped.clone());
-                    }
+                (Some(kept), Some(dropped)) if kept != dropped && !retracting.contains(dropped) => {
+                    retracting.push(dropped.clone());
                 }
                 _ => {}
             }
@@ -783,7 +781,11 @@ impl FaceEngine {
     }
 
     /// `Ok(true)` when bytes were written.
-    pub(crate) fn write_with_retry(&self, path: &str, request: &FaceWriteRequest) -> MlResult<bool> {
+    pub(crate) fn write_with_retry(
+        &self,
+        path: &str,
+        request: &FaceWriteRequest,
+    ) -> MlResult<bool> {
         let mut attempt = 0;
         loop {
             match write_faces(self.vfs(), path, request) {

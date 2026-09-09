@@ -118,10 +118,7 @@ pub fn review_card(count: usize, side: i32, activate: impl Fn() + 'static) -> gt
     icon.add_css_class("dim-label");
     let title = gtk::Label::new(Some("Review"));
     title.add_css_class("heading");
-    let sub = gtk::Label::new(Some(&format!(
-        "{} unnamed",
-        count
-    )));
+    let sub = gtk::Label::new(Some(&format!("{} unnamed", count)));
     sub.add_css_class("dim-label");
     let col = gtk::Box::new(Orientation::Vertical, 4);
     col.set_halign(Align::Center);

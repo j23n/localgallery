@@ -222,10 +222,7 @@ fn numeric_name_cmp(a: &str, b: &str) -> std::cmp::Ordering {
                 other => return other,
             }
         } else {
-            match ac[i]
-                .to_ascii_lowercase()
-                .cmp(&bc[j].to_ascii_lowercase())
-            {
+            match ac[i].to_ascii_lowercase().cmp(&bc[j].to_ascii_lowercase()) {
                 std::cmp::Ordering::Equal => {
                     i += 1;
                     j += 1;
@@ -1383,26 +1380,17 @@ mod tests {
                 .source,
             PackSource::Bundled
         );
-        let newer = resolve_model_pack(
-            &["mobileclip-s2-v1".into()],
-            &["mobileclip-s2-v2".into()],
-        )
-        .unwrap();
+        let newer =
+            resolve_model_pack(&["mobileclip-s2-v1".into()], &["mobileclip-s2-v2".into()]).unwrap();
         assert_eq!(newer.name, "mobileclip-s2-v2");
         assert_eq!(newer.source, PackSource::Imported);
 
-        let bundled_newer = resolve_model_pack(
-            &["mobileclip-s2-v2".into()],
-            &["mobileclip-s2-v1".into()],
-        )
-        .unwrap();
+        let bundled_newer =
+            resolve_model_pack(&["mobileclip-s2-v2".into()], &["mobileclip-s2-v1".into()]).unwrap();
         assert_eq!(bundled_newer.source, PackSource::Bundled);
 
-        let tie = resolve_model_pack(
-            &["mobileclip-s2-v1".into()],
-            &["mobileclip-s2-v1".into()],
-        )
-        .unwrap();
+        let tie =
+            resolve_model_pack(&["mobileclip-s2-v1".into()], &["mobileclip-s2-v1".into()]).unwrap();
         assert_eq!(tie.source, PackSource::Imported);
 
         let numeric = resolve_model_pack(

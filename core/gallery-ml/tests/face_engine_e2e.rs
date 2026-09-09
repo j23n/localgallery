@@ -345,7 +345,10 @@ fn a_deleted_sidecar_is_rewritten_without_a_reset() {
     std::fs::remove_file(&sidecar).unwrap();
 
     let summary = f.run();
-    assert_eq!(summary.processed, 1, "a missing sidecar must reopen the row");
+    assert_eq!(
+        summary.processed, 1,
+        "a missing sidecar must reopen the row"
+    );
     assert!(sidecar.exists(), "the sidecar was not rewritten");
     assert_eq!(f.run().processed, 0);
 }

@@ -476,7 +476,13 @@ impl TaggingEngine {
 
     /// One photo, start to finish. Never panics; every failure mode becomes an
     /// [`Outcome`].
-    fn process(&self, item: &WorkItem, tagged_at: &str, force: bool, cancel: &AtomicBool) -> Outcome {
+    fn process(
+        &self,
+        item: &WorkItem,
+        tagged_at: &str,
+        force: bool,
+        cancel: &AtomicBool,
+    ) -> Outcome {
         // Claim first, *then* look at the file. A row this run does not own
         // must not be decoded and must not have a sidecar written for it — the
         // realistic loser is a reset-and-re-enqueue landing between
@@ -560,27 +566,26 @@ impl TaggingEngine {
 
         let model_key = self.pack.embedding_model_key();
         let dim = self.pack.manifest.model.embedding_dim;
-        let (embedding, cache_hit, hash) =
-            if let Some(v) = self.sidecar_clip(path, dim) {
-                self.cache.put_embedding(&probe, &model_key, &v)?;
-                (v, true, probe)
-            } else {
-                match self.cache.embedding(&probe, &model_key)? {
-                    Some(v) if v.len() == dim => (v, true, probe),
-                    _ => {
-                        if cancelled() {
-                            return Ok(None);
-                        }
-                        let (tensor, hash) = self.decode_for_embed(path, &probe)?;
-                        if cancelled() {
-                            return Ok(None);
-                        }
-                        let v = self.encoder.embed(&tensor)?;
-                        self.cache.put_embedding(&hash, &model_key, &v)?;
-                        (v, false, hash)
+        let (embedding, cache_hit, hash) = if let Some(v) = self.sidecar_clip(path, dim) {
+            self.cache.put_embedding(&probe, &model_key, &v)?;
+            (v, true, probe)
+        } else {
+            match self.cache.embedding(&probe, &model_key)? {
+                Some(v) if v.len() == dim => (v, true, probe),
+                _ => {
+                    if cancelled() {
+                        return Ok(None);
                     }
+                    let (tensor, hash) = self.decode_for_embed(path, &probe)?;
+                    if cancelled() {
+                        return Ok(None);
+                    }
+                    let v = self.encoder.embed(&tensor)?;
+                    self.cache.put_embedding(&hash, &model_key, &v)?;
+                    (v, false, hash)
                 }
-            };
+            }
+        };
 
         // Recorded after the fact, so the row names the bytes we actually
         // tagged. Zero rows affected means the row was reset from under us.
@@ -645,16 +650,17 @@ impl TaggingEngine {
     /// on the pinned `vfs.read` + `preprocess` path, hashed from the buffer
     /// that is actually decoded so a rewrite between the probe hash and the
     /// read cannot poison the cache.
-    fn decode_for_embed(&self, path: &str, probe: &[u8; 32]) -> MlResult<(crate::Tensor, [u8; 32])> {
-        if let Some(rgb) =
-            crate::preprocess::host_heic_decode(self.heic_decoder.as_deref(), path)?
+    fn decode_for_embed(
+        &self,
+        path: &str,
+        probe: &[u8; 32],
+    ) -> MlResult<(crate::Tensor, [u8; 32])> {
+        if let Some(rgb) = crate::preprocess::host_heic_decode(self.heic_decoder.as_deref(), path)?
         {
             // ImageIO already caps the long side; this is the backstop if a
             // host decoder ignores its own thumbnail size.
-            let rgb = crate::preprocess::limit_long_side(
-                rgb,
-                crate::preprocess::ANALYSIS_MAX_LONG_SIDE,
-            );
+            let rgb =
+                crate::preprocess::limit_long_side(rgb, crate::preprocess::ANALYSIS_MAX_LONG_SIDE);
             let tensor = crate::preprocess::tensor_from_rgb(path, rgb, &self.preprocess)?;
             return Ok((tensor, *probe));
         }
@@ -963,7 +969,7 @@ mod tests {
     #[test]
     fn inference_sessions_do_not_multiply_the_weights() {
         assert_eq!(INFERENCE_SESSIONS, 1);
-        assert!(INFERENCE_SESSIONS <= MAX_WORKERS);
+        const { assert!(INFERENCE_SESSIONS <= MAX_WORKERS) };
     }
 
     #[test]

@@ -45,12 +45,12 @@ pub mod xml;
 
 pub use error::{MetaError, MetaResult};
 pub use faces::{apply_faces, write_faces, AppliedFaces, Authority, FaceWriteRequest};
+pub use media::{read_image_metadata, read_video_date, ImageMetadata};
+pub use model::{AppliedDimensions, CoreSentinel, FaceRegion, PhotoToolsFields, SidecarView};
 pub use places::{
     apply_places, first_places_tag, is_strict_places_prefix, place_from_parts, places_depth,
     places_path, places_still_needed, write_places, PlaceWriteRequest, PLACES_FINISHED_DEPTH,
 };
-pub use media::{read_image_metadata, read_video_date, ImageMetadata};
-pub use model::{AppliedDimensions, CoreSentinel, FaceRegion, PhotoToolsFields, SidecarView};
 pub use read::read_view;
 pub use regions::{
     bind_claims, named_without_box, parse_decision, Area, FaceDecision, FaceRegionWrite,

@@ -3,7 +3,9 @@
 use gallery_ml::{CacheDb, ClusterRow, ClusterState, FaceThumb};
 
 /// Unlabeled clusters waiting for a name.
-pub fn unlabeled_clusters(cache_db: impl AsRef<std::path::Path>) -> Result<Vec<ClusterRow>, String> {
+pub fn unlabeled_clusters(
+    cache_db: impl AsRef<std::path::Path>,
+) -> Result<Vec<ClusterRow>, String> {
     let db = CacheDb::open(cache_db).map_err(|e| e.to_string())?;
     let rows = db.clusters().map_err(|e| e.to_string())?;
     Ok(rows
@@ -42,7 +44,8 @@ pub fn name_cluster(
     use gallery_vfs::StdVfs;
     use std::sync::Arc;
 
-    let engine = FaceEngine::open(cache_db, pack_dir, Arc::new(StdVfs)).map_err(|e| e.to_string())?;
+    let engine =
+        FaceEngine::open(cache_db, pack_dir, Arc::new(StdVfs)).map_err(|e| e.to_string())?;
     let plan = engine
         .name_cluster(cluster_id, name, None, root_prefix)
         .map_err(|e| e.to_string())?;

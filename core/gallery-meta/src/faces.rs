@@ -320,11 +320,7 @@ impl NormalizedRequest {
         for name in &request.extra_people {
             people.push(normalize_person(name)?);
         }
-        regions.sort_by(|a, b| {
-            a.name
-                .cmp(&b.name)
-                .then_with(|| a.area.to_claim_coords().cmp(&b.area.to_claim_coords()))
-        });
+        regions.sort_by_key(|r| (r.name.clone(), r.area.to_claim_coords()));
         // Two identical regions for one person are one region.
         regions.dedup_by(|a, b| a.name == b.name && a.area == b.area);
         people.sort();
@@ -337,7 +333,7 @@ impl NormalizedRequest {
                 for decision in raw {
                     out.push(normalize_decision(decision)?);
                 }
-                out.sort_by(|a, b| a.to_claim().cmp(&b.to_claim()));
+                out.sort_by_key(FaceDecision::to_claim);
                 out.dedup_by(|a, b| a == b);
                 Some(out)
             }
@@ -821,11 +817,7 @@ fn plan_regions(
             }
         }
     }
-    to_add.sort_by(|a, b| {
-        a.name
-            .cmp(&b.name)
-            .then_with(|| a.area.to_claim_coords().cmp(&b.area.to_claim_coords()))
-    });
+    to_add.sort_by_key(|r| (r.name.clone(), r.area.to_claim_coords()));
     to_add.dedup_by(|a, b| a.name == b.name && a.area == b.area);
 
     owned_claims.sort();

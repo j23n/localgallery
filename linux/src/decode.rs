@@ -108,6 +108,15 @@ fn decode_raster(bytes: &[u8], limits: DecodeLimits) -> Option<image::DynamicIma
     image::DynamicImage::from_decoder(decoder).ok()
 }
 
+fn looks_like_heif(bytes: &[u8]) -> bool {
+    bytes.len() >= 12
+        && &bytes[4..8] == b"ftyp"
+        && matches!(
+            &bytes[8..12],
+            b"heic" | b"heix" | b"mif1" | b"msf1" | b"hevc"
+        )
+}
+
 /// 1×1 JPEG used by decode and XDG-thumbnail tests.
 #[cfg(test)]
 pub fn tests_jpeg() -> &'static [u8] {
@@ -189,13 +198,4 @@ mod tests {
         assert!(DecodeLimits::DEFAULT.allows_compressed(1024));
         assert!(!DecodeLimits::DEFAULT.allows_compressed(0));
     }
-}
-
-fn looks_like_heif(bytes: &[u8]) -> bool {
-    bytes.len() >= 12
-        && &bytes[4..8] == b"ftyp"
-        && matches!(
-            &bytes[8..12],
-            b"heic" | b"heix" | b"mif1" | b"msf1" | b"hevc"
-        )
 }

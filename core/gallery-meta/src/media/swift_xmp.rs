@@ -137,8 +137,12 @@ fn parse_photo_tools_bag(xml: &str, local: &str) -> Vec<String> {
     for prefix in ["photo-tools", "phototools"] {
         let open = format!("<{prefix}:{local}");
         let close = format!("</{prefix}:{local}>");
-        let Some(start) = xml.find(&open) else { continue };
-        let Some(end_rel) = xml[start..].find(&close) else { continue };
+        let Some(start) = xml.find(&open) else {
+            continue;
+        };
+        let Some(end_rel) = xml[start..].find(&close) else {
+            continue;
+        };
         let block = &xml[start..start + end_rel];
         let mut out = Vec::new();
         let mut cursor = 0usize;

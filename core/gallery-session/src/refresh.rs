@@ -12,7 +12,9 @@ pub struct SidecarRefreshPlan {
 }
 
 /// Build a plan from the paths a run wrote.
-pub fn refresh_plan(written_paths: impl IntoIterator<Item = impl Into<String>>) -> SidecarRefreshPlan {
+pub fn refresh_plan(
+    written_paths: impl IntoIterator<Item = impl Into<String>>,
+) -> SidecarRefreshPlan {
     let mut paths: Vec<String> = written_paths.into_iter().map(Into::into).collect();
     paths.sort();
     paths.dedup();

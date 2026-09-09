@@ -61,12 +61,12 @@ pub mod align;
 pub mod cluster;
 pub mod detect;
 pub mod engine;
-pub mod merge_policy;
-pub mod naming;
-/// REMOVE AFTER: one-shot keyword backfill. Delete this line with the file.
-pub mod named_keyword_resync;
 /// REMOVE AFTER: one-shot dismissal backfill. Delete this line with the file.
 pub mod face_decision_resync;
+pub mod merge_policy;
+/// REMOVE AFTER: one-shot keyword backfill. Delete this line with the file.
+pub mod named_keyword_resync;
+pub mod naming;
 pub mod quality;
 
 pub use align::{align_crop, align_tensor, umeyama, ALIGN_VERSION, ARCFACE_TEMPLATE};

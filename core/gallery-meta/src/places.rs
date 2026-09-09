@@ -313,27 +313,28 @@ struct PlacePlan {
     country_code: Option<String>,
 }
 
+/// Location scalars copied from a [`PlaceWriteRequest`].
+struct PlaceScalars {
+    country: Option<String>,
+    state: Option<String>,
+    city: Option<String>,
+    sublocation: Option<String>,
+    country_code: Option<String>,
+}
+
 impl PlacePlan {
-    fn scalars(
-        request: &PlaceWriteRequest,
-    ) -> (
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    ) {
-        (
-            request.country.clone(),
-            request.state.clone(),
-            request.city.clone(),
-            request.sublocation.clone(),
-            request
+    fn scalars(request: &PlaceWriteRequest) -> PlaceScalars {
+        PlaceScalars {
+            country: request.country.clone(),
+            state: request.state.clone(),
+            city: request.city.clone(),
+            sublocation: request.sublocation.clone(),
+            country_code: request
                 .country_code
                 .as_deref()
                 .map(|cc| cc.trim().to_uppercase())
                 .filter(|cc| cc.len() == 2),
-        )
+        }
     }
 
     fn build(view: &SidecarView, path: &str, request: &PlaceWriteRequest) -> PlacePlan {
@@ -362,7 +363,13 @@ impl PlacePlan {
             vec![lr]
         };
 
-        let (country, state, city, sublocation, country_code) = Self::scalars(request);
+        let PlaceScalars {
+            country,
+            state,
+            city,
+            sublocation,
+            country_code,
+        } = Self::scalars(request);
         PlacePlan {
             tags_to_add,
             tags_to_remove: vec![],

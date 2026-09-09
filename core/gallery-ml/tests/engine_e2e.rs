@@ -439,11 +439,7 @@ fn a_pack_bump_replaces_objects_and_scenes() {
     .unwrap();
     engine.enqueue(&f.paths(&["gradient.jpg"])).unwrap();
     engine
-        .run_with_options(
-            &NoProgress,
-            &AtomicBool::new(false),
-            &run_options(),
-        )
+        .run_with_options(&NoProgress, &AtomicBool::new(false), &run_options())
         .unwrap();
     let view = gallery_meta::read_view(&f.sidecar_bytes("gradient.jpg")).unwrap();
     assert_eq!(
@@ -461,11 +457,7 @@ fn a_pack_bump_replaces_objects_and_scenes() {
     .unwrap();
     engine.enqueue(&f.paths(&["gradient.jpg"])).unwrap();
     engine
-        .run_with_options(
-            &NoProgress,
-            &AtomicBool::new(false),
-            &run_options(),
-        )
+        .run_with_options(&NoProgress, &AtomicBool::new(false), &run_options())
         .unwrap();
     assert!(
         f.tags("gradient.jpg").is_empty(),
@@ -529,11 +521,7 @@ fn a_photo_with_no_tags_still_gets_a_version_stamp() {
     .unwrap();
     engine.enqueue(&f.paths(PHOTOS)).unwrap();
     let summary = engine
-        .run_with_options(
-            &NoProgress,
-            &AtomicBool::new(false),
-            &run_options(),
-        )
+        .run_with_options(&NoProgress, &AtomicBool::new(false), &run_options())
         .unwrap();
 
     assert_eq!(summary.processed, PHOTOS.len());
@@ -547,7 +535,9 @@ fn a_photo_with_no_tags_still_gets_a_version_stamp() {
             Some(engine.pack().version())
         );
         assert!(
-            view.tags_list.iter().all(|t| !gallery_meta::is_content_tag(t)),
+            view.tags_list
+                .iter()
+                .all(|t| !gallery_meta::is_content_tag(t)),
             "{name}: {view:?}"
         );
     }
@@ -569,11 +559,7 @@ fn an_empty_result_still_retracts_tags_from_an_existing_sidecar() {
     .unwrap();
     engine.enqueue(&f.paths(&["gradient.jpg"])).unwrap();
     engine
-        .run_with_options(
-            &NoProgress,
-            &AtomicBool::new(false),
-            &run_options(),
-        )
+        .run_with_options(&NoProgress, &AtomicBool::new(false), &run_options())
         .unwrap();
 
     assert!(
@@ -1374,7 +1360,10 @@ fn a_deleted_sidecar_is_rewritten_without_a_reset() {
     std::fs::remove_file(f.dir.path().join("gradient.jpg.xmp")).unwrap();
 
     let summary = f.run();
-    assert_eq!(summary.processed, 1, "a missing sidecar must reopen the row");
+    assert_eq!(
+        summary.processed, 1,
+        "a missing sidecar must reopen the row"
+    );
     assert_eq!(summary.sidecars_written, 1);
     assert_eq!(f.tags("gradient.jpg"), expected_tags()["gradient.jpg"]);
     assert_eq!(f.run().processed, 0);

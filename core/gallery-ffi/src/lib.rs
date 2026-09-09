@@ -35,9 +35,9 @@ pub mod tagging;
 
 pub use faces::{
     face_merge_direction, ClusterState, ClusterSummary, FaceAssignKind, FaceAssignmentRecord,
-    FaceError, FaceFailure, FaceLibraryStats, FaceMergeCandidate, FaceMergeDecision, FacePhotoRecord,
-    FaceProgressListener, FaceRef, FaceRunSummary, FaceSession, FaceStats, ReclusterSummary,
-    SidecarWriteReport,
+    FaceError, FaceFailure, FaceLibraryStats, FaceMergeCandidate, FaceMergeDecision,
+    FacePhotoRecord, FaceProgressListener, FaceRef, FaceRunSummary, FaceSession, FaceStats,
+    ReclusterSummary, SidecarWriteReport,
 };
 pub use heic::{HeicDecodeError, HeicDecoder, HeicPixels};
 pub use library::{
@@ -46,22 +46,23 @@ pub use library::{
     MemoryContact, MemoryDateEntry, MemoryGenerationInputs, MemoryGenerator, MemoryKind,
     MemoryLeafFolder, MemoryPersonLink, MemoryRecord, ScheduledMemoryRecord, TagSuggestionRecord,
 };
-pub use scanner::{
-    load_snapshot, named_people_without_box, parse_xmp_bytes, probe_snapshot_version,
-    read_image_metadata, read_sidecar, read_video_date,
-    save_snapshot, snapshot_version, ImageMetadataRecord, ProviderProbe, ScanContentVersion,
-    ScanError, ScanFolderNode, ScanLocality, ScanOutcomeRecord, ScanPhoto, ScanProgressListener,
-    ScanRegion, ScanRequest, ScanSidecarRow, ScanTag, ScanTimings, ScannerSession,
-    SidecarParseRecord, SidecarViewRecord, SnapshotRecord, VfsProviderAttrs, WallClock,
-};
 pub use places::{
     is_strict_places_prefix, library_watch_refresh_interval_ms, nominatim_lookup, place_from_parts,
     places_needed, places_path, places_still_needed, write_places, GeoError, PlaceWrite,
     PlacesError,
 };
+pub use scanner::{
+    load_snapshot, named_people_without_box, parse_xmp_bytes, probe_snapshot_version,
+    read_image_metadata, read_sidecar, read_video_date, save_snapshot, snapshot_version,
+    ImageMetadataRecord, ProviderProbe, ScanContentVersion, ScanError, ScanFolderNode,
+    ScanLocality, ScanOutcomeRecord, ScanPhoto, ScanProgressListener, ScanRegion, ScanRequest,
+    ScanSidecarRow, ScanTag, ScanTimings, ScannerSession, SidecarParseRecord, SidecarViewRecord,
+    SnapshotRecord, VfsProviderAttrs, WallClock,
+};
 pub use tagging::{
-    inspect_model_pack, resolve_model_pack, ModelPackInfo, PackResolution, PackSource, TaggingError,
-    TaggingFailure, TaggingProgressListener, TaggingRunSummary, TaggingSession, TaggingStats,
+    inspect_model_pack, resolve_model_pack, ModelPackInfo, PackResolution, PackSource,
+    TaggingError, TaggingFailure, TaggingProgressListener, TaggingRunSummary, TaggingSession,
+    TaggingStats,
 };
 
 /// Version of the Rust core, for logging and "is the framework I linked the

@@ -1,49 +1,113 @@
-name: Build IPA
+name: Validate Archive
 
+# Tagged "Build IPA" workflow, converted to unsigned archive validation only.
+# No IPA is assembled, uploaded, or published. Release tokens are not used.
 on:
   push:
     tags:
       - "v*"
-  pull_request:
-    branches:
-      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-archive-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  LANG: en_US.UTF-8
+  LC_ALL: en_US.UTF-8
+  LANGUAGE: en_US:en
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_VERSION: "1.97.1"
+
+defaults:
+  run:
+    shell: bash --noprofile --norc -euo pipefail {0}
 
 jobs:
-  build:
+  tests:
+    name: Required tests
+    uses: ./.github/workflows/test.yml
+    permissions:
+      contents: read
+
+  validate-archive:
+    name: Unsigned archive validation
+    needs: tests
     runs-on: macos-26
+    env:
+      LANG: en_US.UTF-8
+      LC_ALL: en_US.UTF-8
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          fetch-depth: 0
 
       - name: Select latest Xcode
-        uses: maxim-lobanov/setup-xcode@v1
+        uses: maxim-lobanov/setup-xcode@v1.6.1
         with:
           xcode-version: latest-stable
+
+      - name: Rust toolchain (iOS targets)
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: aarch64-apple-darwin,aarch64-apple-ios,aarch64-apple-ios-sim
 
       - name: Install XcodeGen
         run: brew install xcodegen
 
+      - name: Stage model pack (optional)
+        run: /bin/bash scripts/prepare_pack.sh --optional
+
+      - name: Build Rust bindings and xcframework (release)
+        run: /bin/bash scripts/build_core.sh --release
+
       - name: Generate Xcode project
         run: xcodegen
 
-      - name: Build
+      - name: Confirm build number is not a shallow count
+        run: |
+          [[ "$(git rev-parse --is-shallow-repository)" == "false" ]]
+          COUNT="$(git rev-list --count HEAD)"
+          echo "CFBundleVersion candidate: ${COUNT}"
+          [[ "${COUNT}" -ge 1 ]]
+
+      - name: Archive (unsigned, not exported)
         run: |
           xcodebuild archive \
             -project LocalGallery.xcodeproj \
             -scheme LocalGallery \
             -destination "generic/platform=iOS" \
             -archivePath build/LocalGallery.xcarchive \
+            -resultBundlePath ArchiveResults.xcresult \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_ALLOWED=NO \
+            | tee xcodebuild-archive.log
 
-      - name: Create IPA
+      - name: Validate archive layout
         run: |
-          mkdir -p build/Payload
-          cp -r build/LocalGallery.xcarchive/Products/Applications/LocalGallery.app build/Payload/
-          cd build && zip -r LocalGallery.ipa Payload
+          APP="build/LocalGallery.xcarchive/Products/Applications/LocalGallery.app"
+          [[ -d "${APP}" ]]
+          [[ -f "${APP}/Info.plist" ]]
+          # Fail if an IPA was produced — this workflow must not publish one.
+          if compgen -G "build/*.ipa" > /dev/null; then
+            echo "error: IPA present; this workflow is validation-only" >&2
+            exit 1
+          fi
+          echo "unsigned archive ok: ${APP}"
 
-      - name: Upload IPA to release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+      - name: Upload archive logs
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
-          files: build/LocalGallery.ipa
+          name: archive-validation-logs
+          path: |
+            xcodebuild-archive.log
+            ArchiveResults.xcresult
+          if-no-files-found: warn
+          retention-days: 14

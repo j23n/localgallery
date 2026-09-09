@@ -228,7 +228,7 @@ build_and_merge() {
     rm -f "$built_dir/$LIB_NAME" "$built_dir/$DYLIB_NAME"
 
     echo "==> cargo build ($PROFILE, $target)"
-    (cd "$CORE_DIR" && cargo build -p gallery-ffi --target "$target" --profile "$CARGO_PROFILE")
+    (cd "$CORE_DIR" && cargo build --locked -p gallery-ffi --target "$target" --profile "$CARGO_PROFILE")
 
     static_lib="$built_dir/$LIB_NAME"
     [[ -f "$static_lib" ]] || { echo "error: $static_lib missing after build" >&2; exit 1; }
@@ -239,7 +239,7 @@ build_and_merge() {
     if ! assert_staticlib_has_dylib_uniffi "$static_lib" "$built_dir/$DYLIB_NAME"; then
         echo "==> cargo clean -p gallery-ffi ($target) and rebuild"
         (cd "$CORE_DIR" && cargo clean -p gallery-ffi --target "$target")
-        (cd "$CORE_DIR" && cargo build -p gallery-ffi --target "$target" --profile "$CARGO_PROFILE")
+        (cd "$CORE_DIR" && cargo build --locked -p gallery-ffi --target "$target" --profile "$CARGO_PROFILE")
         assert_staticlib_has_dylib_uniffi "$static_lib" "$built_dir/$DYLIB_NAME" || exit 1
     fi
 
@@ -314,7 +314,7 @@ if [[ -z "$BINDGEN_DYLIB" ]]; then
     exit 1
 fi
 echo "    bindgen library: $BINDGEN_DYLIB"
-(cd "$CORE_DIR" && cargo run --quiet -p uniffi-bindgen --bin uniffi-bindgen-swift -- \
+(cd "$CORE_DIR" && cargo run --locked --quiet -p uniffi-bindgen --bin uniffi-bindgen-swift -- \
     --swift-sources --headers --modulemap \
     --module-name "${MODULE}FFI" \
     --modulemap-filename module.modulemap \

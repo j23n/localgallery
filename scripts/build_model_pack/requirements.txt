@@ -13,8 +13,10 @@
 # tags below are the ones PyPI resolved for 3.14.
 
 # --- the encoder and its export path --------------------------------------
-torch==2.13.0
-torchvision==0.28.0          # open_clip's preprocessing transforms
+# torchvision 0.28.0 is CVE-2026-65918 (GIF decoder OOB read). 0.29.0 is the
+# first PyPI release past that advisory and requires torch 2.14.0.
+torch==2.14.0
+torchvision==0.29.0          # open_clip's preprocessing transforms; CVE-2026-65918
 open_clip_torch==3.3.0       # MobileCLIP-S2 config, weights fetch, tokenizer
 timm==1.0.28                 # fastvit_mci2 trunk + reparameterize_model
 onnx==1.22.0

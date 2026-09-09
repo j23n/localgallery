@@ -13,6 +13,24 @@ set -euo pipefail
 export PATH="/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin:${PATH:-}"
 
 ROOT="${SRCROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+
+# `git rev-list --count HEAD` on a shallow clone is the graft depth (often 1),
+# not the commit count used as CFBundleVersion. CI must checkout with
+# fetch-depth: 0. If we still see a shallow repo, deepen before counting.
+if [[ "$(git -C "$ROOT" rev-parse --is-shallow-repository 2>/dev/null || echo true)" == "true" ]]; then
+    echo "warning: shallow history; deepening so CFBundleVersion is the commit count" >&2
+    if ! git -C "$ROOT" fetch --unshallow --quiet \
+        && ! git -C "$ROOT" fetch --deepen=2147483647 --quiet; then
+        echo "error: git history is still shallow; checkout with fetch-depth: 0" >&2
+        echo "       so \`git rev-list --count HEAD\` is the real build number" >&2
+        exit 1
+    fi
+    if [[ "$(git -C "$ROOT" rev-parse --is-shallow-repository)" == "true" ]]; then
+        echo "error: git history is still shallow after fetch; refusing to stamp CFBundleVersion=1" >&2
+        exit 1
+    fi
+fi
+
 BUILD="$(git -C "$ROOT" rev-list --count HEAD)"
 if [[ -z "$BUILD" ]]; then
     echo "error: git rev-list --count HEAD returned empty" >&2

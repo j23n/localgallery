@@ -5,20 +5,275 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_call:
+
+# Least privilege. Jobs that only read the repo and upload logs need this.
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  LANG: en_US.UTF-8
+  LC_ALL: en_US.UTF-8
+  LANGUAGE: en_US:en
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_VERSION: "1.97.1"
+  # cargo-audit release used by the audit job (crates.io, --locked).
+  CARGO_AUDIT_VERSION: "0.22.1"
+
+defaults:
+  run:
+    shell: bash --noprofile --norc -euo pipefail {0}
 
 jobs:
-  test:
-    runs-on: macos-26
+  rustfmt:
+    name: rustfmt
+    runs-on: ubuntu-24.04
+    env:
+      # Host std only — core/rust-toolchain.toml also lists Apple targets.
+      RUSTUP_TOOLCHAIN: "1.97.1"
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt
+
+      - name: cargo fmt --check (core)
+        working-directory: core
+        run: cargo fmt --all --check
+
+      - name: cargo fmt --check (linux)
+        working-directory: linux
+        run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-24.04
+    env:
+      RUSTUP_TOOLCHAIN: "1.97.1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: clippy
+
+      - name: OS dependencies (OpenSSL, GTK)
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            libgtk-4-dev \
+            libadwaita-1-dev \
+            libgdk-pixbuf-2.0-dev \
+            locales
+          sudo locale-gen en_US.UTF-8
+
+      - name: cargo clippy (core)
+        working-directory: core
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: cargo clippy (linux)
+        working-directory: linux
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+  core-test:
+    name: core tests
+    runs-on: ubuntu-24.04
+    env:
+      RUSTUP_TOOLCHAIN: "1.97.1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      - name: OS dependencies (OpenSSL)
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            locales
+          sudo locale-gen en_US.UTF-8
+
+      - name: cargo test --locked --workspace
+        working-directory: core
+        run: cargo test --locked --workspace --all-targets 2>&1 | tee "${GITHUB_WORKSPACE}/core-test.log"
+
+      - name: Upload cargo test logs
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: core-test-logs
+          path: core-test.log
+          if-no-files-found: warn
+          retention-days: 7
+
+  linux-test:
+    name: linux headless tests
+    runs-on: ubuntu-24.04
+    env:
+      RUSTUP_TOOLCHAIN: "1.97.1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      - name: OS dependencies (OpenSSL, GTK)
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            libgtk-4-dev \
+            libadwaita-1-dev \
+            libgdk-pixbuf-2.0-dev \
+            locales
+          sudo locale-gen en_US.UTF-8
+
+      - name: cargo test --locked --no-default-features
+        working-directory: linux
+        run: cargo test --locked --no-default-features --all-targets 2>&1 | tee "${GITHUB_WORKSPACE}/linux-test.log"
+
+      - name: cargo check --locked --features ui
+        working-directory: linux
+        run: cargo check --locked --features ui 2>&1 | tee -a "${GITHUB_WORKSPACE}/linux-test.log"
+
+      - name: Upload linux test logs
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: linux-test-logs
+          path: linux-test.log
+          if-no-files-found: warn
+          retention-days: 7
+
+  shellcheck:
+    name: shell checks
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends shellcheck
+
+      - name: shellcheck scripts
+        run: |
+          mapfile -t scripts < <(find scripts -type f -name '*.sh' | sort)
+          shellcheck --severity=warning "${scripts[@]}"
+
+      - name: prepare_pack smoke tests
+        run: /bin/bash scripts/tests/prepare_pack_smoke.sh
+
+      - name: Upload shellcheck / smoke output
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: shellcheck-logs
+          path: scripts/tests
+          if-no-files-found: ignore
+          retention-days: 7
+
+  audit:
+    name: dependency audit
+    runs-on: ubuntu-24.04
+    env:
+      RUSTUP_TOOLCHAIN: "1.97.1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked --version "${CARGO_AUDIT_VERSION}" --force
+
+      - name: cargo audit (core)
+        working-directory: core
+        run: cargo audit --file Cargo.lock
+
+      - name: cargo audit (linux)
+        working-directory: linux
+        run: cargo audit --file Cargo.lock
+
+      - name: Verify model-pack requirement hashes
+        run: python3 scripts/build_model_pack/lock_requirements.py --check
+
+      - name: Verify taxonomy provenance pin
+        run: python3 scripts/build_model_pack/lock_taxonomy.py --check
+
+      - name: Upload audit logs
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: audit-logs
+          path: |
+            core/Cargo.lock
+            linux/Cargo.lock
+            scripts/build_model_pack/requirements.lock
+            scripts/build_model_pack/taxonomy.lock.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  ios-test:
+    name: iOS simulator tests
+    runs-on: macos-26
+    env:
+      LANG: en_US.UTF-8
+      LC_ALL: en_US.UTF-8
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          # set_build_number.sh stamps CFBundleVersion from `git rev-list --count`.
+          fetch-depth: 0
+
+      - name: Rust toolchain (iOS targets)
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt, clippy
+          targets: aarch64-apple-darwin,aarch64-apple-ios,aarch64-apple-ios-sim
 
       - name: Show toolchain
         run: |
           xcodebuild -version
-          xcrun simctl list devices available iPhone
+          rustc --version
+          cargo --version
+          git rev-parse --is-shallow-repository
+          git rev-list --count HEAD
 
       - name: Install XcodeGen
         run: brew install xcodegen
+
+      # Clean-checkout order: optional pack (xcodegen needs build/pack), then
+      # Rust bindings/xcframework, then xcodegen. A missing pack is not fatal
+      # here — BundledModelPackTests skip; `--no-pack` is the never-stage form.
+      - name: Stage model pack (optional)
+        run: /bin/bash scripts/prepare_pack.sh --optional
+
+      - name: Build Rust bindings and xcframework
+        run: /bin/bash scripts/build_core.sh
 
       - name: Generate Xcode project
         run: xcodegen
@@ -33,6 +288,7 @@ jobs:
                      | map(select(.name | startswith("iPhone")))
                      | sort_by(.name) | reverse | .[0].name')
           echo "device_name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "using simulator: $NAME"
 
       - name: Run tests
         run: |
@@ -40,7 +296,21 @@ jobs:
             -project LocalGallery.xcodeproj \
             -scheme LocalGallery \
             -destination "platform=iOS Simulator,name=${{ steps.pick.outputs.device_name }}" \
+            -testLanguage en \
+            -testRegion US \
+            -resultBundlePath TestResults.xcresult \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
-          | tee xcodebuild.log
+            | tee xcodebuild.log
+
+      - name: Upload logs and results
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: ios-test-logs
+          path: |
+            xcodebuild.log
+            TestResults.xcresult
+          if-no-files-found: warn
+          retention-days: 14

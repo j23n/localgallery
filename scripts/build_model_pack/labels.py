@@ -47,6 +47,8 @@ bare-leaf variants.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from pathlib import Path
 
@@ -60,6 +62,11 @@ import yaml
 DEFAULT_PHOTO_TOOLS = Path(__file__).resolve().parents[3] / "photo-tools"
 
 MAPPING_RELPATH = Path("src/photo_tools/data/ram_tag_mapping.yaml")
+
+#: Pinned path list + hashes. Not the yaml (and not pack binaries) — a drift
+#: in photo-tools must fail here rather than silently change embeddings.
+TAXONOMY_LOCK = Path(__file__).with_name("taxonomy.lock.json")
+TAXONOMY_PATHS_FILE = Path(__file__).with_name("taxonomy_paths.txt")
 
 #: Only these two roots are zero-shot-taggable. `People/*` is face recognition
 #: (Phase 2) and both `gallery-meta` and the pack loader refuse it; `Landmarks/*`
@@ -171,7 +178,7 @@ def mapping_path(photo_tools_root: Path | None = None) -> Path:
     return root / MAPPING_RELPATH
 
 
-def taxonomy_paths(photo_tools_root: Path | None = None) -> list[str]:
+def taxonomy_paths(photo_tools_root: Path | None = None, *, verify: bool = True) -> list[str]:
     """Every distinct `Objects/*` / `Scenes/*` target path, sorted."""
     src = mapping_path(photo_tools_root)
     with open(src) as f:
@@ -193,7 +200,38 @@ def taxonomy_paths(photo_tools_root: Path | None = None) -> list[str]:
             # cannot key against `roots`.
             pass
         paths.add(path)
-    return sorted(paths)
+    ordered = sorted(paths)
+    if verify:
+        _verify_taxonomy_pin(ordered)
+    return ordered
+
+
+def _verify_taxonomy_pin(paths: list[str]) -> None:
+    """Refuse a mapping that does not match the committed path pin."""
+    if not TAXONOMY_PATHS_FILE.is_file():
+        return
+    expected = [line for line in TAXONOMY_PATHS_FILE.read_text().splitlines() if line]
+    if paths != expected:
+        extra = sorted(set(paths) - set(expected))
+        missing = sorted(set(expected) - set(paths))
+        raise ValueError(
+            f"taxonomy paths drifted from {TAXONOMY_PATHS_FILE.name} "
+            f"(got {len(paths)}, pinned {len(expected)}; "
+            f"extra={extra[:8]!r} missing={missing[:8]!r})"
+        )
+    if not TAXONOMY_LOCK.is_file():
+        return
+    lock = json.loads(TAXONOMY_LOCK.read_text())
+    derived = lock.get("derived", {})
+    digest = hashlib.sha256("".join(p + "\n" for p in paths).encode()).hexdigest()
+    pinned = derived.get("taxonomy_paths_sha256")
+    if pinned and digest != pinned:
+        raise ValueError(
+            f"{TAXONOMY_PATHS_FILE.name} sha256 {digest} != lock {pinned}"
+        )
+    count = derived.get("label_count")
+    if count is not None and len(paths) != count:
+        raise ValueError(f"label count {len(paths)} != lock {count}")
 
 
 def build_labels(photo_tools_root: Path | None = None) -> list[dict[str, str]]:

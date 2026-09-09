@@ -1,0 +1,16 @@
+{
+  "comment": "Provenance pin for the zero-shot label set. Paths are derived from photo-tools src/photo_tools/data/ram_tag_mapping.yaml (Objects/* and Scenes/*). The yaml itself is not vendored. taxonomy_paths.txt is the deterministic path list; labels.py refuses a mapping that drifts. labels_json_sha256 is the hash of the last pack's labels.json (schema/dim/path/prompt), produced with sort_keys JSON.",
+  "derived": {
+    "label_count": 2386,
+    "label_embeddings_sha256": "438d3add6db66a8c7fc0cfe4ec21c4792c1b339ccf9e84131c10aa5d5a15484a",
+    "labels_json_sha256": "6a4e0af974af5b36dc82d7803ed6a604d66c4929843b7a51615d54d660f30c8f",
+    "pack_version": "mobileclip-s2-v1",
+    "taxonomy_paths_file": "taxonomy_paths.txt",
+    "taxonomy_paths_sha256": "18443b1094c6a05ba186bc8c9fb13568599882d5ce957ff9cb611a4d67551225"
+  },
+  "source": {
+    "note": "Public clone was not resolvable from this environment; pin the git commit locally with lock_taxonomy.py when a checkout exists.",
+    "path": "src/photo_tools/data/ram_tag_mapping.yaml",
+    "repository": "https://github.com/j23n/photo-tools"
+  }
+}

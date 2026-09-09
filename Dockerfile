@@ -33,7 +33,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
     UV_INSTALL_DIR=/usr/local/bin \
     PATH=/usr/local/cargo/bin:${PATH} \
     RUST_VERSION=1.97.1 \
-    RUSTUP_TOOLCHAIN=1.97.1
+    RUSTUP_TOOLCHAIN=1.97.1 \
+    LANG=en_US.UTF-8 \
+    LC_ALL=en_US.UTF-8 \
+    LANGUAGE=en_US:en
 
 # RUSTUP_TOOLCHAIN pins rustup to the host std. Without it, `cd core && cargo`
 # would read rust-toolchain.toml and try to download the Apple targets.
@@ -64,6 +67,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libgtk-4-dev \
         libadwaita-1-dev \
         libgdk-pixbuf-2.0-dev \
+        locales \
+        shellcheck \
+    && sed -i 's/^# *\(en_US.UTF-8 UTF-8\)/\1/' /etc/locale.gen \
+    && locale-gen \
     && ln -sf "$(command -v fdfind)" /usr/local/bin/fd \
     && rm -rf /var/lib/apt/lists/*
 

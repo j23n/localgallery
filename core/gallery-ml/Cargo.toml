@@ -39,7 +39,7 @@ heif-oxide = "=0.1.0"
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 
 # `download-binaries` fetches pyke's prebuilt static onnxruntime (including
 # `aarch64-apple-ios` and `aarch64-apple-ios-sim`) at build time; `tls-native`

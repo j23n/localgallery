@@ -15,6 +15,8 @@
 //! - **An extension-less file is skipped**, because `UTType(filenameExtension: "")`
 //!   is nil, not because anything looked at its bytes.
 
+use std::collections::HashMap;
+
 use gallery_model::file_url::{extension_lowercased, stem};
 
 /// Extensions `UTType` reports as conforming to `public.image`.
@@ -155,6 +157,27 @@ pub fn sidecar_owner_key(sidecar_name: &str) -> String {
     stem(sidecar_name).to_lowercase()
 }
 
+/// Lightroom / Capture One spelling: `<stem>.xmp` keys on the lowercased stem
+/// only (`IMG_1234.heic` → `img_1234`). Distinct from [`sidecar_key`], which
+/// is the canonical `<basename>.xmp` form. The scanner prefers the canonical
+/// row when both sit beside the photo.
+pub fn sidecar_alt_key(photo_name: &str) -> String {
+    stem(photo_name).to_lowercase()
+}
+
+/// Sidecar listing row for `photo_name`: canonical `<basename>.xmp` first,
+/// then the Lightroom `<stem>.xmp`. `None` when neither spelling is present.
+pub fn sidecar_for<'a, T>(photo_name: &str, sidecars: &'a HashMap<String, T>) -> Option<&'a T> {
+    if let Some(row) = sidecars.get(&sidecar_key(photo_name)) {
+        return Some(row);
+    }
+    let alt = sidecar_alt_key(photo_name);
+    if alt == sidecar_key(photo_name) {
+        return None;
+    }
+    sidecars.get(&alt)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,5 +296,21 @@ mod tests {
         );
         assert_eq!(sidecar_key("B.JPG"), "b.jpg");
         assert_eq!(sidecar_owner_key("B.JPG.xmp"), "b.jpg");
+    }
+
+    #[test]
+    fn lightroom_sidecars_key_on_the_stem_and_lose_to_the_canonical_form() {
+        assert_eq!(sidecar_alt_key("IMG_1234.heic"), "img_1234");
+        assert_eq!(sidecar_owner_key("IMG_1234.xmp"), "img_1234");
+        assert_eq!(sidecar_alt_key("B.JPG"), "b");
+        assert_eq!(sidecar_owner_key("B.xmp"), "b");
+
+        let mut rows = HashMap::new();
+        rows.insert(sidecar_owner_key("a.jpg.xmp"), "canonical");
+        rows.insert(sidecar_owner_key("a.xmp"), "lightroom");
+        assert_eq!(sidecar_for("a.jpg", &rows).copied(), Some("canonical"));
+        rows.remove("a.jpg");
+        assert_eq!(sidecar_for("a.jpg", &rows).copied(), Some("lightroom"));
+        assert_eq!(sidecar_for("a.png", &rows).copied(), Some("lightroom"));
     }
 }

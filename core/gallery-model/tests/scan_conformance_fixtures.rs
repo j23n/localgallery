@@ -330,7 +330,7 @@ fn metadata_fixture_still_records_the_known_oddities() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn scanner_fixture_deserializes_and_pins_the_light_scan_blind_spot() {
+fn scanner_fixture_deserializes_and_pins_listing_backed_light_scans() {
     let dump = json("scanner_conformance.json");
     assert_eq!(dump["schema"], 1);
     let passes = dump["passes"].as_array().expect("passes");
@@ -353,9 +353,11 @@ fn scanner_fixture_deserializes_and_pins_the_light_scan_blind_spot() {
             .collect()
     };
 
-    // Light never notices a change to a file it already knows; full does.
-    assert!(!strings(&passes[1]["modifiedPaths"]).contains(&"a.jpg".to_string()));
+    // Light and full both notice a listing size/mtime change. A same-size,
+    // same-mtime rewrite stays invisible because neither kind hashes content.
+    assert!(strings(&passes[1]["modifiedPaths"]).contains(&"a.jpg".to_string()));
     assert!(strings(&passes[2]["modifiedPaths"]).contains(&"a.jpg".to_string()));
+    assert!(strings(&passes[3]["modifiedPaths"]).contains(&"a.jpg".to_string()));
 
     // A same-size, same-mtime rewrite is invisible to both.
     for p in passes {

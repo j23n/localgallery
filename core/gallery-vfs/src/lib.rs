@@ -91,10 +91,13 @@ pub struct Stat {
 
 /// What a directory entry *is*.
 ///
-/// Symlinks are reported as [`EntryKind::Symlink`] rather than resolved: the
-/// scanner classifies by extension and never follows a link into a second
-/// subtree, and a resolved-then-followed link is how a traversal ends up in a
-/// cycle.
+/// Symlinks are reported as [`EntryKind::Symlink`] rather than resolved.
+///
+/// The scanner treats that split as policy, not decoration: a **file**
+/// symlink is still a photo (size and mtime follow the target), and the
+/// selected root may itself be a symlink, but a **directory** symlink is
+/// never descended. Following one is how a walk leaves the selected root
+/// or closes a cycle.
 ///
 /// The *kind* is the only thing that stays unresolved. An entry's size and
 /// timestamps come from the link's target — see [`Entry::size`].

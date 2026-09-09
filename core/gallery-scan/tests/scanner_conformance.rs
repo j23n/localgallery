@@ -11,9 +11,10 @@
 //! | `3-full-after-mutations` | full | pass 1 | mutated, `Locked/` chmod 000 |
 //! | `4-light-after-unlock` | light | pass 1 | mutated, `Locked/` readable |
 //!
-//! Passes 2 and 3 differ in `reuse_cached` and in nothing else, which is what
-//! makes the light-scan blind spot legible: `a.jpg` is rewritten bigger and
-//! newer and only the full pass reports it.
+//! Passes 2 and 3 differ in `reuse_cached` and in nothing else. Both now
+//! report `a.jpg` as modified: the light pass compares listing size/mtime
+//! against the cache instead of substituting cached stats. A same-size
+//! same-mtime rewrite (`Unicode/emoji cactus.jpg`) stays invisible.
 //!
 //! Nothing here compares an absolute path or a UUID. Paths are relative to the
 //! library root; ids are re-derived from the real absolute path and only the

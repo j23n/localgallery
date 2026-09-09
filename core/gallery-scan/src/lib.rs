@@ -18,13 +18,13 @@
 //!
 //! # What is pinned here rather than decided here
 //!
-//! The conformance fixtures in `core/fixtures/scan-conformance/` are the spec,
-//! generated from the shipping Swift implementation. Several of the behaviours
-//! this crate reproduces are bugs — the light-scan blind spot, a standalone
-//! video's lowercased filename, videos never getting a sidecar row. They are
-//! reproduced deliberately. `tests/scanner_conformance.rs` runs the same four
-//! passes the Swift harness ran and compares every field; the module docs on
-//! [`scan`] explain each one where it happens.
+//! The conformance fixtures in `core/fixtures/scan-conformance/` are the spec.
+//! Several pinned oddities remain — a standalone video's lowercased filename,
+//! videos never getting a sidecar row, same-size/same-mtime rewrites staying
+//! invisible. Light scans now compare listing size and mtime against the cache
+//! rather than substituting cached stats. `tests/scanner_conformance.rs` runs
+//! the same four passes and compares every field; the module docs on [`scan`]
+//! explain each one where it happens.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

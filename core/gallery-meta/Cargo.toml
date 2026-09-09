@@ -13,7 +13,7 @@ gallery-vfs = { path = "../gallery-vfs" }
 # EXIF, and a patch bump that changed a rational-to-float rounding would move
 # GPS coordinates in one of them only.
 kamadak-exif = "=0.6.1"
-quick-xml = "0.41"
+quick-xml = "0.42"
 unicode-normalization = "0.1"
 
 [dev-dependencies]

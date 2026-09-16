@@ -32,5 +32,5 @@ numpy==2.5.1
 pillow==12.3.0
 
 # --- validation only (parity.py, reference_images.py) ---------------------
-onnxruntime==1.28.0          # the Python-side ONNX encoder, for parity
+onnxruntime==1.30.0          # the Python-side ONNX encoder, for parity
 scikit-image==0.26.0         # the real-photograph reference set

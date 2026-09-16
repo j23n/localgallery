@@ -28,7 +28,7 @@ onnxscript==0.7.1            # torch.onnx.export's opset library
 
 # --- taxonomy, tensors, images --------------------------------------------
 PyYAML==6.0.3                # reads photo-tools' ram_tag_mapping.yaml
-numpy==2.5.1
+numpy==2.5.3
 pillow==12.3.0
 
 # --- validation only (parity.py, reference_images.py) ---------------------
